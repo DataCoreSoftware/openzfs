@@ -75,6 +75,7 @@
 #include <sys/unistd.h>
 #include <sys/zfs_windows.h>
 #include <sys/kstat.h>
+#include <sys/zvol_os.h>
 
 PDEVICE_OBJECT ioctlDeviceObject = NULL;
 PDEVICE_OBJECT fsDiskDeviceObject = NULL;
@@ -5599,6 +5600,15 @@ pnp_query_di(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 			PCHAR vendorUniqueId = (PCHAR)IrpSp->Parameters.QueryInterface.InterfaceSpecificData;
 			zv = zvol_name2zvolState(&vendorUniqueId[8],
 			    &openCount);
+			if (zv) {
+				zvol_state_t *pzv = (zvol_state_t *)zv;
+				TraceEvent(TRACE_INFO, "%s:%d: query DI "
+				    "interface for zvol:%s, size:%llu, "
+				    "lun_id:%d, target_id:%d",
+				    __func__, __LINE__, pzv->zv_name,
+				    pzv->zv_volsize, pzv->zv_zso->zso_lun_id,
+				    pzv->zv_zso->zso_target_id);
+			}
 			// check that the minor number is non-zero: that
 			// signifies the zvol has fully completed its
 			// bringup phase.
@@ -5628,5 +5638,9 @@ pnp_query_di(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 	}
 	else
 		status = STATUS_NOT_IMPLEMENTED;
+
+	TraceEvent(TRACE_INFO, "%s:%d: Returning status 0x%x\n",
+	    __func__, __LINE__, status);
+
 	return (status);
 }

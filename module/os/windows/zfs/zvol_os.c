@@ -633,6 +633,12 @@ zvol_os_attach(char *name)
 		if (error == 0) {
 			wzvol_assign_targetid(zv);
 			wzvol_announce_buschange();
+			dprintf("%s:%d returning zvol '%s', targetid:%d, "
+			    "lun_id:%d, open_count:%d, volsize:%llu, "
+			    "flags:%d\n",
+			    __func__, __LINE__, zv->zv_name,
+			    zv->zv_zso->zso_target_id, zv->zv_zso->zso_lun_id,
+			    zv->zv_open_count, zv->zv_volsize, zv->zv_flags);
 		}
 	}
 }
