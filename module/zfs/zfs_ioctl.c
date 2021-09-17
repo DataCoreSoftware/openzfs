@@ -1883,6 +1883,8 @@ zfs_ioc_vdev_add(zfs_cmd_t *zc)
 	int error;
 	nvlist_t *config;
 
+	TraceEvent(4, "ZFSin: zfs_ioc_vdev_add\n");
+
 	error = spa_open(zc->zc_name, &spa, FTAG);
 	if (error != 0)
 		return (error);
@@ -1910,6 +1912,9 @@ zfs_ioc_vdev_remove(zfs_cmd_t *zc)
 	spa_t *spa;
 	int error;
 
+	TraceEvent(4, "%s:%d:zc->zc_name= %s\n", __func__, __LINE__,
+	    zc->zc_name);
+
 	error = spa_open(zc->zc_name, &spa, FTAG);
 	if (error != 0) {
 		dprintf("%s:%d: Returning %d\n", __func__, __LINE__, error);
@@ -1918,6 +1923,9 @@ zfs_ioc_vdev_remove(zfs_cmd_t *zc)
 	if (zc->zc_cookie != 0) {
 		error = spa_vdev_remove_cancel(spa);
 	} else {
+		TraceEvent(4, "%s:%d:calling spa_vdev_remove fn for zc->zc_name= %s, zc->zc_guid=%llu\n",
+		    __func__, __LINE__, zc->zc_name, zc->zc_guid);
+
 		error = spa_vdev_remove(spa, zc->zc_guid, B_FALSE);
 	}
 	spa_close(spa, FTAG);

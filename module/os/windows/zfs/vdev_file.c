@@ -89,7 +89,10 @@ vdev_file_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	char *vdev_path = NULL;
 	uint8_t *FileName = NULL;
 
-	dprintf("vdev_file_open %p\n", vd->vdev_tsd);
+	TraceEvent(4, "vdev_file_open %p, vdev_path=%s, vdev_phypath=%s\n",
+	    vd->vdev_tsd, vd->vdev_path ? vd->vdev_path : "",
+	    vd->vdev_physpath ? vd->vdev_physpath : "");
+
 	/* Rotational optimizations only make sense on block devices */
 	vd->vdev_nonrot = B_TRUE;
 
