@@ -109,10 +109,10 @@ OpenZFS.sys = 1,,
 ;;
 
 [Strings]
-Me                      = "Jorgen Lundman"
+Me                      = "DataCore Software Corporation"
 ServiceDescription      = "OpenZFS driver"
 ServiceName             = "OpenZFS"
 DriverName              = "OpenZFS"
 DiskId1                 = "OpenZFS Device Installation Disk"
 VolumeName              = "OpenZFS volume"
-ControllerName = "OpenZFS controller" 
+ControllerName          = "OpenZFS controller"
