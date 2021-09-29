@@ -56,8 +56,8 @@ namespace fs = std::experimental::filesystem;
 //    zfsinstaller trace -d
 
 const unsigned char OPEN_ZFS_GUID[] = "c20c603c-afd4-467d-bf76-c0a4c10553df";
-const unsigned char LOGGER_SESSION[] = "autosession\\OpenZFS_trace";
-const std::string ETL_FILE("\\OpenZFS.etl");
+const unsigned char LOGGER_SESSION[] = "autosession\\zfsin_trace";
+const std::string ETL_FILE("\\ZFSin.etl");
 const std::string MANIFEST_FILE("\\OpenZFS.man");
 
 enum manifest_install_types
@@ -435,10 +435,10 @@ DWORD zfs_install(char *inf_path) {
 		return (-1);
 	}
 
-	error = executeInfSection("OpenZFS_Install 128 ", inf_path);
+	error = executeInfSection("ZFSin_Install 128 ", inf_path);
 
 	// Start driver service if not already running
-	char serviceName[] = "OpenZFS";
+	char serviceName[] = "ZFSin";
 	if (!error)
 		error = startService(serviceName);
 	else
@@ -641,7 +641,7 @@ send_zfs_ioc_unregister_fs(void)
 #include <cfgmgr32.h>
 #include <newdev.h>
 
-#define	ZFS_ROOTDEV "Root\\OpenZFS"
+#define	ZFS_ROOTDEV "Root\\ZFSin"
 // DevCon uses LoadLib() - but lets just static link
 #pragma comment(lib, "Newdev.lib")
 
