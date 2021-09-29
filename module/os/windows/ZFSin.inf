@@ -1,0 +1,118 @@
+;;;
+;;; OpenZFS
+;;;
+;;;
+;;; Copyright (c) Jorgen Lundman
+;;;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = Volume
+ClassGuid   = {71a27cdd-812a-11d0-bec7-08002be2092f}
+Provider    = %Me%
+DriverVer   = 05/19/2018,1.0.2.0
+CatalogFile = ZFSin.cat
+
+[DestinationDirs]
+DefaultDestDir          = 12
+ZFSin.DriverFiles       = 12            ;%windir%\system32\drivers
+ZFSin.DllFiles          = 11            ;%windir%\system32
+
+;;
+;; Default install sections
+;;
+
+;[DefaultInstall]
+;OptionDesc  = %ServiceDescription%
+;CopyFiles   = ZFSin.DriverFiles
+;;;,ZFSin.DllFiles
+;RegisterDlls = shellzfsin
+;CopyINF     = ZFSin.inf
+;
+;[DefaultInstall.Services]
+;AddService  = %ServiceName%,0x802,ZFSin.Service
+
+[Manufacturer]
+%Me%=Standard,NTamd64,NTx86
+
+[Standard.NTamd64]
+%VolumeName% = ZFSin_Install, ZFSinVolume
+%ControllerName% = ZFSin_Install, ROOT\ZFSin
+
+[Standard.NTx86]
+%VolumeName% = ZFSin_Install, ZFSinVolume
+%ControllerName% = ZFSin_Install, ROOT\ZFSin
+
+[ZFSin_Install]
+OptionDesc   = %ServiceDescription%
+CopyFiles    = ZFSin.DriverFiles
+;;,ZFSin.DllFiles
+;;RegisterDlls = shellzfsin
+
+[ZFSin_Install.Services]
+AddService  = %ServiceName%,2,ZFSin.Service
+
+;;
+;; Default uninstall sections
+;;
+
+[DefaultUninstall]
+UnregisterDlls = shellzfsin
+DelFiles   = ZFSin.DriverFiles
+;;,ZFSin.DllFiles
+
+[DefaultUninstall.Services]
+DelService = %ServiceName%,0x200      ;Ensure service is stopped before deleting
+
+;
+; Services Section
+;
+
+[ZFSin.Service]
+DisplayName      = %ServiceName%
+Description      = %ServiceDescription%
+ServiceBinary    = %12%\%DriverName%.sys    ;%windir%\system32\drivers\
+ServiceType      = 1
+StartType        = 1                        ;SERVICE_SYSTEM_START
+ErrorControl     = 1
+LoadOrderGroup   = "File System"
+
+;;[shellzfsin]
+;;11,,shellzfsin.dll,1
+
+;
+; Copy Files
+;
+
+[ZFSin.DriverFiles]
+%DriverName%.sys
+
+[ZFSin.DllFiles]
+;;zpool.exe
+;;zfs.exe
+
+[SourceDisksFiles]
+ZFSin.sys = 1,,
+;;zpool.exe = 1,,
+;;zfs.exe = 1,,
+
+[SourceDisksNames.x86]
+1 = %DiskId1%,,
+;;,\x86
+
+[SourceDisksNames.amd64]
+1 = %DiskId1%,,
+;;,\x64
+
+;;
+;; String Section
+;;
+
+[Strings]
+Me                      = "DataCore Software Corporation"
+ServiceDescription      = "OpenZFS driver"
+ServiceName             = "ZFSin"
+DriverName              = "ZFSin"
+DiskId1                 = "ZFSin Device Installation Disk"
+VolumeName              = "ZFSin volume"
+ControllerName = "ZFSin controller" 

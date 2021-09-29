@@ -17,7 +17,7 @@
 add_subdirectory(spl)
 add_subdirectory(zfs)
 
-wdk_add_driver(OpenZFS
+wdk_add_driver(ZFSin
   debug.c
   driver.c
   Wpp.c
@@ -25,7 +25,7 @@ wdk_add_driver(OpenZFS
   resource.rc
 )
 
-target_link_libraries(OpenZFS PRIVATE
+target_link_libraries(ZFSin PRIVATE
 	splkern
 	zlibkern
 	icpkern
@@ -43,44 +43,45 @@ target_link_libraries(OpenZFS PRIVATE
 
 # set(CMAKE_LINKER link.exe)
 
-set_target_properties(OpenZFS
+set_target_properties(ZFSin
     PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/driver"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/driver"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/driver"
 )
 
-configure_file(OpenZFS.inf "${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.inf" COPYONLY)
+configure_file(ZFSin.inf "${CMAKE_CURRENT_BINARY_DIR}/driver/ZFSin.inf" COPYONLY)
 configure_file(OpenZFS.man "${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.man" COPYONLY)
 
 add_custom_command(
-	TARGET OpenZFS
+	TARGET ZFSin
 	POST_BUILD
-	BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.cat"
-    COMMAND "${STAMPINF_PROGRAM}" -d "*" -a "amd64" -v "*" -f "${CMAKE_CURRENT_BINARY_DIR}\\driver\\OpenZFS.inf"
+	BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/driver/ZFSin.cat"
+    COMMAND "${STAMPINF_PROGRAM}" -d "*" -a "amd64" -v "*" -f "${CMAKE_CURRENT_BINARY_DIR}\\driver\\ZFSin.inf"
+	
 	COMMAND "${INF2CAT_PROGRAM}" /verbose "/driver:${CMAKE_CURRENT_BINARY_DIR}/driver" /os:10_19H1_X86,10_19H1_X64,ServerRS5_X64
-	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /fd sha1 /s "${ZFSIN_SIGNTOOL_CERTSTORE}" /n "${ZFSIN_SIGNTOOL_CERTNAME}" /t "${ZFSIN_SIGNTOOL_TSA}" "${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.cat"
-	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /fd sha1 /sha1 "${ZFSIN_SIGNTOOL_SHA1}" /t "${ZFSIN_SIGNTOOL_TSA}" "${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.cat"
-	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /as /fd sha256 /s "${ZFSIN_SIGNTOOL_CERTSTORE}" /n "${ZFSIN_SIGNTOOL_CERTNAME}" /tr "${ZFSIN_SIGNTOOL_TSA}" "${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.cat"
-	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /as /fd sha256 /sha1 "${ZFSIN_SIGNTOOL_SHA1}" /tr "${ZFSIN_SIGNTOOL_TSA}" "${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.cat"
-	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /fd sha1 /s "${ZFSIN_SIGNTOOL_CERTSTORE}" /n "${ZFSIN_SIGNTOOL_CERTNAME}" /t "${ZFSIN_SIGNTOOL_TSA}" $<TARGET_FILE:OpenZFS>
-	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /fd sha1 /sha1 "${ZFSIN_SIGNTOOL_SHA1}" /t "${ZFSIN_SIGNTOOL_TSA}" $<TARGET_FILE:OpenZFS>
-	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /as /fd sha256 /s "${ZFSIN_SIGNTOOL_CERTSTORE}" /n "${ZFSIN_SIGNTOOL_CERTNAME}" /tr "${ZFSIN_SIGNTOOL_TSA}" $<TARGET_FILE:OpenZFS>
-	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /as /fd sha256 /sha1 "${ZFSIN_SIGNTOOL_SHA1}" /tr "${ZFSIN_SIGNTOOL_TSA}" $<TARGET_FILE:OpenZFS>
+	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /fd sha1 /s "${ZFSIN_SIGNTOOL_CERTSTORE}" /n "${ZFSIN_SIGNTOOL_CERTNAME}" /t "${ZFSIN_SIGNTOOL_TSA}" "${CMAKE_CURRENT_BINARY_DIR}/driver/ZFSin.cat"
+	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /fd sha1 /sha1 "${ZFSIN_SIGNTOOL_SHA1}" /t "${ZFSIN_SIGNTOOL_TSA}" "${CMAKE_CURRENT_BINARY_DIR}/driver/ZFSin.cat"
+	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /as /fd sha256 /s "${ZFSIN_SIGNTOOL_CERTSTORE}" /n "${ZFSIN_SIGNTOOL_CERTNAME}" /tr "${ZFSIN_SIGNTOOL_TSA}" "${CMAKE_CURRENT_BINARY_DIR}/driver/ZFSin.cat"
+	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /as /fd sha256 /sha1 "${ZFSIN_SIGNTOOL_SHA1}" /tr "${ZFSIN_SIGNTOOL_TSA}" "${CMAKE_CURRENT_BINARY_DIR}/driver/ZFSin.cat"
+	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /fd sha1 /s "${ZFSIN_SIGNTOOL_CERTSTORE}" /n "${ZFSIN_SIGNTOOL_CERTNAME}" /t "${ZFSIN_SIGNTOOL_TSA}" $<TARGET_FILE:ZFSin>
+	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /fd sha1 /sha1 "${ZFSIN_SIGNTOOL_SHA1}" /t "${ZFSIN_SIGNTOOL_TSA}" $<TARGET_FILE:ZFSin>
+	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /as /fd sha256 /s "${ZFSIN_SIGNTOOL_CERTSTORE}" /n "${ZFSIN_SIGNTOOL_CERTNAME}" /tr "${ZFSIN_SIGNTOOL_TSA}" $<TARGET_FILE:ZFSin>
+	#COMMAND "${SIGNTOOL_PROGRAM}" sign /v /as /fd sha256 /sha1 "${ZFSIN_SIGNTOOL_SHA1}" /tr "${ZFSIN_SIGNTOOL_TSA}" $<TARGET_FILE:ZFSin>
 	WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/driver"
 	VERBATIM COMMENT "Generating and signing .cat file"
 )
 	
-install(TARGETS OpenZFS RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}/driver")
+install(TARGETS ZFSin RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}/driver")
 install(FILES 
-	"${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.inf"
-	"${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.cat"
+	"${CMAKE_CURRENT_BINARY_DIR}/driver/ZFSin.inf"
+	"${CMAKE_CURRENT_BINARY_DIR}/driver/ZFSin.cat"
     "${CMAKE_CURRENT_BINARY_DIR}/driver/OpenZFS.man"
 	DESTINATION "${CMAKE_INSTALL_BINDIR}/driver"
 )
 
 install(FILES
-	$<TARGET_PDB_FILE:OpenZFS>
+	$<TARGET_PDB_FILE:ZFSin>
 	DESTINATION "${CMAKE_INSTALL_BINDIR}/driver"
 	OPTIONAL
 )
