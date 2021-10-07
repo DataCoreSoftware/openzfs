@@ -56,12 +56,12 @@ BEGIN
     BEGIN
         BLOCK "400904b0"
         BEGIN
-            VALUE "CompanyName", "TODO: <Company name>"
+            VALUE "CompanyName", "DataCore Software Corporation"
             VALUE "FileDescription", "OpenZFS.sys"
             VALUE "FileVersion", "1.0.0.1"
             VALUE "InternalName", "resource.rc"
-            VALUE "LegalCopyright", "Copyright (C) 2021"
-            VALUE "OriginalFilename", "resource.rc"
+            VALUE "LegalCopyright", "Copyright (C) 2021 DataCore Software Corporation"
+            VALUE "OriginalFilename", "OpenZFS.sys"
             VALUE "ProductName", "OpenZFS.sys"
             VALUE "ProductVersion", "1.0.0.1"
         END
