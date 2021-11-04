@@ -84,6 +84,33 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd")
 #execute_process(COMMAND $BASH_DIR -c "scripts/make_gitrev.h include/zfs_gitrev.h" )
 
 
+set(WPP_DIR "${WDK_ROOT}/bin/${WDK_VERSION}")
+set(TRACE "TraceEvent{FLAGS=MYDRIVER_ALL_INFO}(LEVEL, MSG, ...)")
+set(DPRINT "dprintf{FLAGS=MYDRIVER_ALL_INFO, LEVEL=TRACE_INFO}(MSG, ...)")
+set(CFGDIR "${WPP_DIR}/wppconfig/rev1")
+set(SCAN "${WDK_ROOT}/Include/wdf/kmdf/1.9/WdfTraceEnums.h")
+set(WPP_MACRO "WPP_INLINE __inline")
+
+
+function(tmh_generation CSOURCES TMH_FILE_LIST)
+	foreach (C_FILE ${CSOURCES})
+		get_filename_component(OUTPUT_FILE_WE ${C_FILE} NAME_WE)
+		set(TMH_FILE  ${CMAKE_SOURCE_DIR}/out/build/${OUTPUT_FILE_WE}.tmh)
+		set_source_files_properties(${C_FILE} PROPERTIES COMPILE_FLAGS -DWPPFILE=${TMH_FILE})
+		set(LOCAL_TMH_FILE_LIST ${LOCAL_TMH_FILE_LIST} ${TMH_FILE})
+
+		add_custom_command(OUTPUT ${TMH_FILE}
+		COMMAND         "${WPP_DIR}/${WDK_PLATFORM}/tracewpp.exe"
+		-scan:${SCAN} /D${WPP_MACRO}
+		-cfgdir:${CFGDIR} -I${CMAKE_CURRENT_BINARY_DIR} -odir:"${CMAKE_SOURCE_DIR}/out/build" -km -func:${TRACE}
+		-func:${DPRINT} -gen:{km-default.tpl}*.tmh ${C_FILE}
+		WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" DEPENDS ${C_FILE})
+
+		message(STATUS "FILES_IN ======: ${CMAKE_SOURCE_DIR}/out/build/${OUTPUT_FILE_WE}.tmh")
+	endforeach()
+	set(TMH_FILE_LIST ${LOCAL_TMH_FILE_LIST} PARENT_SCOPE)
+endfunction()
+
 add_subdirectory(module)
 #add_subdirectory(module/zfs)
 #add_subdirectory(zfsinstaller)
