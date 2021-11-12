@@ -171,6 +171,7 @@ windows_kstat_t windows_kstat = {
 	{ "zfs_vdev_initialize_value",		KSTAT_DATA_UINT64 },
 	{ "zfs_autoimport_disable",		KSTAT_DATA_UINT64 },
 	{ "zfs_total_memory_limit",		KSTAT_DATA_UINT64 },
+	{ "zfs_removal_suspend_progress",	KSTAT_DATA_INT32 }
 };
 
 
@@ -376,6 +377,8 @@ windows_kstat_update(kstat_t *ksp, int rw)
 		    ks->zfs_vdev_initialize_value.value.ui64;
 		zfs_autoimport_disable =
 		    ks->zfs_autoimport_disable.value.ui64;
+		zfs_removal_suspend_progress =
+		    ks->zfs_removal_suspend_progress.value.i32;
 
 	} else {
 
@@ -561,6 +564,8 @@ windows_kstat_update(kstat_t *ksp, int rw)
 		    zfs_initialize_value;
 		ks->zfs_autoimport_disable.value.ui64 =
 		    zfs_autoimport_disable;
+		ks->zfs_removal_suspend_progress.value.i32 =
+		    zfs_removal_suspend_progress;
 	}
 	arc_kstat_update_windows(ksp, rw);
 	return (0);
