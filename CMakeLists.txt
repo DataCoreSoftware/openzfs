@@ -71,6 +71,9 @@ endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_definitions(-DDBG -DZFS_DEBUG)
+    SET(CMAKE_INSTALL_BINDIR "Debug")
+else()
+    SET(CMAKE_INSTALL_BINDIR "Release")
 endif()
 
 # Avoid dependency add_compile_definitions vcruntime140.dll
