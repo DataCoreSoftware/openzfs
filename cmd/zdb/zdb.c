@@ -39,6 +39,7 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <sys/zfs_context.h>
@@ -8559,6 +8560,23 @@ zdb_embedded_block(char *thing)
 	free(buf);
 }
 
+/* check for valid hex or decimal numeric string */
+static boolean_t
+zdb_numeric(char *str)
+{
+	int i = 0;
+
+	if (strlen(str) == 0)
+		return (B_FALSE);
+	if (strncmp(str, "0x", 2) == 0 || strncmp(str, "0X", 2) == 0)
+		i = 2;
+	for (; i < strlen(str); i++) {
+		if (!isxdigit(str[i]))
+			return (B_FALSE);
+	}
+	return (B_TRUE);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -8601,8 +8619,51 @@ main(int argc, char **argv)
 	 */
 	zfs_btree_verify_intensity = 3;
 
-	while ((c = getopt(argc, argv,
-	    "AbcCdDeEFGhiI:klLmMo:Op:PqrRsSt:uU:vVx:XYyZ")) != -1) {
+	struct option long_options[] = {
+		{"ignore-assertions",	no_argument,		NULL, 'A'},
+		{"block-stats",		no_argument,		NULL, 'b'},
+		{"checksum",		no_argument,		NULL, 'c'},
+		{"config",		no_argument,		NULL, 'C'},
+		{"datasets",		no_argument,		NULL, 'd'},
+		{"dedup-stats",		no_argument,		NULL, 'D'},
+		{"exported",		no_argument,		NULL, 'e'},
+		{"embedded-block-pointer",	no_argument,	NULL, 'E'},
+		{"automatic-rewind",	no_argument,		NULL, 'F'},
+		{"dump-debug-msg",	no_argument,		NULL, 'G'},
+		{"history",		no_argument,		NULL, 'h'},
+		{"intent-logs",		no_argument,		NULL, 'i'},
+		{"inflight",		required_argument,	NULL, 'I'},
+		{"checkpointed-state",	no_argument,		NULL, 'k'},
+		{"label",		no_argument,		NULL, 'l'},
+		{"disable-leak-tracking",	no_argument,	NULL, 'L'},
+		{"metaslabs",		no_argument,		NULL, 'm'},
+		{"metaslab-groups",	no_argument,		NULL, 'M'},
+		{"numeric",		no_argument,		NULL, 'N'},
+		{"option",		required_argument,	NULL, 'o'},
+		{"object-lookups",	no_argument,		NULL, 'O'},
+		{"path",		required_argument,	NULL, 'p'},
+		{"parseable",		no_argument,		NULL, 'P'},
+		{"skip-label",		no_argument,		NULL, 'q'},
+		{"copy-object",		no_argument,		NULL, 'r'},
+		{"read-block",		no_argument,		NULL, 'R'},
+		{"io-stats",		no_argument,		NULL, 's'},
+		{"simulate-dedup",	no_argument,		NULL, 'S'},
+		{"txg",			required_argument,	NULL, 't'},
+		{"uberblock",		no_argument,		NULL, 'u'},
+		{"cachefile",		required_argument,	NULL, 'U'},
+		{"verbose",		no_argument,		NULL, 'v'},
+		{"verbatim",		no_argument,		NULL, 'V'},
+		{"dump-blocks",		required_argument,	NULL, 'x'},
+		{"extreme-rewind",	no_argument,		NULL, 'X'},
+		{"all-reconstruction",	no_argument,		NULL, 'Y'},
+		{"livelist",		no_argument,		NULL, 'y'},
+		{"zstd-headers",	no_argument,		NULL, 'Z'},
+		{0, 0, 0, 0}
+	};
+
+	while ((c = getopt_long(argc, argv,
+	    "AbcCdDeEFGhiI:klLmMNo:Op:PqrRsSt:uU:vVx:XYyZ",
+	    long_options, NULL)) != -1) {
 		switch (c) {
 		case 'b':
 		case 'c':
@@ -8616,6 +8677,7 @@ main(int argc, char **argv)
 		case 'l':
 		case 'm':
 		case 'M':
+		case 'N':
 		case 'O':
 		case 'r':
 		case 'R':
@@ -8707,32 +8769,6 @@ main(int argc, char **argv)
 		(void) fprintf(stderr, "-p option requires use of -e\n");
 		usage();
 	}
-	if (dump_opt['d'] || dump_opt['r']) {
-		/* <pool>[/<dataset | objset id> is accepted */
-		if (argv[2] && (objset_str = strchr(argv[2], '/')) != NULL &&
-		    objset_str++ != NULL) {
-			char *endptr;
-			errno = 0;
-			objset_id = strtoull(objset_str, &endptr, 0);
-			/* dataset 0 is the same as opening the pool */
-			if (errno == 0 && endptr != objset_str &&
-			    objset_id != 0) {
-				target_is_spa = B_FALSE;
-				dataset_lookup = B_TRUE;
-			} else if (objset_id != 0) {
-				printf("failed to open objset %s "
-				    "%llu %s", objset_str,
-				    (u_longlong_t)objset_id,
-				    strerror(errno));
-				exit(1);
-			}
-			/* normal dataset name not an objset ID */
-			if (endptr == objset_str) {
-				objset_id = -1;
-			}
-		}
-	}
-
 #if defined(_LP64)
 	/*
 	 * ZDB does not typically re-read blocks; therefore limit the ARC
@@ -8767,7 +8803,7 @@ main(int argc, char **argv)
 		verbose = MAX(verbose, 1);
 
 	for (c = 0; c < 256; c++) {
-		if (dump_all && strchr("AeEFklLOPrRSXy", c) == NULL)
+		if (dump_all && strchr("AeEFklLNOPrRSXy", c) == NULL)
 			dump_opt[c] = 1;
 		if (dump_opt[c])
 			dump_opt[c] += verbose;
@@ -8810,6 +8846,7 @@ main(int argc, char **argv)
 		return (dump_path(argv[0], argv[1], NULL));
 	}
 	if (dump_opt['r']) {
+		target_is_spa = B_FALSE;
 		if (argc != 3)
 			usage();
 		dump_opt['v'] = verbose;
@@ -8819,6 +8856,10 @@ main(int argc, char **argv)
 	if (dump_opt['X'] || dump_opt['F'])
 		rewind = ZPOOL_DO_REWIND |
 		    (dump_opt['X'] ? ZPOOL_EXTREME_REWIND : 0);
+
+	/* -N implies -d */
+	if (dump_opt['N'] && dump_opt['d'] == 0)
+		dump_opt['d'] = dump_opt['N'];
 
 	if (nvlist_alloc(&policy, NV_UNIQUE_NAME_TYPE, 0) != 0 ||
 	    nvlist_add_uint64(policy, ZPOOL_LOAD_REQUEST_TXG, max_txg) != 0 ||
@@ -9009,13 +9050,27 @@ main(int argc, char **argv)
 			}
 			goto fini;
 		} else {
+			target_pool = strdup(target);
+			if (strpbrk(target, "/@") != NULL)
+				*strpbrk(target_pool, "/@") = '\0';
+
 			zdb_set_skip_mmp(target);
+			/*
+			 * If -N was supplied, the user has indicated that
+			 * zdb -d <pool>/<objsetID> is in effect.  Otherwise
+			 * we first assume that the dataset string is the
+			 * dataset name.  If dmu_objset_hold fails with the
+			 * dataset string, and we have an objset_id, retry the
+			 * lookup with the objsetID.
+			 */
+			boolean_t retry = B_TRUE;
+retry_lookup:
 			if (dataset_lookup == B_TRUE) {
 				/*
 				 * Use the supplied id to get the name
 				 * for open_objset.
 				 */
-				error = spa_open(target, &spa, FTAG);
+				error = spa_open(target_pool, &spa, FTAG);
 				if (error == 0) {
 					error = name_from_objset_id(spa,
 					    objset_id, dsname);
@@ -9024,10 +9079,23 @@ main(int argc, char **argv)
 						target = dsname;
 				}
 			}
-			if (error == 0)
+			if (error == 0) {
+				if (objset_id > 0 && retry) {
+					int err = dmu_objset_hold(target, FTAG,
+					    &os);
+					if (err) {
+						dataset_lookup = B_TRUE;
+						retry = B_FALSE;
+						goto retry_lookup;
+					} else {
+						dmu_objset_rele(os, FTAG);
+					}
+				}
 				error = open_objset(target, FTAG, &os);
+			}
 			if (error == 0)
 				spa = dmu_objset_spa(os);
+			free(target_pool);
 		}
 	}
 	nvlist_free(policy);
