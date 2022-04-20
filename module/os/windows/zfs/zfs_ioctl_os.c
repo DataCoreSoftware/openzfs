@@ -88,6 +88,57 @@ zfs_vfs_ref(zfsvfs_t **zfvp)
 	return (error);
 }
 
+NTSTATUS zpool_zfs_get_metrics(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
+{
+    if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(zpool_zfs_metrics)) {
+	Irp->IoStatus.Information = sizeof(zpool_zfs_metrics);
+	return STATUS_BUFFER_TOO_SMALL;
+    }
+    zpool_zfs_metrics* perf = (zpool_zfs_metrics*)Irp->AssociatedIrp.SystemBuffer;
+
+    if (!perf)
+	return STATUS_INVALID_PARAMETER;
+
+    perf->name[MAXNAMELEN - 1] = '\0';
+
+    int is_zpool = 1;
+    if (strchr(perf->name, '/') != NULL) {
+	is_zpool = 0;
+    }
+
+    perf->used = getUsedData(perf->name);
+    perf->compress_ratio = getCompressRatio(perf->name);
+    perf->available = getAvail(perf->name);
+
+    if (is_zpool == 1) {
+	mutex_enter(&spa_namespace_lock);
+	spa_t* spa_perf;
+	if ((spa_perf = spa_lookup(perf->name)) == NULL) {
+	    mutex_exit(&spa_namespace_lock);
+	    return STATUS_NOT_FOUND;
+	}
+	vdev_stat_t vs = { 0 };
+	vdev_stat_ex_t vsx = { 0 };
+	spa_config_enter(spa_perf, SCL_ALL, FTAG, RW_READER);
+	vdev_get_stats_ex(spa_perf->spa_root_vdev, &vs, &vsx);
+	perf->zpool_dedup_ratio = ddt_get_pool_dedup_ratio(spa_perf);
+	const char* healthState = spa_state_to_name(spa_perf);
+	spa_config_exit(spa_perf, SCL_ALL, FTAG);
+	mutex_exit(&spa_namespace_lock);
+
+	perf->zpool_allocated = vs.vs_alloc;
+	perf->zpool_size = vs.vs_space;
+	strcpy(perf->zpoolHealthState, healthState);
+
+    }
+    else
+	perf->zfs_volSize = getZvolSize(perf->name);
+
+    Irp->IoStatus.Information = sizeof(zpool_zfs_metrics);
+    return STATUS_SUCCESS;
+}
+
+
 NTSTATUS zpool_get_iops_thrput(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
     if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(zpool_perf_counters)) {

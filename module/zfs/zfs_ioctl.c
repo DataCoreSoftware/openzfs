@@ -2143,6 +2143,69 @@ zfs_ioc_objset_stats(zfs_cmd_t *zc)
 	return (error);
 }
 
+
+static int
+getUsedData(char* name)
+{
+    int error;
+    objset_t* os;
+    uint64_t val;
+    error = dmu_objset_hold(name, FTAG, &os);
+    if (error == 0) {
+	dsl_dataset_t* ds = os->os_dsl_dataset;
+	val = dsl_get_used(ds);
+	dmu_objset_rele(os, FTAG);
+    }
+    return val;
+}
+
+static int
+getCompressRatio(char* name)
+{
+    int error;
+    objset_t* os;
+    uint64_t val;
+    error = dmu_objset_hold(name, FTAG, &os);
+    if (error == 0) {
+	dsl_dataset_t* ds = os->os_dsl_dataset;
+	val = dsl_get_compressratio(ds);
+	dmu_objset_rele(os, FTAG);
+    }
+    return val;
+}
+
+static int
+getAvail(char* name)
+{
+    int error;
+    objset_t* os;
+    uint64_t val;
+    error = dmu_objset_hold(name, FTAG, &os);
+    if (error == 0) {
+	dsl_dataset_t* ds = os->os_dsl_dataset;
+	val = dsl_get_available(ds);
+	dmu_objset_rele(os, FTAG);
+    }
+    return val;
+}
+
+static uint64_t
+getZvolSize(char* name)
+{
+    int error;
+    uint64_t val;
+    objset_t* os;
+    uint64_t volSize;
+    error = dmu_objset_hold(name, FTAG, &os);
+    if (error == 0) {
+	zap_lookup(os, ZVOL_ZAP_OBJ, "size", 8, 1, &val);
+	volSize = val;
+	dmu_objset_rele(os, FTAG);
+    }
+    return volSize;
+}
+
+
 /*
  * inputs:
  * zc_name		name of filesystem

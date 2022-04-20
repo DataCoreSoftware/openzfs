@@ -188,5 +188,8 @@ extern NTSTATUS zpool_get_size_stats(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp);
 extern NTSTATUS zpool_get_iops_thrput(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp);
+extern NTSTATUS zpool_zfs_get_metrics(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp);
+
 
 #endif

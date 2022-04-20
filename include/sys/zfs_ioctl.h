@@ -537,6 +537,7 @@ typedef struct {
 } zpool_size_stats;
 
 #define ZPOOL_GET_IOPS_THRPUT_STATS	CTL_CODE(ZFSIOCTL_TYPE, 0xFFE, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define ZPOOL_ZFS_GET_METRICS_DATA	CTL_CODE(ZFSIOCTL_TYPE, 0xFFD, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 typedef struct
 {
@@ -581,6 +582,19 @@ typedef struct {
     unsigned __int64	dp_dirty_total_io;	// zpool only
     char zpool_name[MAXNAMELEN];
 } zpool_perf_counters;
+
+typedef struct {
+    unsigned __int64	compress_ratio;
+    unsigned __int64	used;
+    unsigned __int64	available;
+    unsigned __int64	zpool_allocated;
+    unsigned __int64	zpool_size;
+    unsigned __int64	zpool_dedup_ratio;
+    unsigned __int64	zfs_volSize;
+
+    char zpoolHealthState[MAXNAMELEN];
+    char name[MAXNAMELEN];
+}zpool_zfs_metrics;
 
 typedef struct {
     uint64_t	arcstat_hits;
@@ -651,6 +665,10 @@ extern void zfs_unmount_snap(const char *);
 extern void zfs_destroy_unmount_origin(const char *);
 extern int getzfsvfs_impl(struct objset *, struct zfsvfs **);
 extern int getzfsvfs(const char *, struct zfsvfs **);
+extern int getUsedData(char * name);
+extern int getCompressRatio(char* name);
+extern int getAvail(char* name);
+extern uint64_t getZvolSize(char* name);
 extern void latency_stats(uint64_t *histo, unsigned int buckets,
     stat_pair* lat);
 
