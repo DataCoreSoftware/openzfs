@@ -148,6 +148,7 @@ typedef struct windows_kstat {
 	kstat_named_t zfs_autoimport_disable;
 	kstat_named_t zfs_total_memory_limit;
 	kstat_named_t zfs_removal_suspend_progress;
+	kstat_named_t cpu_avx_supported;
 } windows_kstat_t;
 
 
@@ -257,6 +258,7 @@ extern uint64_t zfs_disable_removablemedia;
 extern uint64_t zfs_initialize_value;
 extern int zfs_autoimport_disable;
 extern int zfs_removal_suspend_progress;
+extern int cpu_avx_supported;
 
 int  kstat_windows_init(void *);
 void kstat_windows_fini(void);

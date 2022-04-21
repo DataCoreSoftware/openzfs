@@ -80,11 +80,23 @@ typedef struct zfs_uio {
 #define	zfs_uio_iovlen(uio, idx)	(uio)->uio_iov[(idx)].iov_len
 #define	zfs_uio_iovbase(uio, idx)	(uio)->uio_iov[(idx)].iov_base
 
+
 static inline void
 zfs_uio_iov_at_index(zfs_uio_t *uio, uint_t idx, void **base, uint64_t *len)
 {
 	*base = zfs_uio_iovbase(uio, idx);
 	*len = zfs_uio_iovlen(uio, idx);
+}
+
+static inline int
+zfs_uio_isuserspace(zfs_uio_t *uio)
+{
+	ASSERT(uio != NULL);
+
+	if (uio->uio_segflg == UIO_USERSPACE) {
+		return (1);
+	}
+	return (0);
 }
 
 static inline void

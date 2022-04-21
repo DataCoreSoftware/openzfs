@@ -53,5 +53,5 @@ wdk_add_library(icpkern
   spi/kcf_spi.c
 )
 
-target_link_libraries(icpkern PRIVATE splkern)
+target_link_libraries(icpkern PRIVATE splkern PUBLIC ${ISAL})
 target_include_directories(icpkern BEFORE PUBLIC "include")

@@ -21,6 +21,11 @@ find_package(OpenSSL REQUIRED)
 #get_filename_component(rootPath "${OPENSSL_CRYPTO_LIBRARY}" DIRECTORY)
 #message(STATUS "OpenSSL root: " ${rootPath})
 
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+	find_library(ISAL isa-l_crypto_static HINTS "${CMAKE_SOURCE_DIR}/ISA-L/Debug" REQUIRED)
+elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+	find_library(ISAL isa-l_crypto_static HINTS "${CMAKE_SOURCE_DIR}/ISA-L/Release" REQUIRED)
+endif()
 
 # Attempt to simulate scripts/make-gitrev.h and zfs_gitrev.h
 include(GetGitRevisionDescription)

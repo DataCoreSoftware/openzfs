@@ -48,4 +48,4 @@ add_library(libicp
 
 
 target_include_directories(libicp PRIVATE "${ICP_MODULE_DIR}/include")
-target_link_libraries(libicp PUBLIC libspl libpthread)
+target_link_libraries(libicp PUBLIC libspl libpthread ${ISAL})
