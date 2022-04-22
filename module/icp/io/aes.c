@@ -271,7 +271,8 @@ cpu_supports_avx()
 	int avxSupported = 0;
 
 	if (osUsesXSAVE_XRSTORE && cpuAVXSuport) {
-		unsigned long long xcrFeatureMask = _xgetbv(_XCR_XFEATURE_ENABLED_MASK);
+		unsigned long long xcrFeatureMask =
+		    _xgetbv(_XCR_XFEATURE_ENABLED_MASK);
 		avxSupported = ((xcrFeatureMask & 0x6) == 0x6) ? 1 : 0;
 	}
 
@@ -1577,32 +1578,33 @@ crypto_update_uio_avx(avx_crypt_type_t encrypt, void *ctx, crypto_data_t *input,
 	 */
 
 	while (vec_idx < zfs_uio_iovcnt(uiop) && length > 0) {
+		zfs_uio_iov_at_index(uiop, vec_idx, &iov_base, &iov_len);
+		cur_len = MIN(iov_len -offset, length);
 
-	zfs_uio_iov_at_index(uiop, vec_idx, &iov_base, &iov_len);
-	cur_len = MIN(iov_len -offset, length);
-
-	if (encrypt) {
-		zfs_uio_iov_at_index(ciop, vec_idx, &ciov_base, &ciov_len);
-		VERIFY(iov_len == ciov_len);
-
-		aes_gcm_enc_256_update(&gcm->gkey, &gcm->gctx,
-		    (uint8_t *)(ciov_base + offset),
-		    (const uint8_t *)(iov_base + offset), cur_len);
-	} else {
-		if (vec_idx >= 0 && vec_idx < zfs_uio_iovcnt(ciop)) {
-			zfs_uio_iov_at_index(ciop, vec_idx, &ciov_base,
-			    &ciov_len);
+		if (encrypt) {
+			zfs_uio_iov_at_index(ciop, vec_idx,
+			    &ciov_base, &ciov_len);
 			VERIFY(iov_len == ciov_len);
 
-			aes_gcm_dec_256_update(&gcm->gkey, &gcm->gctx,
+			aes_gcm_enc_256_update(&gcm->gkey, &gcm->gctx,
 			    (uint8_t *)(ciov_base + offset),
 			    (const uint8_t *)(iov_base + offset), cur_len);
-		}
-	}
+		} else {
+			if (vec_idx >= 0 && vec_idx < zfs_uio_iovcnt(ciop)) {
+				zfs_uio_iov_at_index(ciop, vec_idx, &ciov_base,
+				    &ciov_len);
+				VERIFY(iov_len == ciov_len);
 
-	length -= cur_len;
-	vec_idx++;
-	offset = 0;
+				aes_gcm_dec_256_update(&gcm->gkey, &gcm->gctx,
+				    (uint8_t *)(ciov_base + offset),
+				    (const uint8_t *)(iov_base + offset),
+				    cur_len);
+			}
+		}
+
+		length -= cur_len;
+		vec_idx++;
+		offset = 0;
 	}
 
 	if (vec_idx == zfs_uio_iovcnt(uiop) && length > 0) {

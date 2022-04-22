@@ -103,7 +103,7 @@ zfs_uio_isuserspace(zfs_uio_t *uio)
 	ASSERT(uio != NULL);
 
 	if (uio->uio_segflg == UIO_USERSPACE) {
-	return (1);
+		return (1);
 	}
 	return (0);
 }
