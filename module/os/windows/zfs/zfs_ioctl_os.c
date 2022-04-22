@@ -90,6 +90,7 @@ zfs_vfs_ref(zfsvfs_t **zfvp)
 
 NTSTATUS zpool_zfs_get_metrics(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
+    Irp->IoStatus.Information = 0;
     if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(zpool_zfs_metrics)) {
 	Irp->IoStatus.Information = sizeof(zpool_zfs_metrics);
 	return STATUS_BUFFER_TOO_SMALL;
@@ -105,6 +106,12 @@ NTSTATUS zpool_zfs_get_metrics(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_
     if (strchr(perf->name, '/') != NULL) {
 	is_zpool = 0;
     }
+
+    perf->zpool_dedup_ratio = 0;
+    perf->zpool_allocated = 0;
+    perf->zpool_size = 0;
+    perf->zfs_volSize = 0;
+    strncpy(perf->zpoolHealthState, "", sizeof(perf->zpoolHealthState));
 
     perf->used = getUsedData(perf->name);
     perf->compress_ratio = getCompressRatio(perf->name);

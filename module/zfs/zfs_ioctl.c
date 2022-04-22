@@ -2144,12 +2144,12 @@ zfs_ioc_objset_stats(zfs_cmd_t *zc)
 }
 
 
-static int
+static uint64_t
 getUsedData(char* name)
 {
     int error;
     objset_t* os;
-    uint64_t val;
+    uint64_t val = 0;
     error = dmu_objset_hold(name, FTAG, &os);
     if (error == 0) {
 	dsl_dataset_t* ds = os->os_dsl_dataset;
@@ -2159,12 +2159,12 @@ getUsedData(char* name)
     return val;
 }
 
-static int
+static uint64_t
 getCompressRatio(char* name)
 {
     int error;
     objset_t* os;
-    uint64_t val;
+    uint64_t val = 0;
     error = dmu_objset_hold(name, FTAG, &os);
     if (error == 0) {
 	dsl_dataset_t* ds = os->os_dsl_dataset;
@@ -2174,12 +2174,12 @@ getCompressRatio(char* name)
     return val;
 }
 
-static int
+static uint64_t
 getAvail(char* name)
 {
     int error;
     objset_t* os;
-    uint64_t val;
+    uint64_t val = 0;
     error = dmu_objset_hold(name, FTAG, &os);
     if (error == 0) {
 	dsl_dataset_t* ds = os->os_dsl_dataset;
@@ -2193,9 +2193,9 @@ static uint64_t
 getZvolSize(char* name)
 {
     int error;
-    uint64_t val;
+    uint64_t val = 0;
     objset_t* os;
-    uint64_t volSize;
+    uint64_t volSize = 0;
     error = dmu_objset_hold(name, FTAG, &os);
     if (error == 0) {
 	zap_lookup(os, ZVOL_ZAP_OBJ, "size", 8, 1, &val);

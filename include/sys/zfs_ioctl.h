@@ -665,9 +665,9 @@ extern void zfs_unmount_snap(const char *);
 extern void zfs_destroy_unmount_origin(const char *);
 extern int getzfsvfs_impl(struct objset *, struct zfsvfs **);
 extern int getzfsvfs(const char *, struct zfsvfs **);
-extern int getUsedData(char * name);
-extern int getCompressRatio(char* name);
-extern int getAvail(char* name);
+extern uint64_t getUsedData(char * name);
+extern uint64_t getCompressRatio(char* name);
+extern uint64_t getAvail(char* name);
 extern uint64_t getZvolSize(char* name);
 extern void latency_stats(uint64_t *histo, unsigned int buckets,
     stat_pair* lat);
