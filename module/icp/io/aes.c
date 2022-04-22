@@ -39,9 +39,6 @@
 #include <sys/uio.h>
 #include <immintrin.h>
 #include <cpuid.h>
-#ifdef _WIN32
-#include <os/windows/zfs/sys/kstat_windows.h>
-#endif
 
 #define	CRYPTO_PROVIDER_NAME "aes"
 
@@ -261,7 +258,6 @@ aes_mod_init(void)
 int
 cpu_supports_avx()
 {
-
 	int cpuInfo[4] = { 0 };
 
 	__cpuid(1, cpuInfo[0], cpuInfo[1], cpuInfo[2], cpuInfo[3]);
@@ -1547,7 +1543,7 @@ crypto_update_uio_avx(avx_crypt_type_t encrypt, void *ctx, crypto_data_t *input,
 	size_t cur_len;
 	user_addr_t iov_base = 0ULL, ciov_base = 0ULL;
 	user_size_t iov_len, ciov_len;
-	void* iov_or_mp;
+	void *iov_or_mp;
 	gcm_ctx_avx_t *gcm = (gcm_ctx_avx_t *)ctx;
 
 	if (input->cd_miscdata != NULL) {
@@ -1576,10 +1572,9 @@ crypto_update_uio_avx(avx_crypt_type_t encrypt, void *ctx, crypto_data_t *input,
 	/*
 	 * Now process the iovecs.
 	 */
-
 	while (vec_idx < zfs_uio_iovcnt(uiop) && length > 0) {
 		zfs_uio_iov_at_index(uiop, vec_idx, &iov_base, &iov_len);
-		cur_len = MIN(iov_len -offset, length);
+		cur_len = MIN(iov_len - offset, length);
 
 		if (encrypt) {
 			zfs_uio_iov_at_index(ciop, vec_idx,
