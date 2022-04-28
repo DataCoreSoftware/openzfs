@@ -36,7 +36,6 @@
 #define	_AES_IMPL
 #include <aes/aes_impl.h>
 #include <modes/gcm_impl.h>
-#include <sys/uio.h>
 #include <immintrin.h>
 #include <cpuid.h>
 
@@ -279,7 +278,6 @@ cpu_supports_avx()
 
 	return (avxSupported);
 }
-
 
 int
 aes_mod_fini(void)
@@ -1543,7 +1541,6 @@ crypto_update_uio_avx(avx_crypt_type_t encrypt, void *ctx, crypto_data_t *input,
 	size_t cur_len;
 	user_addr_t iov_base = 0ULL, ciov_base = 0ULL;
 	user_size_t iov_len, ciov_len;
-	void *iov_or_mp;
 	gcm_ctx_avx_t *gcm = (gcm_ctx_avx_t *)ctx;
 
 	if (input->cd_miscdata != NULL) {
