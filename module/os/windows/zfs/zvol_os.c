@@ -163,7 +163,7 @@ retry:
 					rw_exit(&zvol_state_lock);
 					mutex_exit(&spa_namespace_lock);
 					ret &= ~ZVOL_LOCK_SPA;
-					dprintf("%s: spa_namespace loop\n",
+					TraceEvent(TRACE_NOISY, "%s: spa_namespace loop\n",
 					    __func__);
 					/* Let's not busy loop */
 					delay(hz>>2);
@@ -319,7 +319,7 @@ zvol_os_write_zv(zvol_state_t *zv, zfs_uio_t *uio, int flags)
 
 	TraceEvent(TRACE_VERBOSE, "%s:%d: zvol_write_iokit(offset "
 	    "0x%llx bytes 0x%llx)\n", __func__, __LINE__,
-	    zfs_uio_offset(uio), zfs_uio_resid(uio), bytes);
+	    zfs_uio_offset(uio), zfs_uio_resid(uio));
 
 	sync = (zv->zv_objset->os_sync == ZFS_SYNC_ALWAYS);
 
@@ -491,7 +491,7 @@ zvol_os_find_by_dev(dev_t dev)
 {
 	zvol_state_t *zv;
 
-	dprintf("%s\n", __func__);
+	TraceEvent(TRACE_VERBOSE, "%s\n", __func__);
 
 	rw_enter(&zvol_state_lock, RW_READER);
 	for (zv = list_head(&zvol_state_list); zv != NULL;
@@ -513,7 +513,7 @@ zvol_os_targetlun_lookup(uint8_t target, uint8_t lun)
 {
 	zvol_state_t *zv;
 
-	dprintf("%s\n", __func__);
+	TraceEvent(TRACE_VERBOSE, "%s\n", __func__);
 
 	rw_enter(&zvol_state_lock, RW_READER);
 	for (zv = list_head(&zvol_state_list); zv != NULL;
@@ -994,7 +994,7 @@ zvol_os_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk,
 	int error = 0;
 	zvol_state_t *zv = NULL;
 
-	dprintf("%s\n", __func__);
+	TraceEvent(TRACE_NOISY, "%s\n", __func__);
 
 	if (!getminor(dev))
 		return (ENXIO);
@@ -1002,7 +1002,7 @@ zvol_os_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk,
 	zv = zvol_os_find_by_dev(dev);
 
 	if (zv == NULL) {
-		dprintf("zv is NULL\n");
+	    TraceEvent(TRACE_VERBOSE, "zv is NULL\n");
 		return (ENXIO);
 	}
 

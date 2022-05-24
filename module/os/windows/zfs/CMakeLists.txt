@@ -4,11 +4,10 @@ use_clang()
 file(GLOB CSOURCES CONFIGURE_DEPENDS "*.c")
 
 list(REMOVE_ITEM CSOURCES "${CMAKE_CURRENT_SOURCE_DIR}/zfs_vnops_os.c"
- "${CMAKE_CURRENT_SOURCE_DIR}/zfs_vnops_windows.c"
  "${CMAKE_CURRENT_SOURCE_DIR}/zfs_vnops_windows_lib.c"
  "${CMAKE_CURRENT_SOURCE_DIR}/zfs_vnops_windows_mount.c"
  "${CMAKE_CURRENT_SOURCE_DIR}/zfs_windows_zvol.c"
- "${CMAKE_CURRENT_SOURCE_DIR}/zvol_os.c")
+ )
 
 set(TMH_FILE_LIST "")
 tmh_generation("${CSOURCES}" TMH_FILE_LIST)
