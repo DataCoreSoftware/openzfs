@@ -249,7 +249,7 @@ def export_disk():
     disk_no = disk.split(',')
     disk_path =''
     for i in disk_no:
-        disk_path = disk_path+"PHYSICALDRIVE"+i+" "
+        disk_path = disk_path+"physicaldrive"+i+" "
     disk_path = '"'+disk_path.strip()+'"'
     print(disk_path)
     return disk_path
