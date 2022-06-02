@@ -57,7 +57,7 @@ def main(argv):
     clean_disk()
 
     if normal_run() :
-            return
+        return
 
     cleanup()
 

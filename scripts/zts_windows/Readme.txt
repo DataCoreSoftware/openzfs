@@ -11,7 +11,7 @@ Steps to run ZTS for windows
 
 	Step 2 :
 		git clone openzfs from https://github.com/DataCoreSoftware/openzfs
-		Checkout to zfs-test-suite-win branch
+		Checkout to zfs-test-suite-win-raidz branch
 		Build openzfs by follow this URL https://openzfs.github.io/openzfs-docs/Developer%20Resources/Building%20ZFS.html
 
 	Step 3 :
@@ -29,4 +29,4 @@ Step to run python script
 
 Step 1 : Open cmd with Admin privileges
 Seps 2 : Run following to start test
-	python.exe ../openzfs/scripts/zts_windows/zts_windows_test.py "<ZFSin Binaries Release.zip file path>"
+	python.exe ../openzfs/scripts/zts_windows/zts_windows_test.py "<OpenZFS Binaries Release.zip file path>"

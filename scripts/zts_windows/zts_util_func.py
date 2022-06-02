@@ -28,6 +28,7 @@ def clean_disk():
     print("======================= Cleaning Disk ======================\n")
     process = createSubprocess('diskpart.exe')
     disk = config_read("pool_disk","disk_id")
+    disk = disk + config_read("pool_disk","raid_disk_id")
     print(disk)
     disk_arr = disk.split(',')
     for disk_no in disk_arr :
@@ -124,6 +125,7 @@ def uninstall_zfsin():
         process.stdin.write('cd /d c:\\' + "\n")
         process.stdin.write("cd \"c:/zfs-test-suite/ZFS_Binaries/Release\"" + "\n")
         process.stdin.write(".\zfsinstaller uninstall .\ZFSin\ZFSin.inf" + "\n")
+        process.stdin.write("del C:\Windows\System32\drivers\ZFSin.sys"+"\n")
         process.stdin.close()
         output = process.stdout.read()
         print (output)
@@ -243,8 +245,8 @@ def make_dir():
     print(output)
     return
 
-def export_disk():
-    disk = config_read("pool_disk","disk_id")
+def export_disk(disks):
+    disk = config_read("pool_disk",disks)
     print(disk)
     disk_no = disk.split(',')
     disk_path =''
@@ -272,15 +274,18 @@ def cp_runfile_wsl():
     filePath = "C:\\zfs-test-suite\\testing.txt"
     openzfs_folder = openzfs_path_linux()
     line1 = "#/bin/bash"
-    line2 = 'export DISKS='+export_disk()
-    line3 = openzfs_folder + "scripts/zfs-tests.sh"+" -r "+ openzfs_folder +"tests/runfiles/windows.run"
+    line2 = 'export DISKS='+export_disk("disk_id")
+    line3 = 'export RAID_TEST_DISKS='+export_disk("raid_disk_id")
+    line4 = openzfs_folder + "scripts/zfs-tests.sh"+" -r "+ openzfs_folder +"tests/runfiles/windows-All.run"
     print(line1)
     print(line2)
     print(line3)
+    print(line4)
     with open(filePath,"w+") as f:
         f.write(line1+'\n'+'\n')
         f.write(line2+'\n')
         f.write(line3+'\n')
+        f.write(line4+'\n')
 
     cp_to_linux()
     return
