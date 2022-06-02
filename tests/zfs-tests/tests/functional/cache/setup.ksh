@@ -34,8 +34,8 @@
 
 verify_runnable "global"
 
-log_must rm -rf $VDIR $VDIR2
-log_must mkdir -p $VDIR $VDIR2
-log_must mkfile $SIZE $VDEV $VDEV2
+#log_must rm -rf $VDIR $VDIR2
+#log_must mkdir -p $VDIR $VDIR2
+#log_must mkfile $SIZE $VDEV $VDEV2
 
 log_pass

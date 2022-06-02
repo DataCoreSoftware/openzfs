@@ -46,13 +46,11 @@ tags = ['functional', 'cli_root', 'zfs_create']
 
 [tests/functional/cli_user/zpool_list]
 tests = ['zpool_list_001_pos', 'zpool_list_002_neg']
-user =
 tags = ['functional', 'cli_user', 'zpool_list']
 
 [tests/functional/cli_user/zfs_list]
 tests = ['zfs_list_001_pos', 'zfs_list_002_pos', 'zfs_list_003_pos',
     'zfs_list_004_neg', 'zfs_list_008_neg']
-user =
 tags = ['functional', 'cli_user', 'zfs_list']
 
 [tests/functional/cli_root/zpool_set]
@@ -115,8 +113,6 @@ post =
 tags = ['functional', 'pool_names']
 
 [tests/functional/cache]
-pre =
-post=
 tests = ['cache_001_pos', 'cache_002_pos', 'cache_003_pos', 'cache_004_neg',
     'cache_005_neg','cache_007_neg', 'cache_008_neg',
     'cache_009_pos', 'cache_011_pos']

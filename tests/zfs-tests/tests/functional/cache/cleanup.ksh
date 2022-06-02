@@ -34,13 +34,13 @@
 
 verify_runnable "global"
 
-if datasetexists $TESTPOOL ; then
-	log_must zpool destroy -f $TESTPOOL
-fi
-if datasetexists $TESTPOOL2 ; then
-	log_must zpool destroy -f $TESTPOOL2
-fi
+#if datasetexists $TESTPOOL ; then
+#	log_must zpool destroy -f $TESTPOOL
+#fi
+#if datasetexists $TESTPOOL2 ; then
+#	log_must zpool destroy -f $TESTPOOL2
+#fi
 
-log_must rm -rf $VDIR $VDIR2
+#log_must rm -rf $VDIR $VDIR2
 
 log_pass
