@@ -28,7 +28,7 @@ def clean_disk():
     print("======================= Cleaning Disk ======================\n")
     process = createSubprocess('diskpart.exe')
     disk = config_read("pool_disk","disk_id")
-    disk = disk + config_read("pool_disk","raid_disk_id")
+    disk = disk + "," + config_read("pool_disk","raid_disk_id")
     print(disk)
     disk_arr = disk.split(',')
     for disk_no in disk_arr :
@@ -165,6 +165,8 @@ def set_run_status():
 
 def runtests():
     print("************************ Tests start running ********************* \n")
+    time.sleep(20)
+    
     process = createSubprocess('powershell.exe')
 
     process.stdin.write("wsl /etc/test-suite-run.sh 2>&1 | tee C:/zfs-test-suite/Results/tests_results.txt"+"\n")
