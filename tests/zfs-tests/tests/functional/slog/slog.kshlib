@@ -54,6 +54,8 @@ function cleanup
 #
 function display_status
 {
+	return 0
+
 	typeset pool=$1
 
 	typeset -i ret=0

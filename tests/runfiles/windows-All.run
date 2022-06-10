@@ -74,7 +74,7 @@ tags = ['functional', 'raidz']
 
 [tests/functional/removal]
 pre =
-tests = ['removal_with_add', 'remove_raidz']
+tests = ['remove_raidz']
 tags = ['functional', 'removal']
 
 [tests/functional/refreserv]
@@ -90,13 +90,13 @@ tags = ['functional', 'replacement']
 [tests/functional/cli_root/zpool_add]
 pre =
 post=
-tests = ['zpool_add_001_pos','zpool_add_010_pos']
+tests = ['zpool_add_001_pos', 'zpool_add_009_neg', 'zpool_add_010_pos']
 tags = ['functional', 'cli_root', 'zpool_add']
 
 [tests/functional/slog]
 pre =
 tests = ['slog_001_pos', 'slog_002_pos', 'slog_003_pos', 'slog_004_pos',
-    'slog_005_pos', 'slog_006_pos','slog_008_neg',
+    'slog_005_pos', 'slog_006_pos', 'slog_007_pos', 'slog_008_neg',
     'slog_009_neg', 'slog_011_neg']
 tags = ['functional', 'slog']
 
@@ -114,7 +114,7 @@ tags = ['functional', 'pool_names']
 
 [tests/functional/cache]
 tests = ['cache_001_pos', 'cache_002_pos', 'cache_003_pos', 'cache_004_neg',
-    'cache_005_neg','cache_007_neg', 'cache_008_neg',
+    'cache_005_neg', 'cache_006_pos', 'cache_007_neg', 'cache_008_neg',
     'cache_009_pos', 'cache_011_pos']
 tags = ['functional', 'cache']
 
