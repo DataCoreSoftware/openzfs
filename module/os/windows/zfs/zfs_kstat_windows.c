@@ -172,7 +172,8 @@ windows_kstat_t windows_kstat = {
 	{ "zfs_autoimport_disable",		KSTAT_DATA_UINT64 },
 	{ "zfs_total_memory_limit",		KSTAT_DATA_UINT64 },
 	{ "zfs_removal_suspend_progress",	KSTAT_DATA_INT32 },
-	{ "cpu_avx_supported",			KSTAT_DATA_UINT32 }
+	{ "cpu_avx_supported",			KSTAT_DATA_UINT32 },
+	{ "start_miscompare",			KSTAT_DATA_UINT32 }
 };
 
 
@@ -382,6 +383,7 @@ windows_kstat_update(kstat_t *ksp, int rw)
 		    ks->zfs_removal_suspend_progress.value.i32;
 		cpu_avx_supported =
 		    ks->cpu_avx_supported.value.ui32;
+		start_miscompare = ks->start_miscompare.value.ui32;
 
 	} else {
 
@@ -571,6 +573,8 @@ windows_kstat_update(kstat_t *ksp, int rw)
 		    zfs_removal_suspend_progress;
 		ks->cpu_avx_supported.value.ui32 =
 		    cpu_avx_supported;
+		ks->start_miscompare.value.ui32 =
+		    start_miscompare;
 	}
 	arc_kstat_update_windows(ksp, rw);
 	return (0);

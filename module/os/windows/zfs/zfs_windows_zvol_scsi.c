@@ -97,6 +97,7 @@
  */
 extern wzvolDriverInfo STOR_wzvolDriverInfo;
 extern taskq_t *zvol_taskq;
+int start_miscompare;
 
 inline int
 resolveArrayIndex(int t, int l, int nbL)
@@ -1042,6 +1043,16 @@ bzvol_ReadWriteTaskRtn(__in PVOID  pWkParms)
 	if (ActionRead == pWkRtnParms->Action) {
 		iores = zvol_os_read_zv(pWkRtnParms->zv, &uio, 0);
 	} else {
+		 //corrupt
+		if (start_miscompare == 1) {
+		    //zfs_uio_setoffset(&uio, 0);
+		    //memset(pIo->Buffer, 0xFF, pIo->Length);
+		    #define DISKTEST_MAGIC_LENGTH 4
+		    if (pIo->Length > DISKTEST_MAGIC_LENGTH) {
+			memset(pIo->Buffer, 0xFF, DISKTEST_MAGIC_LENGTH);
+		    }
+		}
+
 		/* TODO add flag if FUA */
 		iores = zvol_os_write_zv(pWkRtnParms->zv, &uio, 0);
 	}
