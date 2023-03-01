@@ -238,6 +238,11 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	ObjectAttributes.SecurityDescriptor = NULL;
 	ObjectAttributes.SecurityQualityOfService = NULL;
 	IO_STATUS_BLOCK iostatus;
+	ULONG shareAccess = FILE_SHARE_READ;
+
+#ifdef ZFS_DEBUG
+	shareAccess |= FILE_SHARE_WRITE;
+#endif
 
 	ntstatus = ZwCreateFile(&dvd->vd_lh,
 	    spa_mode(spa) == SPA_MODE_READ ? GENERIC_READ | SYNCHRONIZE :
@@ -246,7 +251,7 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	    &iostatus,
 	    0,
 	    FILE_ATTRIBUTE_NORMAL,
-	    FILE_SHARE_WRITE | FILE_SHARE_READ,
+	    shareAccess,
 	    FILE_OPEN,
 	    FILE_SYNCHRONOUS_IO_NONALERT |
 	    (spa_mode(spa) == SPA_MODE_READ ? 0 :
