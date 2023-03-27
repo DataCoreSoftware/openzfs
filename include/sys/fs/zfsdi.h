@@ -136,6 +136,7 @@ typedef struct {
 	INTERFACE header;
     NTSTATUS(*Read)(PVOID Context, zfsiodesc_t *pIo);
     NTSTATUS(*Write)(PVOID Context, zfsiodesc_t *pIo);
+    NTSTATUS(*Unmap)(PVOID Context, zfsiodesc_t *pIo);
 	// Add new interface routines here. do not modify the existing order.
 } zfsdizvol_t;
 

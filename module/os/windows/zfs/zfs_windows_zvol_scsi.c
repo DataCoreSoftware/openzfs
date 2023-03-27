@@ -951,9 +951,12 @@ wzvol_WkRtn(__in PVOID pWkParms)
 
 	sectorOffset = startingSector * MP_BLOCK_SIZE;
 
-	TraceEvent(TRACE_VERBOSE, "%s:%d: MpWkRtn Action: %X, starting sector:"
+/*#ifdef _KERNEL
+	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "%s:%d: MpWkRtn Action: %X, starting sector:"
 	    " 0x%llX, sector offset: 0x%llX\n", __func__, __LINE__,
 	    pWkRtnParms->Action, startingSector, sectorOffset);
+
+#endif*/
 	TraceEvent(TRACE_VERBOSE, "%s:%d: MpWkRtn pSrb: 0x%p, pSrb->DataBuffer"
 	    ": 0x%p\n", __func__, __LINE__, pSrb, pSrb->DataBuffer);
 
@@ -1046,9 +1049,16 @@ bzvol_ReadWriteTaskRtn(__in PVOID  pWkParms)
 
 	if (ActionRead == pWkRtnParms->Action) {
 		iores = zvol_os_read_zv(pWkRtnParms->zv, &uio, 0);
-	} else {
+	} else if (ActionWrite == pWkRtnParms->Action) {
 		/* TODO add flag if FUA */
 		iores = zvol_os_write_zv(pWkRtnParms->zv, &uio, 0);
+	} else if (ActionUnmap == pWkRtnParms->Action) {
+#ifdef _KERNEL
+	DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "%s:%d: zvol_os_unmap Action: %X, starting offset:"
+	    "%lld,  length: %lu\n", __func__, __LINE__,
+	    pWkRtnParms->Action, pIo->ByteOffset, pIo->Length);
+#endif
+		iores = zvol_os_unmap(pWkRtnParms->zv, pIo->ByteOffset, pIo->Length);
 	}
 
 	if (pIo->Cb) {
@@ -1126,4 +1136,10 @@ NTSTATUS
 ZvolDiWrite(PVOID Context, zfsiodesc_t *pIo)
 {
 	return (DiReadWriteSetup((zvol_state_t *)Context, ActionWrite, pIo));
+}
+
+NTSTATUS
+ZvolDiUnmap(PVOID Context, zfsiodesc_t *pIo)
+{
+	return (DiReadWriteSetup((zvol_state_t *)Context, ActionUnmap, pIo));
 }

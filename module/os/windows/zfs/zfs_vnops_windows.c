@@ -5755,6 +5755,8 @@ pnp_query_di(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 				    zfsiodesc_t *pIo);
 				extern NTSTATUS ZvolDiWrite(PVOID Context,
 				    zfsiodesc_t *pIo);
+				extern NTSTATUS ZvolDiUnmap(PVOID Context,
+				    zfsiodesc_t *pIo);
 				// lock in an extra reference on the zvol
 				IncZvolRef(zv);
 				zfsdizvol_t *pDI = (zfsdizvol_t *)IrpSp->Parameters.QueryInterface.Interface;
@@ -5765,6 +5767,7 @@ pnp_query_di(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 				pDI->header.InterfaceDereference = DecZvolRef;
 				pDI->Read = ZvolDiRead;
 				pDI->Write = ZvolDiWrite;
+				pDI->Unmap = ZvolDiUnmap;
 				Irp->IoStatus.Information = 0;
 				status = STATUS_SUCCESS;
 			}
