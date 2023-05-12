@@ -143,9 +143,6 @@ unsigned long zil_slog_bulk = 768 * 1024;
 static kmem_cache_t *zil_lwb_cache;
 static kmem_cache_t *zil_zcw_cache;
 
-#define	LWB_EMPTY(lwb) ((BP_GET_LSIZE(&lwb->lwb_blk) - \
-    sizeof (zil_chain_t)) == (lwb->lwb_sz - lwb->lwb_nused))
-
 static int
 zil_bp_compare(const void *x1, const void *x2)
 {
@@ -583,11 +580,6 @@ zil_alloc_lwb(zilog_t *zilog, blkptr_t *bp, boolean_t slog, uint64_t txg,
 	list_insert_tail(&zilog->zl_lwb_list, lwb);
 	mutex_exit(&zilog->zl_lock);
 
-	ASSERT(!MUTEX_HELD(&lwb->lwb_vdev_lock));
-	ASSERT(avl_is_empty(&lwb->lwb_vdev_tree));
-	VERIFY(list_is_empty(&lwb->lwb_waiters));
-	VERIFY(list_is_empty(&lwb->lwb_itxs));
-
 	return (lwb);
 }
 
@@ -596,8 +588,8 @@ zil_free_lwb(zilog_t *zilog, lwb_t *lwb)
 {
 	ASSERT(MUTEX_HELD(&zilog->zl_lock));
 	ASSERT(!MUTEX_HELD(&lwb->lwb_vdev_lock));
-	VERIFY(list_is_empty(&lwb->lwb_waiters));
-	VERIFY(list_is_empty(&lwb->lwb_itxs));
+	ASSERT(list_is_empty(&lwb->lwb_waiters));
+	ASSERT(list_is_empty(&lwb->lwb_itxs));
 	ASSERT(avl_is_empty(&lwb->lwb_vdev_tree));
 	ASSERT3P(lwb->lwb_write_zio, ==, NULL);
 	ASSERT3P(lwb->lwb_root_zio, ==, NULL);
@@ -783,12 +775,10 @@ zil_destroy(zilog_t *zilog, boolean_t keep_first)
 	if (!list_is_empty(&zilog->zl_lwb_list)) {
 		ASSERT(zh->zh_claim_txg == 0);
 		VERIFY(!keep_first);
-		while ((lwb = list_head(&zilog->zl_lwb_list)) != NULL) {
+		while ((lwb = list_remove_head(&zilog->zl_lwb_list)) != NULL) {
 			if (lwb->lwb_fastwrite)
 				metaslab_fastwrite_unmark(zilog->zl_spa,
 				    &lwb->lwb_blk);
-
-			list_remove(&zilog->zl_lwb_list, lwb);
 			if (lwb->lwb_buf != NULL)
 				zio_buf_free(lwb->lwb_buf, lwb->lwb_sz);
 			zio_free(zilog->zl_spa, txg, &lwb->lwb_blk);
@@ -1142,6 +1132,7 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
 	spa_config_exit(zilog->zl_spa, SCL_STATE, lwb);
 
 	zio_buf_free(lwb->lwb_buf, lwb->lwb_sz);
+	hrtime_t t = gethrtime() - lwb->lwb_issued_timestamp;
 
 	mutex_enter(&zilog->zl_lock);
 
@@ -1154,9 +1145,7 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
 	 */
 	lwb->lwb_buf = NULL;
 
-	ASSERT3U(lwb->lwb_issued_timestamp, >, 0);
-	zilog->zl_last_lwb_latency = (zilog->zl_last_lwb_latency * 3 +
-	    gethrtime() - lwb->lwb_issued_timestamp) / 4;
+	zilog->zl_last_lwb_latency = (zilog->zl_last_lwb_latency * 7 + t) / 8;
 
 	lwb->lwb_root_zio = NULL;
 
@@ -1173,16 +1162,11 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
 		zilog->zl_commit_lr_seq = zilog->zl_lr_seq;
 	}
 
-	while ((itx = list_head(&lwb->lwb_itxs)) != NULL) {
-		list_remove(&lwb->lwb_itxs, itx);
+	while ((itx = list_remove_head(&lwb->lwb_itxs)) != NULL)
 		zil_itx_destroy(itx);
-	}
 
-	while ((zcw = list_head(&lwb->lwb_waiters)) != NULL) {
+	while ((zcw = list_remove_head(&lwb->lwb_waiters)) != NULL) {
 		mutex_enter(&zcw->zcw_lock);
-
-		ASSERT(list_link_active(&zcw->zcw_node));
-		list_remove(&lwb->lwb_waiters, zcw);
 
 		ASSERT3P(zcw->zcw_lwb, ==, lwb);
 		zcw->zcw_lwb = NULL;
@@ -1336,7 +1320,7 @@ zil_lwb_write_done(zio_t *zio)
 	 * write and/or fsync activity, as it has the potential to
 	 * coalesce multiple flush commands to a vdev into one.
 	 */
-	if (list_head(&lwb->lwb_waiters) == NULL && nlwb != NULL) {
+	if (list_is_empty(&lwb->lwb_waiters) && nlwb != NULL) {
 		zil_lwb_flush_defer(lwb, nlwb);
 		ASSERT(avl_is_empty(&lwb->lwb_vdev_tree));
 		return;
@@ -1344,7 +1328,7 @@ zil_lwb_write_done(zio_t *zio)
 
 	while ((zv = avl_destroy_nodes(t, &cookie)) != NULL) {
 		vdev_t *vd = vdev_lookup_top(spa, zv->zv_vdev);
-		if (vd != NULL) {
+		if (vd != NULL && !vd->vdev_nowritecache) {
 			/*
 			 * The "ZIO_FLAG_DONT_PROPAGATE" is currently
 			 * always used within "zio_flush". This means,
@@ -1733,8 +1717,6 @@ zil_lwb_commit(zilog_t *zilog, itx_t *itx, lwb_t *lwb)
 	zilog->zl_cur_used += (reclen + dlen);
 	txg = lrc->lrc_txg;
 
-	ASSERT3U(zilog->zl_cur_used, <, UINT64_MAX - (reclen + dlen));
-
 cont:
 	/*
 	 * If this record won't fit in the current log block, start a new one.
@@ -1750,7 +1732,6 @@ cont:
 		if (lwb == NULL)
 			return (NULL);
 		zil_lwb_write_open(zilog, lwb);
-		ASSERT(LWB_EMPTY(lwb));
 		lwb_sp = lwb->lwb_sz - lwb->lwb_nused;
 
 		/*
@@ -1935,7 +1916,7 @@ zil_itxg_clean(void *arg)
 	itx_async_node_t *ian;
 
 	list = &itxs->i_sync_list;
-	while ((itx = list_head(list)) != NULL) {
+	while ((itx = list_remove_head(list)) != NULL) {
 		/*
 		 * In the general case, commit itxs will not be found
 		 * here, as they'll be committed to an lwb via
@@ -1958,7 +1939,6 @@ zil_itxg_clean(void *arg)
 		if (itx->itx_lr.lrc_txtype == TX_COMMIT)
 			zil_commit_waiter_skip(itx->itx_private);
 
-		list_remove(list, itx);
 		zil_itx_destroy(itx);
 	}
 
@@ -1966,8 +1946,7 @@ zil_itxg_clean(void *arg)
 	t = &itxs->i_async_tree;
 	while ((ian = avl_destroy_nodes(t, &cookie)) != NULL) {
 		list = &ian->ia_list;
-		while ((itx = list_head(list)) != NULL) {
-			list_remove(list, itx);
+		while ((itx = list_remove_head(list)) != NULL) {
 			/* commit itxs should never be on the async lists. */
 			ASSERT3U(itx->itx_lr.lrc_txtype, !=, TX_COMMIT);
 			zil_itx_destroy(itx);
@@ -2028,8 +2007,7 @@ zil_remove_async(zilog_t *zilog, uint64_t oid)
 			list_move_tail(&clean_list, &ian->ia_list);
 		mutex_exit(&itxg->itxg_lock);
 	}
-	while ((itx = list_head(&clean_list)) != NULL) {
-		list_remove(&clean_list, itx);
+	while ((itx = list_remove_head(&clean_list)) != NULL) {
 		/* commit itxs should never be on the async lists. */
 		ASSERT3U(itx->itx_lr.lrc_txtype, !=, TX_COMMIT);
 		zil_itx_destroy(itx);
@@ -2331,7 +2309,7 @@ zil_commit_writer_stall(zilog_t *zilog)
 	 */
 	ASSERT(MUTEX_HELD(&zilog->zl_issuer_lock));
 	txg_wait_synced(zilog->zl_dmu_pool, 0);
-	ASSERT3P(list_tail(&zilog->zl_lwb_list), ==, NULL);
+	ASSERT(list_is_empty(&zilog->zl_lwb_list));
 }
 
 /*
@@ -2356,7 +2334,7 @@ zil_process_commit_list(zilog_t *zilog)
 	 * Return if there's nothing to commit before we dirty the fs by
 	 * calling zil_create().
 	 */
-	if (list_head(&zilog->zl_itx_commit_list) == NULL)
+	if (list_is_empty(&zilog->zl_itx_commit_list))
 		return;
 
 	list_create(&nolwb_itxs, sizeof (itx_t), offsetof(itx_t, itx_node));
@@ -2375,7 +2353,7 @@ zil_process_commit_list(zilog_t *zilog)
 		    plwb->lwb_state == LWB_STATE_FLUSH_DONE);
 	}
 
-	while ((itx = list_head(&zilog->zl_itx_commit_list)) != NULL) {
+	while ((itx = list_remove_head(&zilog->zl_itx_commit_list)) != NULL) {
 		lr_t *lrc = &itx->itx_lr;
 		uint64_t txg = lrc->lrc_txg;
 
@@ -2388,8 +2366,6 @@ zil_process_commit_list(zilog_t *zilog)
 			DTRACE_PROBE2(zil__process__normal__itx,
 			    zilog_t *, zilog, itx_t *, itx);
 		}
-
-		list_remove(&zilog->zl_itx_commit_list, itx);
 
 		boolean_t synced = txg <= spa_last_synced_txg(spa);
 		boolean_t frozen = txg > spa_freeze_txg(spa);
@@ -2476,20 +2452,16 @@ zil_process_commit_list(zilog_t *zilog)
 		 * normal.
 		 */
 		zil_commit_waiter_t *zcw;
-		while ((zcw = list_head(&nolwb_waiters)) != NULL) {
+		while ((zcw = list_remove_head(&nolwb_waiters)) != NULL)
 			zil_commit_waiter_skip(zcw);
-			list_remove(&nolwb_waiters, zcw);
-		}
 
 		/*
 		 * And finally, we have to destroy the itx's that
 		 * couldn't be committed to an lwb; this will also call
 		 * the itx's callback if one exists for the itx.
 		 */
-		while ((itx = list_head(&nolwb_itxs)) != NULL) {
-			list_remove(&nolwb_itxs, itx);
+		while ((itx = list_remove_head(&nolwb_itxs)) != NULL)
 			zil_itx_destroy(itx);
-		}
 	} else {
 		ASSERT(list_is_empty(&nolwb_waiters));
 		ASSERT3P(lwb, !=, NULL);
@@ -2697,7 +2669,7 @@ zil_commit_waiter_timeout(zilog_t *zilog, zil_commit_waiter_t *zcw)
 	 */
 	lwb_t *nlwb = zil_lwb_write_issue(zilog, lwb);
 
-	IMPLY(nlwb != NULL, lwb->lwb_state != LWB_STATE_OPENED);
+	ASSERT3S(lwb->lwb_state, !=, LWB_STATE_OPENED);
 
 	/*
 	 * Since the lwb's zio hadn't been issued by the time this thread
@@ -3167,7 +3139,7 @@ zil_sync(zilog_t *zilog, dmu_tx_t *tx)
 	if (zilog->zl_destroy_txg == txg) {
 		blkptr_t blk = zh->zh_log;
 
-		ASSERT(list_head(&zilog->zl_lwb_list) == NULL);
+		ASSERT(list_is_empty(&zilog->zl_lwb_list));
 
 		bzero(zh, sizeof (zil_header_t));
 		bzero(zilog->zl_replayed_seq, sizeof (zilog->zl_replayed_seq));
@@ -3200,7 +3172,7 @@ zil_sync(zilog_t *zilog, dmu_tx_t *tx)
 		 * out the zil_header blkptr so that we don't end
 		 * up freeing the same block twice.
 		 */
-		if (list_head(&zilog->zl_lwb_list) == NULL)
+		if (list_is_empty(&zilog->zl_lwb_list))
 			BP_ZERO(&zh->zh_log);
 	}
 
@@ -3395,7 +3367,7 @@ zil_close(zilog_t *zilog)
 	if (!dmu_objset_is_snapshot(zilog->zl_os)) {
 		zil_commit(zilog, 0);
 	} else {
-		ASSERT3P(list_tail(&zilog->zl_lwb_list), ==, NULL);
+		ASSERT(list_is_empty(&zilog->zl_lwb_list));
 		ASSERT0(zilog->zl_dirty_max_txg);
 		ASSERT3B(zilog_is_dirty(zilog), ==, B_FALSE);
 	}
@@ -3437,15 +3409,14 @@ zil_close(zilog_t *zilog)
 	 * We should have only one lwb left on the list; remove it now.
 	 */
 	mutex_enter(&zilog->zl_lock);
-	lwb = list_head(&zilog->zl_lwb_list);
+	lwb = list_remove_head(&zilog->zl_lwb_list);
 	if (lwb != NULL) {
-		ASSERT3P(lwb, ==, list_tail(&zilog->zl_lwb_list));
+		ASSERT(list_is_empty(&zilog->zl_lwb_list));
 		ASSERT3S(lwb->lwb_state, !=, LWB_STATE_ISSUED);
 
 		if (lwb->lwb_fastwrite)
 			metaslab_fastwrite_unmark(zilog->zl_spa, &lwb->lwb_blk);
 
-		list_remove(&zilog->zl_lwb_list, lwb);
 		zio_buf_free(lwb->lwb_buf, lwb->lwb_sz);
 		zil_free_lwb(zilog, lwb);
 	}
