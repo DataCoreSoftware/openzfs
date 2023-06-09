@@ -6681,6 +6681,7 @@ dump_block_stats(spa_t *spa)
 }
 
 typedef struct zdb_ddt_entry {
+	/* key must be first for ddt_key_compare */
 	ddt_key_t	zdde_key;
 	uint64_t	zdde_ref_blocks;
 	uint64_t	zdde_ref_lsize;
@@ -6743,7 +6744,7 @@ dump_simulated_ddt(spa_t *spa)
 
 	bzero(&ddh_total, sizeof (ddh_total));
 	bzero(&dds_total, sizeof (dds_total));
-	avl_create(&t, ddt_entry_compare,
+	avl_create(&t, ddt_key_compare,
 	    sizeof (zdb_ddt_entry_t), offsetof(zdb_ddt_entry_t, zdde_node));
 
 	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
