@@ -932,7 +932,18 @@ ddt_lookup(ddt_t *ddt, const blkptr_t *bp)
 	dde->dde_class = class;	/* will be DDT_CLASSES if no entry found */
 
 	if (error == 0) {
-		ddt_stat_update(ddt, dde, -1ULL);
+		/*
+		 * The histograms only track inactive (stored) blocks.
+		 * We've just put an entry onto the live list, so we need to
+		 * remove its counts. When its synced back, it'll be re-added
+		 * to the right one.
+		 */
+		ddt_histogram_t *ddh =
+		    &ddt->ddt_histogram[dde->dde_type][dde->dde_class];
+
+		ddt_lightweight_entry_t ddlwe;
+		DDT_ENTRY_TO_LIGHTWEIGHT(ddt, dde, &ddlwe);
+		ddt_histogram_sub_entry(ddt, ddh, &ddlwe);
 	}
 
 	/* Entry loaded, everyone can proceed now */
@@ -1467,10 +1478,17 @@ ddt_sync_entry(ddt_t *ddt, ddt_entry_t *dde, dmu_tx_t *tx, uint64_t txg)
 	if (total_refcnt != 0) {
 		dde->dde_type = ntype;
 		dde->dde_class = nclass;
-		ddt_stat_update(ddt, dde, 0);
+
 		if (!ddt_object_exists(ddt, ntype, nclass))
 			ddt_object_create(ddt, ntype, nclass, tx);
 		VERIFY0(ddt_object_update(ddt, ntype, nclass, dde, tx));
+
+		ddt_lightweight_entry_t ddlwe;
+		DDT_ENTRY_TO_LIGHTWEIGHT(ddt, dde, &ddlwe);
+
+		ddt_histogram_t *ddh =
+		    &ddt->ddt_histogram[ntype][nclass];
+		ddt_histogram_add_entry(ddt, ddh, &ddlwe);
 
 		/*
 		 * If the class changes, the order that we scan this bp
@@ -1480,8 +1498,6 @@ ddt_sync_entry(ddt_t *ddt, ddt_entry_t *dde, dmu_tx_t *tx, uint64_t txg)
 		 * traversing.)
 		 */
 		if (nclass < oclass) {
-			ddt_lightweight_entry_t ddlwe;
-			DDT_ENTRY_TO_LIGHTWEIGHT(ddt, dde, &ddlwe);
 			dsl_scan_ddt_entry(dp->dp_scan,
 			    ddt->ddt_checksum, ddt, &ddlwe, tx);
 		}
