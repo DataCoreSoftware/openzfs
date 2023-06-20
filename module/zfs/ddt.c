@@ -39,6 +39,7 @@
 #include <sys/zio_checksum.h>
 #include <sys/dsl_scan.h>
 #include <sys/abd.h>
+#include <sys/zfeature.h>
 
 /*
  * # DDT: Deduplication tables
@@ -162,6 +163,18 @@ static const char *const ddt_class_name[DDT_CLASSES] = {
 	"unique",
 };
 
+/*
+ * DDT feature flags automatically enabled for each on-disk version. Note that
+ * versions >0 cannot exist on disk without SPA_FEATURE_FAST_DEDUP enabled.
+ */
+static const uint64_t ddt_version_flags[] = {
+	[DDT_VERSION_LEGACY] = 0,
+	[DDT_VERSION_FDT] = 0,
+};
+
+/* Dummy version to signal that configure is still necessary */
+#define	DDT_VERSION_UNCONFIGURED	(UINT64_MAX)
+
 static void
 ddt_object_create(ddt_t *ddt, ddt_type_t type, ddt_class_t class,
     dmu_tx_t *tx)
@@ -173,14 +186,18 @@ ddt_object_create(ddt_t *ddt, ddt_type_t type, ddt_class_t class,
 	    ZCHECKSUM_FLAG_DEDUP;
 	char name[DDT_NAMELEN];
 
+	ASSERT3U(ddt->ddt_dir_object, >, 0);
+
 	ddt_object_name(ddt, type, class, name);
 
 	ASSERT3U(*objectp, ==, 0);
 	VERIFY0(ddt_ops[type]->ddt_op_create(os, objectp, tx, prehash));
 	ASSERT3U(*objectp, !=, 0);
 
-	VERIFY0(zap_add(os, DMU_POOL_DIRECTORY_OBJECT, name,
-	    sizeof (uint64_t), 1, objectp, tx));
+	ASSERT3U(ddt->ddt_version, !=, DDT_VERSION_UNCONFIGURED);
+
+	VERIFY0(zap_add(os, ddt->ddt_dir_object, name, sizeof (uint64_t), 1,
+	    objectp, tx));
 
 	VERIFY0(zap_add(os, spa->spa_ddt_stat_object, name,
 	    sizeof (uint64_t), sizeof (ddt_histogram_t) / sizeof (uint64_t),
@@ -197,13 +214,15 @@ ddt_object_destroy(ddt_t *ddt, ddt_type_t type, ddt_class_t class,
 	uint64_t count;
 	char name[DDT_NAMELEN];
 
+	ASSERT3U(ddt->ddt_dir_object, >, 0);
+
 	ddt_object_name(ddt, type, class, name);
 
 	ASSERT3U(*objectp, !=, 0);
 	ASSERT(ddt_histogram_empty(&ddt->ddt_histogram[type][class]));
 	VERIFY0(ddt_object_count(ddt, type, class, &count));
 	VERIFY0(count);
-	VERIFY0(zap_remove(os, DMU_POOL_DIRECTORY_OBJECT, name, tx));
+	VERIFY0(zap_remove(os, ddt->ddt_dir_object, name, tx));
 	VERIFY0(zap_remove(os, spa->spa_ddt_stat_object, name, tx));
 	VERIFY0(ddt_ops[type]->ddt_op_destroy(os, *objectp, tx));
 	memset(&ddt->ddt_object_stats[type][class], 0, sizeof (ddt_object_t));
@@ -220,9 +239,18 @@ ddt_object_load(ddt_t *ddt, ddt_type_t type, ddt_class_t class)
 	char name[DDT_NAMELEN];
 	int error;
 
+	if (ddt->ddt_dir_object == 0) {
+		/*
+		 * If we're configured but the containing dir doesn't exist
+		 * yet, then this object can't possibly exist either.
+		 */
+		ASSERT3U(ddt->ddt_version, !=, DDT_VERSION_UNCONFIGURED);
+		return (SET_ERROR(ENOENT));
+	}
+
 	ddt_object_name(ddt, type, class, name);
 
-	error = zap_lookup(ddt->ddt_os, DMU_POOL_DIRECTORY_OBJECT, name,
+	error = zap_lookup(ddt->ddt_os, ddt->ddt_dir_object, name,
 	    sizeof (uint64_t), 1, &ddt->ddt_object[type][class]);
 	if (error != 0)
 		return (error);
@@ -575,6 +603,87 @@ ddt_remove(ddt_t *ddt, ddt_entry_t *dde)
 	ddt_free(dde);
 }
 
+static boolean_t
+ddt_special_over_quota(spa_t *spa, metaslab_class_t *mc)
+{
+	if (mc != NULL && metaslab_class_get_space(mc) > 0) {
+		/* Over quota if allocating outside of this special class */
+		if (spa_syncing_txg(spa) <= spa->spa_dedup_class_full_txg +
+		    dedup_class_wait_txgs) {
+			/* Waiting for some deferred frees to be processed */
+			return (B_TRUE);
+		}
+
+		/*
+		 * We're considered over quota when we hit 85% full, or for
+		 * larger drives, when there is less than 8GB free.
+		 */
+		uint64_t allocated = metaslab_class_get_alloc(mc);
+		uint64_t capacity = metaslab_class_get_space(mc);
+		uint64_t limit = MAX(capacity * 85 / 100,
+		    (capacity > (1LL<<33)) ? capacity - (1LL<<33) : 0);
+
+		return (allocated >= limit);
+	}
+	return (B_FALSE);
+}
+
+/*
+ * Check if the DDT is over its quota.  This can be due to a few conditions:
+ *   1. 'dedup_table_quota' property is not 0 (none) and the dedup dsize
+ *       exceeds this limit
+ *
+ *   2. 'dedup_table_quota' property is set to automatic and
+ *      a. the dedup or special allocation class could not satisfy a DDT
+ *         allocation in a recent transaction
+ *      b. the dedup or special allocation class has exceeded its 85% limit
+ */
+static boolean_t
+ddt_over_quota(spa_t *spa)
+{
+	if (spa->spa_dedup_table_quota == 0)
+		return (B_FALSE);
+
+	if (spa->spa_dedup_table_quota != UINT64_MAX)
+		return (ddt_get_ddt_dsize(spa) > spa->spa_dedup_table_quota);
+
+	/*
+	 * For automatic quota, table size is limited by dedup or special class
+	 */
+	if (ddt_special_over_quota(spa, spa_dedup_class(spa)))
+		return (B_TRUE);
+	else if (spa_special_has_ddt(spa) &&
+	    ddt_special_over_quota(spa, spa_special_class(spa)))
+		return (B_TRUE);
+
+	return (B_FALSE);
+}
+
+void
+ddt_prefetch_all(spa_t *spa)
+{
+	/*
+	 * Load all DDT entries for each type/class combination. This is
+	 * indended to perform a prefetch on all such blocks. For the same
+	 * reason that ddt_prefetch isn't locked, this is also not locked.
+	 */
+	for (enum zio_checksum c = 0; c < ZIO_CHECKSUM_FUNCTIONS; c++) {
+		ddt_t *ddt = spa->spa_ddt[c];
+		if (!ddt)
+			continue;
+
+		for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
+			for (ddt_class_t class = 0; class < DDT_CLASSES;
+			    class++) {
+				ddt_object_prefetch_all(ddt, type, class);
+			}
+		}
+	}
+}
+
+static int ddt_configure(ddt_t *ddt, boolean_t new);
+
+
 ddt_entry_t *
 ddt_lookup(ddt_t *ddt, const blkptr_t *bp, boolean_t add)
 {
@@ -586,6 +695,15 @@ ddt_lookup(ddt_t *ddt, const blkptr_t *bp, boolean_t add)
 	int error;
 
 	ASSERT(MUTEX_HELD(&ddt->ddt_lock));
+
+	if (ddt->ddt_version == DDT_VERSION_UNCONFIGURED) {
+		/*
+		 * This is the first use of this DDT since the pool was
+		 * created; finish getting it ready for use.
+		 */
+		VERIFY0(ddt_configure(ddt, B_TRUE));
+		ASSERT3U(ddt->ddt_version, !=, DDT_VERSION_UNCONFIGURED);
+	}
 
 	ddt_key_fill(&search, bp);
 
@@ -699,6 +817,181 @@ ddt_key_compare(const void *x1, const void *x2)
 	return (TREE_ISIGN(cmp));
 }
 
+/* Create the containing dir for this DDT and bump the feature count */
+static void
+ddt_create_dir(ddt_t *ddt, dmu_tx_t *tx)
+{
+	ASSERT3U(ddt->ddt_dir_object, ==, 0);
+	ASSERT3U(ddt->ddt_version, ==, DDT_VERSION_FDT);
+
+	char name[DDT_NAMELEN];
+	snprintf(name, DDT_NAMELEN, DMU_POOL_DDT_DIR,
+	    zio_checksum_table[ddt->ddt_checksum].ci_name);
+
+	ddt->ddt_dir_object = zap_create_link(ddt->ddt_os,
+	    DMU_OTN_ZAP_METADATA, DMU_POOL_DIRECTORY_OBJECT, name, tx);
+
+	VERIFY0(zap_add(ddt->ddt_os, ddt->ddt_dir_object, DDT_DIR_VERSION,
+	    sizeof (uint64_t), 1, &ddt->ddt_version, tx));
+	VERIFY0(zap_add(ddt->ddt_os, ddt->ddt_dir_object, DDT_DIR_FLAGS,
+	    sizeof (uint64_t), 1, &ddt->ddt_flags, tx));
+
+	spa_feature_incr(ddt->ddt_spa, SPA_FEATURE_FAST_DEDUP, tx);
+}
+
+/* Destroy the containing dir and deactivate the feature */
+static void
+ddt_destroy_dir(ddt_t *ddt, dmu_tx_t *tx)
+{
+	ASSERT3U(ddt->ddt_dir_object, !=, 0);
+	ASSERT3U(ddt->ddt_dir_object, !=, DMU_POOL_DIRECTORY_OBJECT);
+	ASSERT3U(ddt->ddt_version, ==, DDT_VERSION_FDT);
+
+	char name[DDT_NAMELEN];
+	snprintf(name, DDT_NAMELEN, DMU_POOL_DDT_DIR,
+	    zio_checksum_table[ddt->ddt_checksum].ci_name);
+
+	for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
+		for (ddt_class_t class = 0; class < DDT_CLASSES; class++) {
+			ASSERT(!ddt_object_exists(ddt, type, class));
+		}
+	}
+
+	uint64_t count;
+	ASSERT0(zap_count(ddt->ddt_os, ddt->ddt_dir_object, &count));
+	ASSERT0(zap_contains(ddt->ddt_os, ddt->ddt_dir_object,
+	    DDT_DIR_VERSION));
+	ASSERT0(zap_contains(ddt->ddt_os, ddt->ddt_dir_object, DDT_DIR_FLAGS));
+	ASSERT3U(count, ==, 2);
+
+	VERIFY0(zap_remove(ddt->ddt_os, DMU_POOL_DIRECTORY_OBJECT, name, tx));
+	VERIFY0(zap_destroy(ddt->ddt_os, ddt->ddt_dir_object, tx));
+
+	ddt->ddt_dir_object = 0;
+
+	spa_feature_decr(ddt->ddt_spa, SPA_FEATURE_FAST_DEDUP, tx);
+}
+
+/*
+ * Determine, flags and on-disk layout from what's already stored. If there's
+ * nothing stored, then if new is false, returns ENOENT, and if true, selects
+ * based on pool config.
+ */
+static int
+ddt_configure(ddt_t *ddt, boolean_t new)
+{
+	spa_t *spa = ddt->ddt_spa;
+	char name[DDT_NAMELEN];
+	int error;
+
+	ASSERT3U(spa_load_state(spa), !=, SPA_LOAD_CREATE);
+
+	boolean_t fdt_enabled =
+	    spa_feature_is_enabled(spa, SPA_FEATURE_FAST_DEDUP);
+	boolean_t fdt_active =
+	    spa_feature_is_active(spa, SPA_FEATURE_FAST_DEDUP);
+
+	/*
+	 * First, look for the global DDT stats object. If its not there, then
+	 * there's never been a DDT written before ever, and we know we're
+	 * starting from scratch.
+	 */
+	error = zap_lookup(spa->spa_meta_objset, DMU_POOL_DIRECTORY_OBJECT,
+	    DMU_POOL_DDT_STATS, sizeof (uint64_t), 1,
+	    &spa->spa_ddt_stat_object);
+	if (error != 0) {
+		if (error != ENOENT)
+			return (error);
+		goto not_found;
+	}
+
+	if (fdt_active) {
+		/*
+		 * Now look for a DDT directory. If it exists, then it has
+		 * everything we need.
+		 */
+		snprintf(name, DDT_NAMELEN, DMU_POOL_DDT_DIR,
+		    zio_checksum_table[ddt->ddt_checksum].ci_name);
+
+		error = zap_lookup(spa->spa_meta_objset,
+		    DMU_POOL_DIRECTORY_OBJECT, name, sizeof (uint64_t), 1,
+		    &ddt->ddt_dir_object);
+		if (error == 0) {
+			ASSERT3U(spa->spa_meta_objset, ==, ddt->ddt_os);
+
+			error = zap_lookup(ddt->ddt_os, ddt->ddt_dir_object,
+			    DDT_DIR_VERSION, sizeof (uint64_t), 1,
+			    &ddt->ddt_version);
+			if (error != 0)
+				return (error);
+
+			error = zap_lookup(ddt->ddt_os, ddt->ddt_dir_object,
+			    DDT_DIR_FLAGS, sizeof (uint64_t), 1,
+			    &ddt->ddt_flags);
+			if (error != 0)
+				return (error);
+
+			if (ddt->ddt_version != DDT_VERSION_FDT) {
+				zfs_dbgmsg("ddt_configure: spa=%s ddt_dir=%s "
+				    "unknown version %llu", spa_name(spa),
+				    name, (u_longlong_t)ddt->ddt_version);
+				return (SET_ERROR(EINVAL));
+			}
+
+			if ((ddt->ddt_flags & ~DDT_FLAG_MASK) != 0) {
+				zfs_dbgmsg("ddt_configure: spa=%s ddt_dir=%s "
+				    "version=%llu unknown flags %llx",
+				    spa_name(spa), name,
+				    (u_longlong_t)ddt->ddt_flags,
+				    (u_longlong_t)ddt->ddt_version);
+				return (SET_ERROR(EINVAL));
+			}
+
+			return (0);
+		}
+		if (error != ENOENT)
+			return (error);
+	}
+
+	/* Any object in the root indicates a traditional setup. */
+	for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
+		for (ddt_class_t class = 0; class < DDT_CLASSES; class++) {
+			ddt_object_name(ddt, type, class, name);
+			uint64_t obj;
+			error = zap_lookup(spa->spa_meta_objset,
+			    DMU_POOL_DIRECTORY_OBJECT, name, sizeof (uint64_t),
+			    1, &obj);
+			if (error == ENOENT)
+				continue;
+			if (error != 0)
+				return (error);
+
+			ddt->ddt_version = DDT_VERSION_LEGACY;
+			ddt->ddt_flags = ddt_version_flags[ddt->ddt_version];
+			ddt->ddt_dir_object = DMU_POOL_DIRECTORY_OBJECT;
+
+			return (0);
+		}
+	}
+
+not_found:
+	if (!new)
+		return (SET_ERROR(ENOENT));
+
+	/* Nothing on disk, so set up for the best version we can */
+	if (fdt_enabled) {
+		ddt->ddt_version = DDT_VERSION_FDT;
+		ddt->ddt_flags = ddt_version_flags[ddt->ddt_version];
+		ddt->ddt_dir_object = 0; /* create on first use */
+	} else {
+		ddt->ddt_version = DDT_VERSION_LEGACY;
+		ddt->ddt_flags = ddt_version_flags[ddt->ddt_version];
+		ddt->ddt_dir_object = DMU_POOL_DIRECTORY_OBJECT;
+	}
+
+	return (0);
+}
+
 static ddt_t *
 ddt_table_alloc(spa_t *spa, enum zio_checksum c)
 {
@@ -715,6 +1008,7 @@ ddt_table_alloc(spa_t *spa, enum zio_checksum c)
 	ddt->ddt_checksum = c;
 	ddt->ddt_spa = spa;
 	ddt->ddt_os = spa->spa_meta_objset;
+	ddt->ddt_version = DDT_VERSION_UNCONFIGURED;
 
 	return (ddt);
 }
@@ -751,7 +1045,6 @@ ddt_load(spa_t *spa)
 	error = zap_lookup(spa->spa_meta_objset, DMU_POOL_DIRECTORY_OBJECT,
 	    DMU_POOL_DDT_STATS, sizeof (uint64_t), 1,
 	    &spa->spa_ddt_stat_object);
-
 	if (error)
 		return (error == ENOENT ? 0 : error);
 
@@ -760,6 +1053,12 @@ ddt_load(spa_t *spa)
 			continue;
 
 		ddt_t *ddt = spa->spa_ddt[c];
+		error = ddt_configure(ddt, B_FALSE);
+		if (error == ENOENT)
+			continue;
+		if (error != 0)
+			return (error);
+
 		for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
 			for (ddt_class_t class = 0; class < DDT_CLASSES;
 			    class++) {
@@ -774,8 +1073,10 @@ ddt_load(spa_t *spa)
 		 */
 		memcpy(&ddt->ddt_histogram_cache, ddt->ddt_histogram,
 		    sizeof (ddt->ddt_histogram));
-		spa->spa_dedup_dspace = ~0ULL;
 	}
+
+	spa->spa_dedup_dspace = ~0ULL;
+	spa->spa_dedup_dsize = ~0ULL;
 
 	return (0);
 }
@@ -1008,25 +1309,44 @@ ddt_sync_table(ddt_t *ddt, dmu_tx_t *tx, uint64_t txg)
 		    DMU_POOL_DDT_STATS, tx);
 	}
 
+	if (ddt->ddt_version == DDT_VERSION_FDT && ddt->ddt_dir_object == 0)
+		ddt_create_dir(ddt, tx);
+
 	while ((dde = avl_destroy_nodes(&ddt->ddt_tree, &cookie)) != NULL) {
 		ddt_sync_entry(ddt, dde, tx, txg);
 		ddt_free(dde);
 	}
 
+	uint64_t count = 0;
 	for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
-		uint64_t add, count = 0;
+		uint64_t add, tcount = 0;
 		for (ddt_class_t class = 0; class < DDT_CLASSES; class++) {
 			if (ddt_object_exists(ddt, type, class)) {
 				ddt_object_sync(ddt, type, class, tx);
 				VERIFY0(ddt_object_count(ddt, type, class,
 				    &add));
-				count += add;
+				tcount += add;
 			}
 		}
 		for (ddt_class_t class = 0; class < DDT_CLASSES; class++) {
-			if (count == 0 && ddt_object_exists(ddt, type, class))
+			if (tcount == 0 && ddt_object_exists(ddt, type, class))
 				ddt_object_destroy(ddt, type, class, tx);
 		}
+		count += tcount;
+	}
+
+	if (count == 0) {
+		/*
+		 * No entries left on the DDT, so reset the version for next
+		 * time. This allows us to handle the feature being changed
+		 * since the DDT was originally created. New entries should get
+		 * whatever the feature currently demands.
+		 */
+		if (ddt->ddt_version == DDT_VERSION_FDT)
+			ddt_destroy_dir(ddt, tx);
+
+		ddt->ddt_version = DDT_VERSION_UNCONFIGURED;
+		ddt->ddt_flags = 0;
 	}
 
 	memcpy(&ddt->ddt_histogram_cache, ddt->ddt_histogram,
