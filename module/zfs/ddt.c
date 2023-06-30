@@ -34,7 +34,6 @@
 #include <sys/arc.h>
 #include <sys/dsl_pool.h>
 #include <sys/zio_checksum.h>
-#include <sys/zio_compress.h>
 #include <sys/dsl_scan.h>
 #include <sys/abd.h>
 
@@ -382,47 +381,6 @@ ddt_phys_total_refcnt(const ddt_entry_t *dde)
 	return (refcnt);
 }
 
-size_t
-ddt_compress(void *src, uchar_t *dst, size_t s_len, size_t d_len)
-{
-	uchar_t *version = dst++;
-	int cpfunc = ZIO_COMPRESS_ZLE;
-	zio_compress_info_t *ci = &zio_compress_table[cpfunc];
-	size_t c_len;
-
-	ASSERT3U(d_len, >=, s_len + 1);	/* no compression plus version byte */
-
-	c_len = ci->ci_compress(src, dst, s_len, d_len - 1, ci->ci_level);
-
-	if (c_len == s_len) {
-		cpfunc = ZIO_COMPRESS_OFF;
-		bcopy(src, dst, s_len);
-	}
-
-	*version = cpfunc;
-	/* CONSTCOND */
-	if (ZFS_HOST_BYTEORDER)
-		*version |= DDT_COMPRESS_BYTEORDER_MASK;
-
-	return (c_len + 1);
-}
-
-void
-ddt_decompress(uchar_t *src, void *dst, size_t s_len, size_t d_len)
-{
-	uchar_t version = *src++;
-	int cpfunc = version & DDT_COMPRESS_FUNCTION_MASK;
-	zio_compress_info_t *ci = &zio_compress_table[cpfunc];
-
-	if (ci->ci_decompress != NULL)
-		(void) ci->ci_decompress(src, dst, s_len, d_len, ci->ci_level);
-	else
-		bcopy(src, dst, d_len);
-
-	if (((version & DDT_COMPRESS_BYTEORDER_MASK) != 0) !=
-	    (ZFS_HOST_BYTEORDER != 0))
-		byteswap_uint64_array(dst, d_len);
-}
 
 ddt_t *
 ddt_select(spa_t *spa, const blkptr_t *bp)
