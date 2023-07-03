@@ -135,8 +135,8 @@ ddt_get_dedup_object_stats(spa_t *spa, ddt_object_t *ddo_total)
 		if (!ddt)
 			continue;
 
-		for (enum ddt_type type = 0; type < DDT_TYPES; type++) {
-			for (enum ddt_class class = 0; class < DDT_CLASSES;
+		for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
+			for (ddt_class_t class = 0; class < DDT_CLASSES;
 			    class++) {
 				ddt_object_t *ddo =
 				    &ddt->ddt_object_stats[type][class];
@@ -162,8 +162,8 @@ ddt_get_dedup_histogram(spa_t *spa, ddt_histogram_t *ddh)
 		if (!ddt)
 			continue;
 
-		for (enum ddt_type type = 0; type < DDT_TYPES; type++) {
-			for (enum ddt_class class = 0; class < DDT_CLASSES;
+		for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
+			for (ddt_class_t class = 0; class < DDT_CLASSES;
 			    class++) {
 				ddt_histogram_add(ddh,
 				    &ddt->ddt_histogram_cache[type][class]);

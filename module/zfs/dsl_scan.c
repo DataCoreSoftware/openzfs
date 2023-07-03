@@ -172,9 +172,9 @@ int zfs_free_min_time_ms = 1000; /* min millisecs to free per txg */
 int zfs_resilver_min_time_ms = 3000; /* min millisecs to resilver per txg */
 int zfs_scan_checkpoint_intval = 7200; /* in seconds */
 int zfs_scan_suspend_progress = 0; /* set to prevent scans from progressing */
-int zfs_no_scrub_io = B_FALSE; /* set to disable scrub i/o */
-int zfs_no_scrub_prefetch = B_FALSE; /* set to disable scrub prefetch */
-enum ddt_class zfs_scrub_ddt_class_max = DDT_CLASS_DUPLICATE;
+static int zfs_no_scrub_io = B_FALSE; /* set to disable scrub i/o */
+static int zfs_no_scrub_prefetch = B_FALSE; /* set to disable scrub prefetch */
+static const ddt_class_t zfs_scrub_ddt_class_max = DDT_CLASS_DUPLICATE;
 /* max number of blocks to free in a single TXG */
 unsigned long zfs_async_block_max_blocks = ULONG_MAX;
 /* max number of dedup blocks to free in a single TXG */
@@ -2600,7 +2600,7 @@ dsl_scan_ddt_entry(dsl_scan_t *scn, enum zio_checksum checksum,
  * If there are N references to a deduped block, we don't want to scrub it
  * N times -- ideally, we should scrub it exactly once.
  *
- * We leverage the fact that the dde's replication class (enum ddt_class)
+ * We leverage the fact that the dde's replication class (ddt_class_t)
  * is ordered from highest replication class (DDT_CLASS_DITTO) to lowest
  * (DDT_CLASS_UNIQUE) so that we may walk the DDT in that order.
  *
