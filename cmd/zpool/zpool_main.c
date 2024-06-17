@@ -131,6 +131,8 @@ static int zpool_do_version(int, char **);
 
 static int zpool_do_wait(int, char **);
 
+static int zpool_do_ddt_prune(int, char **);
+
 static zpool_compat_status_t zpool_do_load_compat(
     const char *, boolean_t *);
 
@@ -159,6 +161,7 @@ typedef enum {
 	HELP_CLEAR,
 	HELP_CREATE,
 	HELP_CHECKPOINT,
+	HELP_DDT_PRUNE,
 	HELP_DESTROY,
 	HELP_DETACH,
 	HELP_EXPORT,
@@ -330,6 +333,8 @@ static zpool_command_t command_table[] = {
 	{ "sync",	zpool_do_sync,		HELP_SYNC		},
 	{ NULL },
 	{ "wait",	zpool_do_wait,		HELP_WAIT		},
+	{ NULL },
+	{ "ddtprune",	zpool_do_ddt_prune,	HELP_DDT_PRUNE		},
 };
 
 #define	NCOMMAND	(ARRAY_SIZE(command_table))
@@ -439,6 +444,10 @@ get_usage(zpool_help_t idx)
 	case HELP_WAIT:
 		return (gettext("\twait [-Hp] [-T d|u] [-t <activity>[,...]] "
 		    "<pool> [interval]\n"));
+	case HELP_DDT_PRUNE:
+		return (gettext("\tddtprune -d|-p <amount> <pool>\n"));
+	default:
+		__builtin_unreachable();
 	}
 
 	abort();
@@ -10671,6 +10680,88 @@ zpool_do_wait(int argc, char **argv)
 
 	pthread_mutex_destroy(&wd.wd_mutex);
 	pthread_cond_destroy(&wd.wd_cv);
+	return (error);
+}
+
+/*
+ * zpool ddtprune -d|-p <amount> <pool>
+ *
+ *       -d <days>	Prune entries <days> old and older
+ *       -p <percent>	Prune <percent> amount of entries
+ *
+ * Prune single reference entries from DDT to satisfy the amount specified.
+ */
+int
+zpool_do_ddt_prune(int argc, char **argv)
+{
+	zpool_ddt_prune_unit_t unit = ZPOOL_DDT_PRUNE_NONE;
+	uint64_t amount = 0;
+	zpool_handle_t *zhp;
+	char *endptr;
+	int c;
+
+	while ((c = getopt(argc, argv, "d:p:")) != -1) {
+		switch (c) {
+		case 'd':
+			if (unit == ZPOOL_DDT_PRUNE_PERCENTAGE) {
+				(void) fprintf(stderr, gettext("-d cannot be "
+				    "combined with -p option\n"));
+				usage(B_FALSE);
+			}
+			errno = 0;
+			amount = strtoull(optarg, &endptr, 0);
+			if (errno != 0 || *endptr != '\0' || amount == 0) {
+				(void) fprintf(stderr,
+				    gettext("invalid days value\n"));
+				usage(B_FALSE);
+			}
+			amount *= 86400;	/* convert days to seconds */
+			unit = ZPOOL_DDT_PRUNE_AGE;
+			break;
+		case 'p':
+			if (unit == ZPOOL_DDT_PRUNE_AGE) {
+				(void) fprintf(stderr, gettext("-p cannot be "
+				    "combined with -d option\n"));
+				usage(B_FALSE);
+			}
+			errno = 0;
+			amount = strtoull(optarg, &endptr, 0);
+			if (errno != 0 || *endptr != '\0' ||
+			    amount == 0 || amount > 100) {
+				(void) fprintf(stderr,
+				    gettext("invalid percentage value\n"));
+				usage(B_FALSE);
+			}
+			unit = ZPOOL_DDT_PRUNE_PERCENTAGE;
+			break;
+		case '?':
+			(void) fprintf(stderr, gettext("invalid option '%c'\n"),
+			    optopt);
+			usage(B_FALSE);
+		}
+	}
+	argc -= optind;
+	argv += optind;
+
+	if (unit == ZPOOL_DDT_PRUNE_NONE) {
+		(void) fprintf(stderr,
+		    gettext("missing amount option (-d|-p <value>)\n"));
+		usage(B_FALSE);
+	} else if (argc < 1) {
+		(void) fprintf(stderr, gettext("missing pool argument\n"));
+		usage(B_FALSE);
+	} else if (argc > 1) {
+		(void) fprintf(stderr, gettext("too many arguments\n"));
+		usage(B_FALSE);
+	}
+	zhp = zpool_open(g_zfs, argv[0]);
+	if (zhp == NULL)
+		return (-1);
+
+	int error = zpool_ddt_prune(zhp, unit, amount);
+
+	zpool_close(zhp);
+
 	return (error);
 }
 

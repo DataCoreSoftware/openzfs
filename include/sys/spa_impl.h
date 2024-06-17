@@ -387,6 +387,7 @@ struct spa {
 	uint64_t	spa_dedup_dspace;	/* Cache get_dedup_dspace() */
 	uint64_t	spa_dedup_checksum;	/* default dedup checksum */
 	uint64_t	spa_dspace;		/* dspace in normal class */
+	boolean_t	spa_active_ddt_prune;	/* ddt prune process active */
 	kmutex_t	spa_vdev_top_lock;	/* dueling offline/remove */
 	kmutex_t	spa_proc_lock;		/* protects spa_proc* */
 	kcondvar_t	spa_proc_cv;		/* spa_proc_state transitions */

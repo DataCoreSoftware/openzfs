@@ -404,6 +404,9 @@ extern int ddt_walk(spa_t *spa, ddt_bookmark_t *ddb,
     ddt_lightweight_entry_t *ddlwe);
 
 
+extern int ddt_prune_unique_entries(spa_t *spa, zpool_ddt_prune_unit_t unit,
+    uint64_t amount);
+
 #ifdef	__cplusplus
 }
 #endif

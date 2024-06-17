@@ -146,6 +146,10 @@ _LIBZFS_CORE_H int lzc_wait_fs(const char *, zfs_wait_activity_t, boolean_t *);
 
 _LIBZFS_CORE_H int lzc_set_bootenv(const char *, const nvlist_t *);
 _LIBZFS_CORE_H int lzc_get_bootenv(const char *, nvlist_t **);
+
+_LIBZFS_CORE_H int lzc_ddt_prune(const char *, zpool_ddt_prune_unit_t,
+    uint64_t);
+
 #ifdef	__cplusplus
 }
 #endif
