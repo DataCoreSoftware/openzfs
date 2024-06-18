@@ -685,7 +685,7 @@ static int ddt_configure(ddt_t *ddt, boolean_t new);
 
 
 ddt_entry_t *
-ddt_lookup(ddt_t *ddt, const blkptr_t *bp, boolean_t add)
+ddt_lookup(ddt_t *ddt, const blkptr_t *bp)
 {
 	ddt_key_t search;
 	ddt_entry_t *dde;
@@ -720,10 +720,6 @@ ddt_lookup(ddt_t *ddt, const blkptr_t *bp, boolean_t add)
 
 		return (dde);
 	}
-
-	/* Not found. */
-	if (!add)
-		return (NULL);
 
 	/* Time to make a new entry. */
 	dde = ddt_alloc(&search);
@@ -1442,8 +1438,14 @@ ddt_addref(spa_t *spa, const blkptr_t *bp)
 	ddt = ddt_select(spa, bp);
 	ddt_enter(ddt);
 
-	dde = ddt_lookup(ddt, bp, B_TRUE);
-	ASSERT3P(dde, !=, NULL);
+	dde = ddt_lookup(ddt, bp);
+
+	/* Can be NULL if the entry for this block was pruned. */
+	if (dde == NULL) {
+		ddt_exit(ddt);
+		spa_config_exit(spa, SCL_ZIO, FTAG);
+		return (B_FALSE);
+	}
 
 	if (dde->dde_type < DDT_TYPES) {
 		ddt_phys_t *ddp;
