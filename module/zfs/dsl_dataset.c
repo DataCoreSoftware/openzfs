@@ -2450,6 +2450,7 @@ get_receive_resume_stats_impl(dsl_dataset_t *ds)
 		fnvlist_free(token_nv);
 		compressed = kmem_alloc(packed_size, KM_SLEEP);
 
+		/* Call compress function directly to avoid hole detection. */
 		compressed_size = gzip_compress(packed, compressed,
 		    packed_size, packed_size, 6);
 
