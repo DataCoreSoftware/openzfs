@@ -1638,7 +1638,12 @@
       <enumerator name='ZPOOL_PROP_LOAD_GUID' value='30'/>
       <enumerator name='ZPOOL_PROP_AUTOTRIM' value='31'/>
       <enumerator name='ZPOOL_PROP_COMPATIBILITY' value='32'/>
-      <enumerator name='ZPOOL_NUM_PROPS' value='33'/>
+      <enumerator name='ZPOOL_PROP_BCLONEUSED' value='33'/>
+      <enumerator name='ZPOOL_PROP_BCLONESAVED' value='34'/>
+      <enumerator name='ZPOOL_PROP_BCLONERATIO' value='35'/>
+      <enumerator name='ZPOOL_PROP_DEDUP_TABLE_SIZE' value='36'/>
+      <enumerator name='ZPOOL_PROP_DEDUP_TABLE_QUOTA' value='37'/>
+      <enumerator name='ZPOOL_NUM_PROPS' value='38'/>
     </enum-decl>
     <function-decl name='zpool_get_prop_int' visibility='default' binding='global' size-in-bits='64'>
       <parameter type-id='type-id-126'/>
