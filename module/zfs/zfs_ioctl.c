@@ -2997,7 +2997,9 @@ zfs_ioc_pool_get_props(zfs_cmd_t *zc)
 {
 	spa_t *spa;
 	int error;
-	nvlist_t *nvp = NULL;
+	nvlist_t *nvp;
+
+	nvp = fnvlist_alloc();
 
 	if ((error = spa_open(zc->zc_name, &spa, FTAG)) != 0) {
 		/*
@@ -3007,10 +3009,10 @@ zfs_ioc_pool_get_props(zfs_cmd_t *zc)
 		 */
 		mutex_enter(&spa_namespace_lock);
 		if ((spa = spa_lookup(zc->zc_name)) != NULL)
-			error = spa_prop_get(spa, &nvp);
+			error = spa_prop_get(spa, nvp);
 		mutex_exit(&spa_namespace_lock);
 	} else {
-		error = spa_prop_get(spa, &nvp);
+		error = spa_prop_get(spa, nvp);
 		spa_close(spa, FTAG);
 	}
 
