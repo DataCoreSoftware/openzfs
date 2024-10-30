@@ -46,6 +46,7 @@ unsigned int zvol_request_sync = 0;
 unsigned int zvol_prefetch_bytes = (128 * 1024);
 unsigned long zvol_max_discard_blocks = 16384;
 unsigned int zvol_threads = 32;
+int zvol_io_threads = 0;
 
 taskq_t *zvol_taskq;
 
@@ -1028,8 +1029,15 @@ const static zvol_platform_ops_t zvol_windows_ops = {
 int
 zvol_init(void)
 {
+	if (!zvol_io_threads)
+		zvol_io_threads = zvol_threads;
+
+	zvol_threads = zvol_io_threads;
+
 	int threads = MIN(MAX(zvol_threads, 1), 1024);
 
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+		"%s: zvol taskq threads %d regvalue: %d\n", __func__, threads, zvol_io_threads));
 	zvol_taskq = taskq_create(ZVOL_DRIVER, threads, maxclsyspri,
 	    threads * 2, INT_MAX, TASKQ_PREPOPULATE | TASKQ_DYNAMIC);
 	if (zvol_taskq == NULL) {
