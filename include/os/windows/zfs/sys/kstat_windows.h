@@ -260,7 +260,7 @@ extern uint64_t zfs_initialize_value;
 extern int zfs_autoimport_disable;
 extern int zfs_removal_suspend_progress;
 extern int cpu_avx_supported;
-extern int zvol_io_threads;
+extern int zvol_threads;
 
 int  kstat_windows_init(void *);
 void kstat_windows_fini(void);
