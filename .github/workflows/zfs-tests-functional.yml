@@ -63,7 +63,7 @@ jobs:
         sudo chmod +r $RESULTS_PATH/*
         # Replace ':' in dir names, actions/upload-artifact doesn't support it
         for f in $(find $RESULTS_PATH -name '*:*'); do mv "$f" "${f//:/__}"; done
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v4
       if: failure()
       with:
         name: Test logs Ubuntu-${{ matrix.os }}
