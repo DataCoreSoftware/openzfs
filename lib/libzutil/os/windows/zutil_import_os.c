@@ -960,74 +960,105 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 		// 0x400  EFI partition, s0 as ZFS
 		// 0x8410 "version" "name" "testpool" ZFS label
 		if (disk != INVALID_HANDLE_VALUE) {
-			fprintf(stderr, "asking libefi to read label\n");
-			TraceEvent(TRACE_INFO,"asking libefi to read label");
-			fflush(stderr);
-			int error;
-			struct dk_gpt *vtoc;
-			error = efi_alloc_and_read(disk, &vtoc);
-			if (error >= 0) {
-				fprintf(stderr,
-				    "EFI read OK, max partitions %d\n",
-				    vtoc->efi_nparts);
-				TraceEvent(TRACE_INFO,"EFI read OK, max partitions %d", vtoc->efi_nparts);
-				fflush(stderr);
-				for (int i = 0; i < vtoc->efi_nparts; i++) {
 
-					if (vtoc->efi_parts[i].p_start == 0 &&
-					    vtoc->efi_parts[i].p_size == 0)
-						continue;
+
+	int primary_num_partitions = 0;
+
+	// Read Primary, and Backup labels
+	for (int backup = 0; backup <= 1; backup++) {
+
+		fprintf(stderr, "asking libefi to read %s label\n",
+		    backup ? "backup" : "primary");
+		fflush(stderr);
+		int error;
+		struct dk_gpt *vtoc;
+
+		error = efi_alloc_and_read_flags(HTOI(disk),
+		    &vtoc,
+		    backup ? EFI_GPT_PRIMARY_SKIP : 0);
+		if (error >= 0) {
+			fprintf(stderr,
+			    "EFI read OK, max partitions %d\n",
+			    vtoc->efi_nparts);
+			fflush(stderr);
+
+			if (!backup)
+				primary_num_partitions = vtoc->efi_nparts;
+
+		for (int i = 0; i < vtoc->efi_nparts; i++) {
+
+			if (vtoc->efi_parts[i].p_start == 0 &&
+			    vtoc->efi_parts[i].p_size == 0)
+				continue;
 
 			fprintf(stderr,
-			    "    part %d:  offset %llx:    len %llx:    "
-			    "tag: %x    name: '%s'\n",
+			    "    part %d:  offset %llx:    len %llx:"
+			    "    tag: %x    name: '%s'\n",
 			    i, vtoc->efi_parts[i].p_start,
-			    vtoc->efi_parts[i].p_size,
-			    vtoc->efi_parts[i].p_tag,
-			    vtoc->efi_parts[i].p_name);
-			TraceEvent(TRACE_INFO,"part %d:  offset %llx:    len %llx:    "
-			    "tag: %x    name: '%s' ", i, vtoc->efi_parts[i].p_start,
 			    vtoc->efi_parts[i].p_size,
 			    vtoc->efi_parts[i].p_tag,
 			    vtoc->efi_parts[i].p_name);
 			fflush(stderr);
 			if (vtoc->efi_parts[i].p_start != 0 &&
 			    vtoc->efi_parts[i].p_size != 0) {
-			// Lets invent a naming scheme with start,
-			// and len in it.
+		// Lets invent a naming scheme with start,
+		// and len in it.
 
-			slice = zutil_alloc(hdl,
-			    sizeof (rdsk_node_t));
+				slice = zutil_alloc(hdl,
+				    sizeof (rdsk_node_t));
 
-			error = asprintf(&slice->rn_name, "#%llu#%llu#%s",
-			    vtoc->efi_parts[i].p_start * vtoc->efi_lbasize,
-			    vtoc->efi_parts[i].p_size * vtoc->efi_lbasize,
-			    deviceInterfaceDetailData->DevicePath);
-			if (error == -1) {
-				free(slice);
-				continue;
+				error = asprintf(&slice->rn_name,
+				    "#%llu#%llu#%s",
+				    vtoc->efi_parts[i].p_start *
+				    vtoc->efi_lbasize,
+				    vtoc->efi_parts[i].p_size *
+				    vtoc->efi_lbasize,
+				    deviceInterfaceDetailData->DevicePath);
+
+				if (error == -1) {
+					free(slice);
+					continue;
+				}
+
+				slice->rn_vdev_guid = 0;
+				slice->rn_lock = lock;
+				slice->rn_avl = *slice_cache;
+				slice->rn_hdl = hdl;
+				slice->rn_labelpaths = B_TRUE;
+				slice->rn_order =
+				    IMPORT_ORDER_SCAN_OFFSET + i;
+
+				pthread_mutex_lock(lock);
+				if (avl_find(*slice_cache, slice, &where)) {
+					free(slice->rn_name);
+					free(slice);
+				} else {
+					avl_insert(*slice_cache, slice, where);
+				}
+				pthread_mutex_unlock(lock);
+			} // if !empty partition
+		} // for partitions
+
+			fprintf(stderr,
+			    "backup %d, efi_nparts %u, and primarynum %u\r\n",
+			    backup, vtoc->efi_nparts, primary_num_partitions);
+
+			if (backup && vtoc && vtoc->efi_nparts == 9 &&
+			    primary_num_partitions == 128) {
+				fprintf(stderr,
+				    "Windows corrupted Primary EFI/GPT "
+				    "label detected\r\n");
+				fflush(stderr);
+				// vtoc->efi_nparts = 128;
+				// efi_write(disk, vtoc);
 			}
 
-			slice->rn_vdev_guid = 0;
-			slice->rn_lock = lock;
-			slice->rn_avl = *slice_cache;
-			slice->rn_hdl = hdl;
-			slice->rn_labelpaths = B_FALSE;
-			slice->rn_order = IMPORT_ORDER_SCAN_OFFSET + i;
-
-			pthread_mutex_lock(lock);
-			if (avl_find(*slice_cache, slice, &where)) {
-				free(slice->rn_name);
-				free(slice);
-			} else {
-				avl_insert(*slice_cache, slice, where);
-			}
-			pthread_mutex_unlock(lock);
-			}
-			}
-			}
 			efi_free(vtoc);
+		} // if !error
+	} // for
+
 			CloseHandle(disk);
+
 		} else { // Unable to open handle
 			fprintf(stderr,
 			    "Unable to open disk, are we Administrator? "

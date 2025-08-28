@@ -445,7 +445,7 @@ efi_alloc_and_init(int fd, uint32_t nparts, struct dk_gpt **vtoc)
  * Read EFI - return partition number upon success.
  */
 int
-efi_alloc_and_read(int fd, struct dk_gpt **vtoc)
+efi_alloc_and_read_flags(int fd, struct dk_gpt **vtoc, uint_t flags)
 {
 	int			rval;
 	uint32_t		nparts;
@@ -459,6 +459,7 @@ efi_alloc_and_read(int fd, struct dk_gpt **vtoc)
 		return (VT_ERROR);
 
 	(*vtoc)->efi_nparts = nparts;
+	(*vtoc)->efi_flags = flags;
 	rval = efi_read(fd, *vtoc);
 
 	if ((rval == VT_EINVAL) && (*vtoc)->efi_nparts > nparts) {
@@ -487,6 +488,28 @@ efi_alloc_and_read(int fd, struct dk_gpt **vtoc)
 	}
 
 	return (rval);
+}
+
+int
+efi_alloc_and_read(int fd, struct dk_gpt **vtoc)
+{
+	return (efi_alloc_and_read_flags(fd, vtoc, 0));
+}
+
+static uint32_t
+quick_crc32(const void *data, size_t len)
+{
+	const uint8_t *p = (const uint8_t *)data;
+	uint32_t crc = 0xFFFFFFFF;
+
+	while (len--) {
+		crc ^= *p++;
+		for (int k = 0; k < 8; k++) {
+			crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
+		}
+	}
+
+	return (~crc);
 }
 
 static int
@@ -773,7 +796,8 @@ efi_read(int fd, struct dk_gpt *vtoc)
 				return (VT_ERROR);
 			}
 		}
-	} else if ((rval = check_label(fd, &dk_ioc)) == VT_EINVAL) {
+	} else if ((rval = check_label(fd, &dk_ioc)) == VT_EINVAL ||
+	    (vtoc->efi_flags & EFI_GPT_PRIMARY_SKIP)) {
 		/*
 		 * No valid label here; try the alternate. Note that here
 		 * we just read GPT header and save it into dk_ioc.data,
@@ -1216,6 +1240,209 @@ efi_use_whole_disk(int fd)
 	return (0);
 }
 
+static int
+verify_label(int fd, uint_t lbsize, uint32_t original_checksum)
+{
+	int error;
+	unsigned char *data;
+	uint32_t chksum_sector_1;
+
+	data = (unsigned char *) malloc(lbsize);
+	if (!data) {
+		fprintf(stderr, "%s: unable to allocate memory\n", __func__);
+		return (VT_ERROR);
+	}
+
+	error = lseek(fd, 1 * lbsize, SEEK_SET);
+	error = read(fd, data, lbsize);
+
+	chksum_sector_1 = quick_crc32(data, lbsize);
+
+	free(data);
+
+	if (chksum_sector_1 != original_checksum) {
+		fprintf(stderr, "%s: checksum mismatch\r\n", __func__);
+		fprintf(stderr,
+"It appears something in Windows overwrote the OpenZFS partition.\r\n"
+"Manual intervention might be required.\r\n");
+		return (VT_EINVAL);
+	}
+
+	return (0);
+}
+
+/*
+ * write EFI label and backup label using Windows API
+ * Currently not used, but perhaps one day.
+ */
+int
+efi_writeX(int fd, struct dk_gpt *vtoc)
+{
+	dk_efi_t		dk_ioc;
+	efi_gpt_t		*efi;
+	efi_gpe_t		*efi_parts;
+	int			i, j;
+	struct dk_cinfo		dki_info;
+	int			rval;
+	int			md_flag = 0;
+	int			nblocks;
+	diskaddr_t		lba_backup_gpt_hdr;
+	DRIVE_LAYOUT_INFORMATION_EX *dl = NULL;
+	size_t layoutSize;
+	UINT32 nparts;
+	DWORD bytesReturned;
+	BOOL ok;
+
+	if ((rval = efi_get_info(fd, &dki_info)) != 0)
+		return (rval);
+
+	/* check if we are dealing wih a metadevice */
+	if ((strncmp(dki_info.dki_cname, "pseudo", 7) == 0) &&
+	    (strncmp(dki_info.dki_dname, "md", 3) == 0)) {
+		md_flag = 1;
+	}
+#if 0
+	if (check_input(vtoc)) {
+		/*
+		 * not valid; if it's a metadevice just pass it down
+		 * because SVM will do its own checking
+		 */
+		if (md_flag == 0) {
+			return (VT_EINVAL);
+		}
+	}
+#endif
+	dk_ioc.dki_lba = 1;
+	if (NBLOCKS(vtoc->efi_nparts, vtoc->efi_lbasize) < 34) {
+		dk_ioc.dki_length = EFI_MIN_ARRAY_SIZE + vtoc->efi_lbasize;
+	} else {
+		dk_ioc.dki_length = (len_t)NBLOCKS(vtoc->efi_nparts,
+		    vtoc->efi_lbasize) *
+		    vtoc->efi_lbasize;
+	}
+
+	/*
+	 * the number of blocks occupied by GUID partition entry array
+	 */
+	nblocks = dk_ioc.dki_length / vtoc->efi_lbasize - 1;
+
+	/* 2) Number of GPT entries in the in-core vtoc */
+	nparts = vtoc->efi_nparts;
+
+	/* 3) Allocate DRIVE_LAYOUT_INFORMATION_EX header + nparts entries */
+	layoutSize = sizeof (DRIVE_LAYOUT_INFORMATION_EX)
+	    + nparts * sizeof (PARTITION_INFORMATION_EX);
+
+	dl = calloc(1, layoutSize);
+	if (!dl) {
+		fprintf(stderr, "efi_write: out of memory\n");
+		return (-1);
+	}
+
+	dl->PartitionStyle = PARTITION_STYLE_GPT;
+
+#if 0
+	// If PartitionCount is 0, it wipes the label
+	ok = DeviceIoControl(
+	    fd,
+	    IOCTL_DISK_SET_DRIVE_LAYOUT_EX,
+	    dl,
+	    (DWORD)layoutSize,
+	    NULL, 0,
+	    &bytesReturned,
+	    NULL);
+
+	fprintf(stderr, "Wiping label said %d : %d\r\n", ok, bytesReturned);
+#endif
+
+	/* 4) Fill in the GPT header fields */
+	dl->PartitionStyle = PARTITION_STYLE_GPT;
+	dl->PartitionCount = nparts;
+	dl->Gpt.MaxPartitionCount = nparts;
+
+	dl->Gpt.StartingUsableOffset.QuadPart =
+	    (LONGLONG)vtoc->efi_first_u_lba * vtoc->efi_lbasize;
+	dl->Gpt.UsableLength.QuadPart =
+	    (LONGLONG)(vtoc->efi_last_u_lba - vtoc->efi_first_u_lba + 1)
+	    * vtoc->efi_lbasize;
+
+	memcpy(&dl->Gpt.DiskId,
+	    &vtoc->efi_disk_uguid,
+	    sizeof (dl->Gpt.DiskId));
+	/* Note: HeaderLength, etc., are filled by disk.sys */
+
+	/* 5) Copy each dk_part into the PARTITION_INFORMATION_EX array */
+	for (i = 0; i < nparts; i++) {
+		struct dk_part *kp = &vtoc->efi_parts[i];
+		PARTITION_INFORMATION_EX *pi = &dl->PartitionEntry[i];
+
+		for (j = 0;
+		    j < sizeof (conversion_array) /
+		    sizeof (struct uuid_to_ptag); j++) {
+
+			if (kp->p_tag == j) {
+				struct uuid *dest = &pi->Gpt.PartitionType;
+				UUID_LE_CONVERT(
+				    *dest,
+				    conversion_array[j].uuid);
+				break;
+			}
+		}
+
+		pi->StartingOffset.QuadPart =
+		    (LONGLONG)kp->p_start * vtoc->efi_lbasize;
+		pi->PartitionLength.QuadPart = (LONGLONG)(kp->p_size)
+		    * vtoc->efi_lbasize;
+
+		if (kp->p_tag != V_UNASSIGNED &&
+		    uuid_is_null((uchar_t *)&kp->p_uguid)) {
+			(void) uuid_generate((uchar_t *)&kp->p_uguid);
+		}
+
+
+		pi->PartitionStyle = PARTITION_STYLE_GPT;
+		pi->PartitionNumber = i + 1;
+		pi->RewritePartition = TRUE;
+
+		memcpy(&pi->Gpt.PartitionId, &kp->p_uguid, sizeof (GUID));
+		pi->Gpt.Attributes = kp->p_flag;
+
+		ZeroMemory(pi->Gpt.Name, sizeof (pi->Gpt.Name));
+		// Convert up to 35 characters (leaving room for NUL)
+		MultiByteToWideChar(
+		    CP_UTF8, // source is UTF-8
+		    0,
+		    kp->p_name, -1, // input and NUL
+		    pi->Gpt.Name, // output buffer
+		    sizeof (pi->Gpt.Name) / sizeof (WCHAR));
+
+
+	}
+
+	/* 6) Atomically commit MBR + GPT + entries + backup via Disk.sys */
+	ok = DeviceIoControl(
+	    fd,
+	    IOCTL_DISK_SET_DRIVE_LAYOUT_EX,
+	    dl,
+	    (DWORD)layoutSize,
+	    NULL, 0,
+	    &bytesReturned,
+	    NULL);
+
+	free(dl);
+
+	if (!ok) {
+		DWORD err = GetLastError();
+		fprintf(stderr,
+		    "efi_write: IOCTL_DISK_SET_DRIVE_LAYOUT_EX failed: %lu\n",
+		    err);
+			return (-1);
+	}
+
+	/* Success: protective MBR, primary and backup GPT written */
+	return (0);
+}
+
 
 /*
  * write EFI label and backup label
@@ -1256,7 +1483,7 @@ efi_write(int fd, struct dk_gpt *vtoc)
 	if (NBLOCKS(vtoc->efi_nparts, vtoc->efi_lbasize) < 34) {
 		dk_ioc.dki_length = EFI_MIN_ARRAY_SIZE + vtoc->efi_lbasize;
 	} else {
-		dk_ioc.dki_length = NBLOCKS(vtoc->efi_nparts,
+		dk_ioc.dki_length = (len_t)NBLOCKS(vtoc->efi_nparts,
 		    vtoc->efi_lbasize) *
 		    vtoc->efi_lbasize;
 	}
@@ -1277,6 +1504,10 @@ efi_write(int fd, struct dk_gpt *vtoc)
 		return (VT_ERROR);
 
 	memset(dk_ioc.dki_data, 0, dk_ioc.dki_length);
+	DWORD bytesReturned;
+
+	dk_ioc.dki_lba = 1;
+
 	efi = dk_ioc.dki_data;
 
 	/* stuff user's input into EFI struct */
@@ -1343,16 +1574,23 @@ efi_write(int fd, struct dk_gpt *vtoc)
 			(void) uuid_generate((uchar_t *)
 			    &vtoc->efi_parts[i].p_uguid);
 		}
-		bcopy(&vtoc->efi_parts[i].p_uguid,
-		    &efi_parts[i].efi_gpe_UniquePartitionGUID,
+		memcpy(&efi_parts[i].efi_gpe_UniquePartitionGUID,
+		    &vtoc->efi_parts[i].p_uguid,
 		    sizeof (uuid_t));
 	}
+
 	efi->efi_gpt_PartitionEntryArrayCRC32 =
 	    LE_32(efi_crc32((unsigned char *)efi_parts,
 	    vtoc->efi_nparts * (int)sizeof (struct efi_gpe)));
 	efi->efi_gpt_HeaderCRC32 =
 	    LE_32(efi_crc32((unsigned char *)efi,
 	    LE_32(efi->efi_gpt_HeaderSize)));
+
+	// We will purposely corrupt the Signature now, so that
+	// Windows will stop looking at the disk. Then fix it
+	// once we have told Windows we changed it.
+	// "EFI Part" -> "_FI Part"
+	efi->efi_gpt_Signature = LE_64(EFI_SIGNATURE);
 
 	if (efi_ioctl(fd, DKIOCSETEFI, &dk_ioc) == -1) {
 		posix_memalign_free(dk_ioc.dki_data);
@@ -1370,6 +1608,25 @@ efi_write(int fd, struct dk_gpt *vtoc)
 		posix_memalign_free(dk_ioc.dki_data);
 		return (0);
 	}
+
+
+	// Tell Windows we have changed partitions
+	fprintf(stderr, "%s telling Windows about it...\r\n", __func__);
+	DeviceIoControl(
+	    fd,
+	    IOCTL_DISK_UPDATE_PROPERTIES,
+	    NULL, 0,
+	    NULL, 0,
+	    &bytesReturned,
+	    NULL);
+
+	// Wait a bit
+	sleep(2);
+
+
+	// Remember the chksum of sector 1
+	uint32_t chksum_sector_1 = 0;
+	chksum_sector_1 = quick_crc32(dk_ioc.dki_data, vtoc->efi_lbasize);
 
 	/* write backup partition array */
 	dk_ioc.dki_lba = vtoc->efi_last_u_lba + 1;
@@ -1416,11 +1673,16 @@ efi_write(int fd, struct dk_gpt *vtoc)
 			    errno);
 		}
 	}
+
 	/* write the PMBR */
 	(void) write_pmbr(fd, vtoc);
+
+	// Verify it landed on disk ok
+	rval = verify_label(fd, vtoc->efi_lbasize, chksum_sector_1);
+
 	posix_memalign_free(dk_ioc.dki_data);
 
-	return (0);
+	return (rval);
 }
 
 void
@@ -1545,58 +1807,4 @@ efi_err_check(struct dk_gpt *vtoc)
 		(void) fprintf(stderr,
 		    "no reserved partition found\n");
 	}
-}
-
-/*
- * We need to get information necessary to construct a *new* efi
- * label type
- */
-int
-efi_auto_sense(int fd, struct dk_gpt **vtoc)
-{
-
-	int	i;
-
-	/*
-	 * Now build the default partition table
-	 */
-	if (efi_alloc_and_init(fd, EFI_NUMPAR, vtoc) != 0) {
-		if (efi_debug) {
-			(void) fprintf(stderr, "efi_alloc_and_init failed.\n");
-		}
-		return (-1);
-	}
-
-	for (i = 0; i < MIN((*vtoc)->efi_nparts, V_NUMPAR); i++) {
-		(*vtoc)->efi_parts[i].p_tag = default_vtoc_map[i].p_tag;
-		(*vtoc)->efi_parts[i].p_flag = default_vtoc_map[i].p_flag;
-		(*vtoc)->efi_parts[i].p_start = 0;
-		(*vtoc)->efi_parts[i].p_size = 0;
-	}
-	/*
-	 * Make constants first
-	 * and variable partitions later
-	 */
-
-	/* root partition - s0 128 MB */
-	(*vtoc)->efi_parts[0].p_start = 34;
-	(*vtoc)->efi_parts[0].p_size = 262144;
-
-	/* partition - s1  128 MB */
-	(*vtoc)->efi_parts[1].p_start = 262178;
-	(*vtoc)->efi_parts[1].p_size = 262144;
-
-	/* partition -s2 is NOT the Backup disk */
-	(*vtoc)->efi_parts[2].p_tag = V_UNASSIGNED;
-
-	/* partition -s6 /usr partition - HOG */
-	(*vtoc)->efi_parts[6].p_start = 524322;
-	(*vtoc)->efi_parts[6].p_size = (*vtoc)->efi_last_u_lba - 524322
-	    - (1024 * 16);
-
-	/* efi reserved partition - s9 16K */
-	(*vtoc)->efi_parts[8].p_start = (*vtoc)->efi_last_u_lba - (1024 * 16);
-	(*vtoc)->efi_parts[8].p_size = (1024 * 16);
-	(*vtoc)->efi_parts[8].p_tag = V_RESERVED;
-	return (0);
 }
