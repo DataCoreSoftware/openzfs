@@ -1042,15 +1042,15 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 			fprintf(stderr,
 			    "backup %d, efi_nparts %u, and primarynum %u\r\n",
 			    backup, vtoc->efi_nparts, primary_num_partitions);
-
-			if (backup && vtoc && vtoc->efi_nparts == 9 &&
-			    primary_num_partitions == 128) {
+			if (backup && vtoc && vtoc->efi_nparts == 9) {
 				fprintf(stderr,
 				    "Windows corrupted Primary EFI/GPT "
 				    "label detected\r\n");
 				fflush(stderr);
 				// vtoc->efi_nparts = 128;
 				// efi_write(disk, vtoc);
+				 CloseHandle(disk);
+				 rewrite_corrupted_primary_from_backup(vtoc, deviceInterfaceDetailData->DevicePath);
 			}
 
 			efi_free(vtoc);
@@ -1117,6 +1117,34 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 	return (0);
 }
 
+static int
+rewrite_corrupted_primary_from_backup(
+    struct dk_gpt* vtoc,
+    const char* path)
+{
+	vtoc->efi_nparts = EFI_NUMPAR;
+	int fd, error;
+	fprintf(stderr, "%s: trying to offline disk path\r\n", __func__);
+	OfflineDisk(path);
+	if ((fd = open(path, O_RDWR | O_DIRECT)) < 0) {
+	    fprintf(stderr,"%s:open failed \r\n", __func__);
+	}
+	fprintf(stderr,"%s: opennnenn Success \r\n", __func__);
+	repair_vtoc(fd, vtoc);
+
+	int rval = efi_write(fd, vtoc);
+	(void)fsync(fd);
+	fprintf(stderr, "%s:rewritting the partition status= %d\r\n", rval, __func__);
+	dump_label(fd);
+
+	fprintf(stderr, "%s: trying to online disk\r\n", __func__);
+	rval = OnlineDisk(path);
+	if (SUCCEEDED(rval))
+	    fprintf(stderr, "%s: failed %d (0x%x)\r\n", __func__,
+		rval, rval);
+	(void)close(fd);
+	return 0;
+}
 
 /*
  * Linux persistent device strings for vdev labels

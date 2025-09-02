@@ -1808,3 +1808,36 @@ efi_err_check(struct dk_gpt *vtoc)
 		    "no reserved partition found\n");
 	}
 }
+
+int repair_vtoc(int fd, struct dk_gpt* vtoc)
+{
+    diskaddr_t	capacity = 0;
+    uint_t		lbsize = 0;
+    read_disk_info(fd, &capacity, &lbsize);
+
+    uint64_t disk_last_lba = capacity - 1;
+    uint64_t nblocks = NBLOCKS(128, lbsize);  // always 128 for ZFS fix
+
+    if ((nblocks * lbsize) < EFI_MIN_ARRAY_SIZE + lbsize) {
+	nblocks = EFI_MIN_ARRAY_SIZE / lbsize + 1;
+    }
+
+    // ---- PATCH HEADERS ONLY ----
+    vtoc->efi_lbasize = lbsize;
+    vtoc->efi_last_lba = disk_last_lba;
+    vtoc->efi_altern_lba = disk_last_lba;
+    vtoc->efi_last_u_lba = disk_last_lba - nblocks;
+    vtoc->efi_nparts = 128;
+
+    fprintf(stderr, "**[repair_vtoc] capacity (blocks): %llu\n",
+	(unsigned long long)capacity);
+    fprintf(stderr, "**[repair_vtoc] lbsize           : %u\n", lbsize);
+    fprintf(stderr, "**[repair_vtoc] disk_last_lba    : %llu\n",
+	(unsigned long long)disk_last_lba);
+    fprintf(stderr, "**[repair_vtoc] nblocks (parttbl): %llu\n",
+	(unsigned long long)nblocks);
+    fprintf(stderr, "**[repair_vtoc] efi_last_u_lba   : %llu\n",
+	(unsigned long long)vtoc->efi_last_u_lba);
+    fprintf(stderr, "**[repair_vtoc] efi_nparts       : %u\n",
+	vtoc->efi_nparts);
+}
