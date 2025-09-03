@@ -1816,7 +1816,7 @@ int repair_vtoc(int fd, struct dk_gpt* vtoc)
     read_disk_info(fd, &capacity, &lbsize);
 
     uint64_t disk_last_lba = capacity - 1;
-    uint64_t nblocks = NBLOCKS(128, lbsize);  // always 128 for ZFS fix
+    uint64_t nblocks = NBLOCKS(EFI_NUMPAR, lbsize);  // always 128 for ZFS fix
 
     if ((nblocks * lbsize) < EFI_MIN_ARRAY_SIZE + lbsize) {
 	nblocks = EFI_MIN_ARRAY_SIZE / lbsize + 1;

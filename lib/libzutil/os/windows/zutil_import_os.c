@@ -1046,11 +1046,22 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 				fprintf(stderr,
 				    "Windows corrupted Primary EFI/GPT "
 				    "label detected\r\n");
+				TraceEvent(TRACE_INFO, "Windows corrupted Primary EFI/GPT label detected\r\n");
 				fflush(stderr);
 				// vtoc->efi_nparts = 128;
 				// efi_write(disk, vtoc);
 				 CloseHandle(disk);
-				 rewrite_corrupted_primary_from_backup(vtoc, deviceInterfaceDetailData->DevicePath);
+				 int status = restore_primary_gpt_from_backup(vtoc, deviceInterfaceDetailData->DevicePath);
+				 if (status < 0)
+				 {
+				     fprintf(stderr,"Reconstruction of corrupted Primary EFI/GPT label FAILED\r\n");
+				     TraceEvent(TRACE_INFO, "Reconstruction of corrupted Primary EFI/GPT label FAILED\r\n");
+				 }
+				 else
+				 {
+				     fprintf(stderr, "Reconstruction of corrupted Primary EFI/GPT label SUCCESSFUL\r\n");
+				     TraceEvent(TRACE_INFO, "Reconstruction of corrupted Primary EFI/GPT label SUCCESSFUL\r\n");
+				 }
 			}
 
 			efi_free(vtoc);
@@ -1118,30 +1129,40 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 }
 
 static int
-rewrite_corrupted_primary_from_backup(
+restore_primary_gpt_from_backup(
     struct dk_gpt* vtoc,
     const char* path)
 {
 	vtoc->efi_nparts = EFI_NUMPAR;
 	int fd, error;
+
 	fprintf(stderr, "%s: trying to offline disk path\r\n", __func__);
+	TraceEvent(TRACE_INFO, "trying to offline disk path\r\n");
 	OfflineDisk(path);
+
 	if ((fd = open(path, O_RDWR | O_DIRECT)) < 0) {
-	    fprintf(stderr,"%s:open failed \r\n", __func__);
+	    fprintf(stderr, "%s: Failed to open disk path [%s]\r\n", __func__, path);
+	    TraceEvent(TRACE_INFO, "Failed to open disk path %s\r\n", path);
+	    return -1;
 	}
-	fprintf(stderr,"%s: opennnenn Success \r\n", __func__);
+	fprintf(stderr, "%s: disk open successful [%s]\r\n", __func__, path);
 	repair_vtoc(fd, vtoc);
 
 	int rval = efi_write(fd, vtoc);
 	(void)fsync(fd);
-	fprintf(stderr, "%s:rewritting the partition status= %d\r\n", rval, __func__);
+	fprintf(stderr, "%s:rewritting the partition completed, status= %d\r\n",__func__, rval);
+	TraceEvent(TRACE_INFO, "rewritting the partition completed, status= %d\r\n", rval);
 	dump_label(fd);
 
 	fprintf(stderr, "%s: trying to online disk\r\n", __func__);
+	TraceEvent(TRACE_INFO, "trying to online disk\r\n");
 	rval = OnlineDisk(path);
-	if (SUCCEEDED(rval))
-	    fprintf(stderr, "%s: failed %d (0x%x)\r\n", __func__,
-		rval, rval);
+	if (FAILED(rval))
+	{
+	    fprintf(stderr, "%s: failed %d (0x%x)\r\n", __func__, rval, rval);
+	    TraceEvent(TRACE_INFO, "Online disk failed = %d\r\n", rval);
+	}
+	    
 	(void)close(fd);
 	return 0;
 }
