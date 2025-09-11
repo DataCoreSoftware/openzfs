@@ -960,74 +960,116 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 		// 0x400  EFI partition, s0 as ZFS
 		// 0x8410 "version" "name" "testpool" ZFS label
 		if (disk != INVALID_HANDLE_VALUE) {
-			fprintf(stderr, "asking libefi to read label\n");
-			TraceEvent(TRACE_INFO,"asking libefi to read label");
-			fflush(stderr);
-			int error;
-			struct dk_gpt *vtoc;
-			error = efi_alloc_and_read(disk, &vtoc);
-			if (error >= 0) {
-				fprintf(stderr,
-				    "EFI read OK, max partitions %d\n",
-				    vtoc->efi_nparts);
-				TraceEvent(TRACE_INFO,"EFI read OK, max partitions %d", vtoc->efi_nparts);
-				fflush(stderr);
-				for (int i = 0; i < vtoc->efi_nparts; i++) {
 
-					if (vtoc->efi_parts[i].p_start == 0 &&
-					    vtoc->efi_parts[i].p_size == 0)
-						continue;
+
+	int primary_num_partitions = 0;
+
+	// Read Primary, and Backup labels
+	for (int backup = 0; backup <= 1; backup++) {
+
+		fprintf(stderr, "asking libefi to read %s label\n",
+		    backup ? "backup" : "primary");
+		fflush(stderr);
+		int error;
+		struct dk_gpt *vtoc;
+
+		error = efi_alloc_and_read_flags(HTOI(disk),
+		    &vtoc,
+		    backup ? EFI_GPT_PRIMARY_SKIP : 0);
+		if (error >= 0) {
+			fprintf(stderr,
+			    "EFI read OK, max partitions %d\n",
+			    vtoc->efi_nparts);
+			fflush(stderr);
+
+			if (!backup)
+				primary_num_partitions = vtoc->efi_nparts;
+
+		for (int i = 0; i < vtoc->efi_nparts; i++) {
+
+			if (vtoc->efi_parts[i].p_start == 0 &&
+			    vtoc->efi_parts[i].p_size == 0)
+				continue;
 
 			fprintf(stderr,
-			    "    part %d:  offset %llx:    len %llx:    "
-			    "tag: %x    name: '%s'\n",
+			    "    part %d:  offset %llx:    len %llx:"
+			    "    tag: %x    name: '%s'\n",
 			    i, vtoc->efi_parts[i].p_start,
-			    vtoc->efi_parts[i].p_size,
-			    vtoc->efi_parts[i].p_tag,
-			    vtoc->efi_parts[i].p_name);
-			TraceEvent(TRACE_INFO,"part %d:  offset %llx:    len %llx:    "
-			    "tag: %x    name: '%s' ", i, vtoc->efi_parts[i].p_start,
 			    vtoc->efi_parts[i].p_size,
 			    vtoc->efi_parts[i].p_tag,
 			    vtoc->efi_parts[i].p_name);
 			fflush(stderr);
 			if (vtoc->efi_parts[i].p_start != 0 &&
 			    vtoc->efi_parts[i].p_size != 0) {
-			// Lets invent a naming scheme with start,
-			// and len in it.
+		// Lets invent a naming scheme with start,
+		// and len in it.
 
-			slice = zutil_alloc(hdl,
-			    sizeof (rdsk_node_t));
+				slice = zutil_alloc(hdl,
+				    sizeof (rdsk_node_t));
 
-			error = asprintf(&slice->rn_name, "#%llu#%llu#%s",
-			    vtoc->efi_parts[i].p_start * vtoc->efi_lbasize,
-			    vtoc->efi_parts[i].p_size * vtoc->efi_lbasize,
-			    deviceInterfaceDetailData->DevicePath);
-			if (error == -1) {
-				free(slice);
-				continue;
+				error = asprintf(&slice->rn_name,
+				    "#%llu#%llu#%s",
+				    vtoc->efi_parts[i].p_start *
+				    vtoc->efi_lbasize,
+				    vtoc->efi_parts[i].p_size *
+				    vtoc->efi_lbasize,
+				    deviceInterfaceDetailData->DevicePath);
+
+				if (error == -1) {
+					free(slice);
+					continue;
+				}
+
+				slice->rn_vdev_guid = 0;
+				slice->rn_lock = lock;
+				slice->rn_avl = *slice_cache;
+				slice->rn_hdl = hdl;
+				slice->rn_labelpaths = B_TRUE;
+				slice->rn_order =
+				    IMPORT_ORDER_SCAN_OFFSET + i;
+
+				pthread_mutex_lock(lock);
+				if (avl_find(*slice_cache, slice, &where)) {
+					free(slice->rn_name);
+					free(slice);
+				} else {
+					avl_insert(*slice_cache, slice, where);
+				}
+				pthread_mutex_unlock(lock);
+			} // if !empty partition
+		} // for partitions
+
+			fprintf(stderr,
+			    "backup %d, efi_nparts %u, and primarynum %u\r\n",
+			    backup, vtoc->efi_nparts, primary_num_partitions);
+			if (backup && vtoc && vtoc->efi_nparts == 9) {
+				fprintf(stderr,
+				    "Windows corrupted Primary EFI/GPT "
+				    "label detected\r\n");
+				TraceEvent(TRACE_INFO, "Windows corrupted Primary EFI/GPT label detected\r\n");
+				fflush(stderr);
+				// vtoc->efi_nparts = 128;
+				// efi_write(disk, vtoc);
+				 CloseHandle(disk);
+				 int status = restore_primary_gpt_from_backup(vtoc, deviceInterfaceDetailData->DevicePath);
+				 if (status < 0)
+				 {
+				     fprintf(stderr,"Reconstruction of corrupted Primary EFI/GPT label FAILED\r\n");
+				     TraceEvent(TRACE_INFO, "Reconstruction of corrupted Primary EFI/GPT label FAILED\r\n");
+				 }
+				 else
+				 {
+				     fprintf(stderr, "Reconstruction of corrupted Primary EFI/GPT label SUCCESSFUL\r\n");
+				     TraceEvent(TRACE_INFO, "Reconstruction of corrupted Primary EFI/GPT label SUCCESSFUL\r\n");
+				 }
 			}
 
-			slice->rn_vdev_guid = 0;
-			slice->rn_lock = lock;
-			slice->rn_avl = *slice_cache;
-			slice->rn_hdl = hdl;
-			slice->rn_labelpaths = B_FALSE;
-			slice->rn_order = IMPORT_ORDER_SCAN_OFFSET + i;
-
-			pthread_mutex_lock(lock);
-			if (avl_find(*slice_cache, slice, &where)) {
-				free(slice->rn_name);
-				free(slice);
-			} else {
-				avl_insert(*slice_cache, slice, where);
-			}
-			pthread_mutex_unlock(lock);
-			}
-			}
-			}
 			efi_free(vtoc);
+		} // if !error
+	} // for
+
 			CloseHandle(disk);
+
 		} else { // Unable to open handle
 			fprintf(stderr,
 			    "Unable to open disk, are we Administrator? "
@@ -1086,6 +1128,44 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 	return (0);
 }
 
+static int
+restore_primary_gpt_from_backup(
+    struct dk_gpt* vtoc,
+    const char* path)
+{
+	vtoc->efi_nparts = EFI_NUMPAR;
+	int fd, error;
+
+	fprintf(stderr, "%s: trying to offline disk path\r\n", __func__);
+	TraceEvent(TRACE_INFO, "trying to offline disk path\r\n");
+	OfflineDisk(path);
+
+	if ((fd = open(path, O_RDWR | O_DIRECT)) < 0) {
+	    fprintf(stderr, "%s: Failed to open disk path [%s]\r\n", __func__, path);
+	    TraceEvent(TRACE_INFO, "Failed to open disk path %s\r\n", path);
+	    return -1;
+	}
+	fprintf(stderr, "%s: disk open successful [%s]\r\n", __func__, path);
+	repair_vtoc(fd, vtoc);
+
+	int rval = efi_write(fd, vtoc);
+	(void)fsync(fd);
+	fprintf(stderr, "%s:rewritting the partition completed, status= %d\r\n",__func__, rval);
+	TraceEvent(TRACE_INFO, "rewritting the partition completed, status= %d\r\n", rval);
+	dump_label(fd);
+
+	fprintf(stderr, "%s: trying to online disk\r\n", __func__);
+	TraceEvent(TRACE_INFO, "trying to online disk\r\n");
+	rval = OnlineDisk(path);
+	if (FAILED(rval))
+	{
+	    fprintf(stderr, "%s: failed %d (0x%x)\r\n", __func__, rval, rval);
+	    TraceEvent(TRACE_INFO, "Online disk failed = %d\r\n", rval);
+	}
+	    
+	(void)close(fd);
+	return 0;
+}
 
 /*
  * Linux persistent device strings for vdev labels
