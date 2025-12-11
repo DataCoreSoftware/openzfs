@@ -37,7 +37,7 @@ wdk_add_library(splkern
   spl-vnode.c
   spl-windows.c
   spl-xdr.c
-  ${TMH_FILE_LIST}
+  spl-lookasidelist.c
 )
 
 target_include_directories(splkern BEFORE PUBLIC "${CMAKE_SOURCE_DIR}/include/os/windows/" PUBLIC "${CMAKE_SOURCE_DIR}/include/os/windows/spl")

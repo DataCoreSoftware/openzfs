@@ -1,6 +1,7 @@
 #include <sys/zfs_context.h>
 #include <sys/lookasidelist.h>
 
+
 /*
 * Portions Copyright 2022 Andrew Innes <andrew.c12@gmail.com>
 */
@@ -155,6 +156,17 @@ lookasidelist_cache_alloc(lookasidelist_cache_t *pLookasidelist_cache)
 {
 	void *buf = ExAllocateFromLookasideListEx(
 	    &pLookasidelist_cache->lookasideField);
+
+	if (buf == NULL)
+	{
+	    buf = ExAllocatePoolWithTagPriority(NonPagedPoolNx, pLookasidelist_cache->cache_chunksize, '!SFZ', HighPoolPriority);
+	    if (buf != NULL)
+	    {
+		atomic_inc_64(pLookasidelist_cache->cache_active_allocations);
+		atomic_inc_64(pLookasidelist_cache->total_alloc);
+	    }
+	}	
+
 	ASSERT(buf != NULL);
 	return (buf);
 }
