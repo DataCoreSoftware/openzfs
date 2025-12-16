@@ -24,6 +24,15 @@ static lookasidelist_stats_t lookasidelist_stats = {
 	{ "chunk_size",	    KSTAT_DATA_UINT64 },
 };
 
+#ifdef _KERNEL
+extern uint64_t stat_osif_malloc_success;
+extern uint64_t stat_osif_free;
+extern uint64_t stat_osif_malloc_bytes;
+extern uint64_t stat_osif_free_bytes;
+extern uint64_t segkmem_total_mem_allocated;
+#endif
+
+
 static int
 lookaside_kstat_update(kstat_t *ksp, int rw)
 {
@@ -153,20 +162,24 @@ lookasidelist_cache_destroy(lookasidelist_cache_t *pLookasidelist_cache)
 
 void *
 lookasidelist_cache_alloc(lookasidelist_cache_t *pLookasidelist_cache)
-{
-	void *buf = ExAllocateFromLookasideListEx(
+{	
+	void* buf = ExAllocateFromLookasideListEx(
 	    &pLookasidelist_cache->lookasideField);
 
-	if (buf == NULL)
-	{
-	    buf = ExAllocatePoolWithTagPriority(NonPagedPoolNx, pLookasidelist_cache->cache_chunksize, '!SFZ', HighPoolPriority);
+	if (buf == NULL) {
+
+	    buf = ExAllocatePoolWithTagPriority(NonPagedPoolNx, pLookasidelist_cache->cache_chunksize, ZFS_LookAsideList_DRV_TAG, HighPoolPriority);
 	    if (buf != NULL)
 	    {
-		atomic_inc_64(pLookasidelist_cache->cache_active_allocations);
-		atomic_inc_64(pLookasidelist_cache->total_alloc);
-	    }
-	}	
+		atomic_inc_64(&stat_osif_malloc_success);
+		atomic_add_64(&segkmem_total_mem_allocated, pLookasidelist_cache->cache_chunksize);
+		atomic_add_64(&stat_osif_malloc_bytes, pLookasidelist_cache->cache_chunksize);
 
+		atomic_inc_64(&pLookasidelist_cache->cache_active_allocations);
+		atomic_inc_64(&pLookasidelist_cache->total_alloc);
+	    }
+	}
+	
 	ASSERT(buf != NULL);
 	return (buf);
 }
