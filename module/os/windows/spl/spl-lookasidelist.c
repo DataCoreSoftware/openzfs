@@ -1,6 +1,9 @@
 #include <sys/zfs_context.h>
 #include <sys/lookasidelist.h>
+#include <sys/kmem.h>
 
+kmem_cache_t *emergency_abd;
+#define LOOKASIDE_THRESHOLD 30000ULL
 
 /*
 * Portions Copyright 2022 Andrew Innes <andrew.c12@gmail.com>
@@ -96,9 +99,11 @@ lookasidelist_cache_create(char *name,	/* descriptive name for this cache */
 	pLookasidelist_cache = ExAllocatePoolWithTag(NonPagedPoolNx,
 	    sizeof (lookasidelist_cache_t), ZFS_LookAsideList_DRV_TAG);
 
+	size_t total_chunk_size = size + sizeof(alloc_hdr_t);
+
 	if (pLookasidelist_cache != NULL) {
 		bzero(pLookasidelist_cache, sizeof (lookasidelist_cache_t));
-		pLookasidelist_cache->cache_chunksize = size;
+		pLookasidelist_cache->cache_chunksize = total_chunk_size;
 
 		if (name != NULL) {
 			strncpy(pLookasidelist_cache->cache_name, name,
@@ -111,7 +116,7 @@ lookasidelist_cache_create(char *name,	/* descriptive name for this cache */
 		    free_func,
 		    NonPagedPoolNx,
 		    0,
-		    size,
+		    total_chunk_size,
 		    ZFS_LookAsideList_DRV_TAG,
 		    0);
 
@@ -140,6 +145,10 @@ lookasidelist_cache_create(char *name,	/* descriptive name for this cache */
 		}
 	}
 
+	emergency_abd = kmem_cache_create("abd_chunk", total_chunk_size,
+	    MIN(PAGE_SIZE, 4096),
+	    NULL, NULL, NULL, NULL, abd_arena, KMC_NOTOUCH);
+
 	return (pLookasidelist_cache);
 }
 
@@ -158,38 +167,48 @@ lookasidelist_cache_destroy(lookasidelist_cache_t *pLookasidelist_cache)
 		ExFreePoolWithTag(pLookasidelist_cache,
 		    ZFS_LookAsideList_DRV_TAG);
 	}
+	kmem_cache_destroy(emergency_abd);
 }
 
 void *
 lookasidelist_cache_alloc(lookasidelist_cache_t *pLookasidelist_cache)
-{	
-	void* buf = ExAllocateFromLookasideListEx(
-	    &pLookasidelist_cache->lookasideField);
+{
+	uint64_t active = atomic_load_64(&pLookasidelist_cache->total_alloc);
 
-	if (buf == NULL) {
+	alloc_hdr_t* buf = NULL;
 
-	    buf = ExAllocatePoolWithTagPriority(NonPagedPoolNx, pLookasidelist_cache->cache_chunksize, ZFS_LookAsideList_DRV_TAG, HighPoolPriority);
-	    if (buf != NULL)
-	    {
-		atomic_inc_64(&stat_osif_malloc_success);
-		atomic_add_64(&segkmem_total_mem_allocated, pLookasidelist_cache->cache_chunksize);
-		atomic_add_64(&stat_osif_malloc_bytes, pLookasidelist_cache->cache_chunksize);
+	if (active < LOOKASIDE_THRESHOLD) {
+	    buf = ExAllocateFromLookasideListEx(
+		&pLookasidelist_cache->lookasideField);
 
-		atomic_inc_64(&pLookasidelist_cache->cache_active_allocations);
-		atomic_inc_64(&pLookasidelist_cache->total_alloc);
+	    if (buf != NULL) {
+		buf->magic = ALLOC_MAGIC;
+		buf->source = ALLOC_FROM_LOOKASIDE;
+		return (void*)(buf + 1);
 	    }
-	}
+	}		
 	
-	ASSERT(buf != NULL);
-	return (buf);
+	buf= kmem_cache_alloc(emergency_abd, KM_SLEEP);
+
+	if (buf != NULL) {
+	    buf->magic = ALLOC_MAGIC;
+	    buf->source = ALLOC_FROM_KMEM;
+	    return (void*)(buf + 1);
+	}	
 }
 
 void
 lookasidelist_cache_free(lookasidelist_cache_t *pLookasidelist_cache, void *buf)
 {
 	ASSERT(buf != NULL);
-	if (buf != NULL) {
+        alloc_hdr_t *hdr = (alloc_hdr_t*)buf - 1;
+	ASSERT(hdr->magic == ALLOC_MAGIC);
+	
+	if (hdr->source == ALLOC_FROM_LOOKASIDE) {
 		ExFreeToLookasideListEx(&pLookasidelist_cache->lookasideField,
-		    buf);
+		    hdr);
+	}
+	else {
+	    kmem_cache_free(emergency_abd, hdr);
 	}
 }

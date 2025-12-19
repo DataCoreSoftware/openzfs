@@ -8,6 +8,8 @@ extern void osif_free(void*, uint64_t);
 
 #define	LOOKASIDELIST_CACHE_NAMELEN 31
 
+#define ALLOC_MAGIC 0xABCD1234
+
 typedef struct lookasidelist_cache {
     uint64_t cache_active_allocations;
     uint64_t total_alloc;
@@ -17,6 +19,17 @@ typedef struct lookasidelist_cache {
     char    cache_name[LOOKASIDELIST_CACHE_NAMELEN + 1];
     LOOKASIDE_LIST_EX lookasideField;
 } lookasidelist_cache_t;
+
+typedef enum {
+    ALLOC_FROM_LOOKASIDE = 1,
+    ALLOC_FROM_KMEM = 2
+} alloc_source_t;
+
+typedef struct alloc_hdr {
+    uint32_t magic;
+    alloc_source_t source;
+} alloc_hdr_t;
+
 
 lookasidelist_cache_t *lookasidelist_cache_create(char *name, size_t size);
 void lookasidelist_cache_destroy(lookasidelist_cache_t *pLookasidelist_cache);
