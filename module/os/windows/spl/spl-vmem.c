@@ -3452,6 +3452,16 @@ vmem_init(const char *heap_name,
 		resv_size = 512ULL * mib;
 	if (real_total_memory >= 16ULL * gib)
 		resv_size = gib;
+	if (real_total_memory >= 32ULL * gib)
+		resv_size = 2ULL * gib;
+	if (real_total_memory >= 64ULL * gib)
+		resv_size = 4ULL * gib;
+	if (real_total_memory >= 128ULL * gib)
+		resv_size = 8ULL * gib;
+	if (real_total_memory >= 256ULL * gib)
+		resv_size = 12ULL * gib;
+	if (real_total_memory >= 512ULL * gib)
+		resv_size = 16ULL * gib;
 
 	dprintf("SPL: %s adding fixed allocation of %llu to the bucket_heap\n",
 	    __func__, (uint64_t)resv_size);
