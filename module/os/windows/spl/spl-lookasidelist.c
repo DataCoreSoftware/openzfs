@@ -172,35 +172,35 @@ lookasidelist_cache_destroy(lookasidelist_cache_t *pLookasidelist_cache)
 
 void *
 lookasidelist_cache_alloc(lookasidelist_cache_t *pLookasidelist_cache)
-{
-	uint64_t active = atomic_load_64(&pLookasidelist_cache->total_alloc);
+{	
+    alloc_hdr_t* hdr;    
 
-	alloc_hdr_t* buf = NULL;
+    /*
+     * Fast path: try lookaside list first.
+     */
+    hdr = ExAllocateFromLookasideListEx(&pLookasidelist_cache->lookasideField);
+    if (hdr != NULL) {
+	hdr->magic = ALLOC_MAGIC;
+	hdr->source = ALLOC_FROM_LOOKASIDE;
 
-	if (active < LOOKASIDE_THRESHOLD) {
-	    buf = ExAllocateFromLookasideListEx(
-		&pLookasidelist_cache->lookasideField);
+	return ((void*)(hdr + 1));
+    }
 
-	    if (buf != NULL) {
-		buf->magic = ALLOC_MAGIC;
-		buf->source = ALLOC_FROM_LOOKASIDE;
-		return (void*)(buf + 1);
-	    }
-	}		
-	
-	buf= kmem_cache_alloc(emergency_abd, KM_SLEEP);
+    /*
+     * Slow path: guaranteed allocation via kmem (sleeping allowed).
+     */
+    hdr = kmem_cache_alloc(emergency_abd, KM_SLEEP);
+    if (hdr != NULL) {
+	hdr->magic = ALLOC_MAGIC;
+	hdr->source = ALLOC_FROM_KMEM;
 
-	if (buf != NULL) {
-	    buf->magic = ALLOC_MAGIC;
-	    buf->source = ALLOC_FROM_KMEM;
-	    return (void*)(buf + 1);
-	}	
+	return ((void*)(hdr + 1));
+    }    
 }
 
 void
 lookasidelist_cache_free(lookasidelist_cache_t *pLookasidelist_cache, void *buf)
-{
-	ASSERT(buf != NULL);
+{	
         alloc_hdr_t *hdr = (alloc_hdr_t*)buf - 1;
 	ASSERT(hdr->magic == ALLOC_MAGIC);
 	
