@@ -21,8 +21,7 @@ typedef struct lookasidelist_cache {
 } lookasidelist_cache_t;
 
 typedef enum {
-    ALLOC_FROM_LOOKASIDE = 1,
-    ALLOC_FROM_KMEM = 2
+    ALLOC_FROM_LOOKASIDE = 1
 } alloc_source_t;
 
 typedef struct alloc_hdr {
@@ -36,5 +35,6 @@ void lookasidelist_cache_destroy(lookasidelist_cache_t *pLookasidelist_cache);
 void* lookasidelist_cache_alloc(lookasidelist_cache_t *pLookasidelist_cache);
 void lookasidelist_cache_free(lookasidelist_cache_t *pLookasidelist_cache,
     void *buf);
+void lookaside_kmem_free(void);
 
 #endif

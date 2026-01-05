@@ -486,5 +486,5 @@ abd_iter_unmap(struct abd_iter *aiter)
 void
 abd_cache_reap_now(void)
 {
-	//kmem_cache_reap_now(abd_chunk_cache);    
+	lookaside_kmem_free();
 }

@@ -2,8 +2,8 @@
 #include <sys/lookasidelist.h>
 #include <sys/kmem.h>
 
-kmem_cache_t *emergency_abd;
-#define LOOKASIDE_THRESHOLD 30000ULL
+#define PAGESIZING 4096
+kmem_cache_t* emergency_abd;
 
 /*
 * Portions Copyright 2022 Andrew Innes <andrew.c12@gmail.com>
@@ -145,7 +145,7 @@ lookasidelist_cache_create(char *name,	/* descriptive name for this cache */
 		}
 	}
 
-	emergency_abd = kmem_cache_create("abd_chunk", total_chunk_size,
+	emergency_abd = kmem_cache_create("abd_chunk", size,
 	    MIN(PAGE_SIZE, 4096),
 	    NULL, NULL, NULL, NULL, abd_arena, KMC_NOTOUCH);
 
@@ -172,43 +172,52 @@ lookasidelist_cache_destroy(lookasidelist_cache_t *pLookasidelist_cache)
 
 void *
 lookasidelist_cache_alloc(lookasidelist_cache_t *pLookasidelist_cache)
-{	
-    alloc_hdr_t* hdr;    
+{
+	alloc_hdr_t* hdr;
 
-    /*
-     * Fast path: try lookaside list first.
-     */
-    hdr = ExAllocateFromLookasideListEx(&pLookasidelist_cache->lookasideField);
-    if (hdr != NULL) {
-	hdr->magic = ALLOC_MAGIC;
-	hdr->source = ALLOC_FROM_LOOKASIDE;
+	/*
+	 * Fast path: try lookaside list first.
+	 * Allocates: [ alloc_hdr | 4096 payload ]  => 4104 bytes
+	 */
+	hdr = ExAllocateFromLookasideListEx(
+	    &pLookasidelist_cache->lookasideField);
 
-	return ((void*)(hdr + 1));
-    }
+	if (hdr != NULL) {
+	    hdr->magic = ALLOC_MAGIC;
+	    hdr->source = ALLOC_FROM_LOOKASIDE;
 
-    /*
-     * Slow path: guaranteed allocation via kmem (sleeping allowed).
-     */
-    hdr = kmem_cache_alloc(emergency_abd, KM_SLEEP);
-    if (hdr != NULL) {
-	hdr->magic = ALLOC_MAGIC;
-	hdr->source = ALLOC_FROM_KMEM;
+	    return (void*)(hdr + 1);	    	    
+	}
 
-	return ((void*)(hdr + 1));
-    }    
+	/*
+	 * Slow path: guaranteed allocation via kmem (sleeping allowed).
+	 * Allocates: exactly 4096 bytes, page-aligned, no header.
+	 */
+	void* buf = kmem_cache_alloc(emergency_abd, KM_SLEEP);
+	ASSERT(buf != NULL);
+	return (buf);	
 }
 
 void
 lookasidelist_cache_free(lookasidelist_cache_t *pLookasidelist_cache, void *buf)
-{	
-        alloc_hdr_t *hdr = (alloc_hdr_t*)buf - 1;
-	ASSERT(hdr->magic == ALLOC_MAGIC);
-	
-	if (hdr->source == ALLOC_FROM_LOOKASIDE) {
-		ExFreeToLookasideListEx(&pLookasidelist_cache->lookasideField,
-		    hdr);
+{	    
+	/* Check if not page-aligned (lookaside allocation with header) */
+	if ((uintptr_t)buf & (PAGESIZING - 1)) {
+	    alloc_hdr_t* hdr = (alloc_hdr_t*)buf - 1;
+	    ASSERT(hdr->magic == ALLOC_MAGIC);
+	    ASSERT(hdr->source == ALLOC_FROM_LOOKASIDE);
+
+	    ExFreeToLookasideListEx(&pLookasidelist_cache->lookasideField, hdr);	
 	}
 	else {
-	    kmem_cache_free(emergency_abd, hdr);
+	    /*page-aligned = kmem allocation (4096 bytes) */
+	    kmem_cache_free(emergency_abd, buf);
 	}
 }
+
+void
+lookaside_kmem_free(void)
+{
+	kmem_cache_reap_now(emergency_abd);
+}
+
