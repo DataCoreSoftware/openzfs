@@ -76,6 +76,7 @@ static volatile _Atomic int64_t spl_free = 0;
 int64_t spl_free_delta_ema;
 
 static boolean_t spl_event_thread_exit = FALSE;
+static boolean_t spl_abd_prealloc_thread_exit = FALSE;
 PKEVENT low_mem_event = NULL;
 
 static volatile _Atomic int64_t spl_free_manual_pressure = 0;
@@ -4914,6 +4915,56 @@ spl_event_thread(void *notused)
 	thread_exit();
 }
 
+extern kmem_cache_t *abd_chunk_cache;
+extern uint64_t zfs_arc_max;
+extern int zfs_abd_prealloc_percent;
+
+static void
+spl_abd_prealloc_thread(void *notused)
+{
+	NTSTATUS Status;
+
+	typedef struct abd_prealloc_node {
+		list_node_t node;
+	} abd_prealloc_node_t;
+
+	abd_prealloc_node_t *node;
+	list_t abd_prealloc_list;
+
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "SPL: abd prealloc start segkmem_total_mem_allocated: %lld total_memory: %lld\n",
+	    segkmem_total_mem_allocated, total_memory));
+
+	dprintf("SPL: beginning spl_abd_prealloc_thread() loop\n");
+
+	list_create(&abd_prealloc_list, sizeof (abd_prealloc_node_t), offsetof(abd_prealloc_node_t, node));
+
+	while (!spl_abd_prealloc_thread_exit) {
+
+		if (!abd_chunk_cache || !zfs_arc_max) {
+			delay(hz);
+			continue;
+		}
+		node = (abd_prealloc_node_t *)kmem_cache_alloc(abd_chunk_cache, KM_SLEEP);
+		list_insert_tail(&abd_prealloc_list, node);
+
+		if (segkmem_total_mem_allocated >=
+                    (zfs_arc_max * zfs_abd_prealloc_percent) / 100) {
+                        break;
+                }
+	}
+
+	while ((node = list_remove_head(&abd_prealloc_list)) != NULL) {
+		kmem_cache_free(abd_chunk_cache, node);
+	}
+
+	spl_abd_prealloc_thread_exit = FALSE;
+	dprintf("SPL: %s thread_exit\n", __func__);
+
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "SPL: abd prealloc done segkmem_total_mem_allocated: %lld total_memory: %lld zfs_prealloc_percent: %d%\n",
+	    segkmem_total_mem_allocated, total_memory, zfs_abd_prealloc_percent));
+	thread_exit();
+}
+
 
 static int
 spl_kstat_update(kstat_t *ksp, int rw)
@@ -5344,6 +5395,9 @@ spl_kmem_thread_init(void)
 
 	spl_event_thread_exit = FALSE;
 	(void) thread_create(NULL, 0, spl_event_thread, 0, 0, 0, 0, 92);
+
+	spl_abd_prealloc_thread_exit = FALSE;
+	(void) thread_create(NULL, 0, spl_abd_prealloc_thread, 0, 0, 0, 0, 92);
 }
 
 void
@@ -5351,6 +5405,7 @@ spl_kmem_thread_fini(void)
 {
 	shutting_down = 1;
 
+	spl_abd_prealloc_thread_exit = TRUE;
 	if (low_mem_event != NULL) {
 		dprintf("SPL: stopping spl_event_thread\n");
 		spl_event_thread_exit = TRUE;
