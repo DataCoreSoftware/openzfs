@@ -4304,7 +4304,10 @@ spl_free_set_pressure(int64_t new_p)
 		// and any spl_free_set_and_wait_pressure() threads
 		cv_broadcast(&spl_free_thread_cv);
 	}
-	spl_free_last_pressure = zfs_lbolt();
+	if (new_p > 0)
+		spl_free_last_pressure = zfs_lbolt();
+	else
+		spl_free_last_pressure = zfs_lbolt();
 }
 
 void
@@ -4480,6 +4483,7 @@ spl_free_thread()
 		    spl_vm_pressure_level != MAGIC_PRESSURE_UNAVAILABLE) {
 			/* there is pressure */
 			lowmem = true;
+			KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "spl_vm_pressure_level: %lu\n",spl_vm_pressure_level));
 			new_spl_free = -(2LL * PAGE_SIZE * spl_vm_pages_wanted);
 			if (spl_vm_pressure_level > 1) {
 				emergency_lowmem = true;
@@ -4534,6 +4538,7 @@ spl_free_thread()
 			int64_t old_pressure = spl_free_manual_pressure;
 			new_spl_free -= old_pressure * 2LL;
 			lowmem = true;
+			KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "spl_free_manual_pressure: %llu\n",spl_free_manual_pressure));
 			if (spl_free_fast_pressure) {
 				emergency_lowmem = true;
 				new_spl_free -= old_pressure * 4LL;
@@ -4631,6 +4636,7 @@ spl_free_thread()
 			new_spl_free += bminus;
 			lowmem = true;
 			emergency_lowmem = true;
+			KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "spl_vm_pages_wanted %lu\n", spl_vm_pages_wanted));
 			// atomic swaps to set these variables used in arc.c
 			int64_t previous_highest_pressure = 0;
 			int64_t new_p = -bminus;
@@ -4651,6 +4657,7 @@ spl_free_thread()
 			new_spl_free -= bytes_wanted;
 			if (reserve_low && !early_lots_free) {
 				lowmem = true;
+				KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "spl_vm_pages_wanted: %lu reserve_low: %lu early_lots_free: %lu\n", spl_vm_pages_wanted, reserve_low, early_lots_free));
 				if (recent_lowmem == 0) {
 					recent_lowmem = time_now;
 				}
@@ -4761,6 +4768,7 @@ spl_free_thread()
 			    real_total_memory) > 75) {
 				new_spl_free -= total_mem_used / 32;
 				lowmem = true;
+				KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "segkmem_total_mem_allocated: %llu real_total_memory: %llu\n", segkmem_total_mem_allocated, real_total_memory));
 			}
 		}
 
@@ -5393,8 +5401,8 @@ spl_kmem_thread_init(void)
 	(void) thread_create(NULL, 0, spl_free_thread, 0, 0, 0, 0, 92);
 	spl_free_thread_running = TRUE;
 
-	spl_event_thread_exit = FALSE;
-	(void) thread_create(NULL, 0, spl_event_thread, 0, 0, 0, 0, 92);
+	//spl_event_thread_exit = FALSE;
+	//(void) thread_create(NULL, 0, spl_event_thread, 0, 0, 0, 0, 92);
 
 	spl_abd_prealloc_thread_exit = FALSE;
 	(void) thread_create(NULL, 0, spl_abd_prealloc_thread, 0, 0, 0, 0, 92);
