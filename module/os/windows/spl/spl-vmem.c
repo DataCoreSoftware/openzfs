@@ -448,6 +448,7 @@ uint64_t spl_frag_walk_cnt = 0;
 extern void spl_free_set_emergency_pressure(int64_t p);
 extern uint64_t segkmem_total_mem_allocated;
 extern uint64_t total_memory;
+extern uint64_t zfs_arc_max;
 
 /*
  * Get a vmem_seg_t from the global segfree list.
@@ -1732,12 +1733,23 @@ vmem_xfree(vmem_t *vmp, void *vaddr, size_t size)
 		vsp = vprev;
 	}
 
+	// calling vm_source_free will free the memory to windows, we
+	// don;t want to do this unless we are near the arc limit
+	boolean_t skip_sfree = true;
+	if (segkmem_total_mem_allocated >
+		(zfs_arc_max * 90) / 100) {
+		KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+		       	"vmem_xfree: skip source free segkmem_total_mem_allocated: %llu zfs_arc_max: %llu\n",
+			segkmem_total_mem_allocated, zfs_arc_max));
+		skip_sfree = false;
+        }
+
 	/*
 	 * If the entire span is free, return it to the source.
 	 */
 	if (vsp->vs_aprev->vs_import && vmp->vm_source_free != NULL &&
 	    vsp->vs_aprev->vs_type == VMEM_SPAN &&
-	    vsp->vs_anext->vs_type == VMEM_SPAN) {
+	    vsp->vs_anext->vs_type == VMEM_SPAN && !skip_sfree) {
 		vaddr = (void *)vsp->vs_start;
 		size = VS_SIZE(vsp);
 		ASSERT(size == VS_SIZE(vsp->vs_aprev));
