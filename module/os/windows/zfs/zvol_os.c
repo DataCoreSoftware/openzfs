@@ -46,7 +46,7 @@ unsigned int zvol_request_sync = 0;
 unsigned int zvol_prefetch_bytes = (128 * 1024);
 unsigned long zvol_max_discard_blocks = 16384;
 int zvol_threads = 0;
-int zfs_abd_prealloc_percent = 10;
+int zfs_prealloc_percent = 0;
 
 taskq_t *zvol_taskq;
 
