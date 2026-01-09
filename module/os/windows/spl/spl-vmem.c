@@ -449,6 +449,7 @@ extern void spl_free_set_emergency_pressure(int64_t p);
 extern uint64_t segkmem_total_mem_allocated;
 extern uint64_t total_memory;
 extern uint64_t zfs_arc_max;
+extern int zfs_prealloc_percent;
 
 /*
  * Get a vmem_seg_t from the global segfree list.
@@ -1734,19 +1735,22 @@ vmem_xfree(vmem_t *vmp, void *vaddr, size_t size)
 	}
 
 	// calling vm_source_free will free the memory to windows, we
-	// don;t want to do this unless we are near the arc limit
-	boolean_t skip_sfree = true;
-	if (segkmem_total_mem_allocated >
-		(zfs_arc_max * 102) / 100) {
-		skip_sfree = false;
-        }
+	// don't want to do this unless we are crossing the arc limit when
+	// zfs_prealloc_percent is enabled.
+	boolean_t allow_vm_source_free = true;
+	if (zfs_prealloc_percent) {
+		if (segkmem_total_mem_allocated <
+			(zfs_arc_max * 102) / 100) {
+			allow_vm_source_free = false;
+		}
+	}
 
 	/*
 	 * If the entire span is free, return it to the source.
 	 */
 	if (vsp->vs_aprev->vs_import && vmp->vm_source_free != NULL &&
 	    vsp->vs_aprev->vs_type == VMEM_SPAN &&
-	    vsp->vs_anext->vs_type == VMEM_SPAN && !skip_sfree) {
+	    vsp->vs_anext->vs_type == VMEM_SPAN && allow_vm_source_free) {
 		vaddr = (void *)vsp->vs_start;
 		size = VS_SIZE(vsp);
 		ASSERT(size == VS_SIZE(vsp->vs_aprev));

@@ -132,6 +132,10 @@ extern uint64_t		zfs_active_rwlock;
 extern uint64_t		total_memory;
 extern uint64_t		real_total_memory;
 
+extern kmem_cache_t *abd_chunk_cache;
+extern uint64_t zfs_arc_max;
+extern int zfs_prealloc_percent;
+
 #define	MULT 1
 
 static const char *KMEM_VA_PREFIX = "kmem_va";
@@ -4304,10 +4308,7 @@ spl_free_set_pressure(int64_t new_p)
 		// and any spl_free_set_and_wait_pressure() threads
 		cv_broadcast(&spl_free_thread_cv);
 	}
-	if (new_p > 0)
-		spl_free_last_pressure = zfs_lbolt();
-	else
-		spl_free_last_pressure = zfs_lbolt();
+	spl_free_last_pressure = zfs_lbolt();
 }
 
 void
@@ -4923,10 +4924,6 @@ spl_event_thread(void *notused)
 	thread_exit();
 }
 
-extern kmem_cache_t *abd_chunk_cache;
-extern uint64_t zfs_arc_max;
-extern int zfs_abd_prealloc_percent;
-
 static void
 spl_abd_prealloc_thread(void *notused)
 {
@@ -4952,13 +4949,14 @@ spl_abd_prealloc_thread(void *notused)
 			delay(hz);
 			continue;
 		}
-		node = (abd_prealloc_node_t *)kmem_cache_alloc(abd_chunk_cache, KM_SLEEP);
-		list_insert_tail(&abd_prealloc_list, node);
 
 		if (segkmem_total_mem_allocated >=
-                    (zfs_arc_max * zfs_abd_prealloc_percent) / 100) {
+                    (zfs_arc_max * zfs_prealloc_percent) / 100) {
                         break;
                 }
+
+		node = (abd_prealloc_node_t *)kmem_cache_alloc(abd_chunk_cache, KM_SLEEP);
+		list_insert_tail(&abd_prealloc_list, node);
 	}
 
 	while ((node = list_remove_head(&abd_prealloc_list)) != NULL) {
@@ -4969,7 +4967,7 @@ spl_abd_prealloc_thread(void *notused)
 	dprintf("SPL: %s thread_exit\n", __func__);
 
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "SPL: abd prealloc done segkmem_total_mem_allocated: %lld total_memory: %lld zfs_arc_max: %llu zfs_prealloc_percent: %d%\n",
-	    segkmem_total_mem_allocated, total_memory, zfs_arc_max, zfs_abd_prealloc_percent));
+	    segkmem_total_mem_allocated, total_memory, zfs_arc_max, zfs_prealloc_percent));
 	thread_exit();
 }
 
@@ -5401,11 +5399,13 @@ spl_kmem_thread_init(void)
 	(void) thread_create(NULL, 0, spl_free_thread, 0, 0, 0, 0, 92);
 	spl_free_thread_running = TRUE;
 
-	//spl_event_thread_exit = FALSE;
-	//(void) thread_create(NULL, 0, spl_event_thread, 0, 0, 0, 0, 92);
-
-	spl_abd_prealloc_thread_exit = FALSE;
-	(void) thread_create(NULL, 0, spl_abd_prealloc_thread, 0, 0, 0, 0, 92);
+	if (zfs_prealloc_percent) {
+		spl_abd_prealloc_thread_exit = FALSE;
+		(void) thread_create(NULL, 0, spl_abd_prealloc_thread, 0, 0, 0, 0, 92);
+	} else {
+		spl_event_thread_exit = FALSE;
+		(void) thread_create(NULL, 0, spl_event_thread, 0, 0, 0, 0, 92);
+	}
 }
 
 void
