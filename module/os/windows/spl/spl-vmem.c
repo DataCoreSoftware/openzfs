@@ -1737,10 +1737,7 @@ vmem_xfree(vmem_t *vmp, void *vaddr, size_t size)
 	// don;t want to do this unless we are near the arc limit
 	boolean_t skip_sfree = true;
 	if (segkmem_total_mem_allocated >
-		(zfs_arc_max * 100) / 100) {
-		KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-		       	"vmem_xfree: skip source free segkmem_total_mem_allocated: %llu zfs_arc_max: %llu\n",
-			segkmem_total_mem_allocated, zfs_arc_max));
+		(zfs_arc_max * 102) / 100) {
 		skip_sfree = false;
         }
 
