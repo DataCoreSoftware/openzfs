@@ -4968,8 +4968,8 @@ spl_abd_prealloc_thread(void *notused)
 	spl_abd_prealloc_thread_exit = FALSE;
 	dprintf("SPL: %s thread_exit\n", __func__);
 
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "SPL: abd prealloc done segkmem_total_mem_allocated: %lld total_memory: %lld zfs_prealloc_percent: %d%\n",
-	    segkmem_total_mem_allocated, total_memory, zfs_abd_prealloc_percent));
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "SPL: abd prealloc done segkmem_total_mem_allocated: %lld total_memory: %lld zfs_arc_max: %llu zfs_prealloc_percent: %d%\n",
+	    segkmem_total_mem_allocated, total_memory, zfs_arc_max, zfs_abd_prealloc_percent));
 	thread_exit();
 }
 
