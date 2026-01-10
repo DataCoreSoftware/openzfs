@@ -87,7 +87,7 @@ struct {
  * will cause the machine to panic if you change it and try to access the data
  * within a scattered ABD.
  */
-size_t zfs_abd_chunk_size = 65536;
+size_t zfs_abd_chunk_size = 4096;
 
 kmem_cache_t *abd_chunk_cache;
 static kstat_t *abd_ksp;
