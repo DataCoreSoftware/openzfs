@@ -1,5 +1,6 @@
 #include <sys/zfs_context.h>
 #include <sys/lookasidelist.h>
+#include <sys/vmem.h>
 
 /*
 * Portions Copyright 2022 Andrew Innes <andrew.c12@gmail.com>
@@ -66,6 +67,25 @@ allocate_func(
 	return (buf);
 }
 
+void *
+vmem_allocate_func(
+    __in POOL_TYPE PoolType,
+    __in SIZE_T NumberOfBytes,
+    __in ULONG Tag,
+    __inout PLOOKASIDE_LIST_EX Lookaside)
+{
+    lookasidelist_cache_t* pLookasidelist_cache;
+    pLookasidelist_cache = CONTAINING_RECORD(Lookaside,
+	lookasidelist_cache_t, lookasideField);
+    void* buf = spl_vmem_malloc_if_no_pressure(NumberOfBytes);
+    ASSERT(buf != NULL);
+
+    if (buf != NULL) {
+	atomic_inc_64(&pLookasidelist_cache->cache_active_allocations);
+	atomic_inc_64(&pLookasidelist_cache->total_alloc);
+    }
+}
+
 void free_func(
     __in PVOID  Buffer,
     __inout PLOOKASIDE_LIST_EX  Lookaside
@@ -97,7 +117,7 @@ lookasidelist_cache_create(char *name,	/* descriptive name for this cache */
 
 		NTSTATUS retval = ExInitializeLookasideListEx(
 		    &pLookasidelist_cache->lookasideField,
-		    allocate_func,
+		    vmem_allocate_func,
 		    free_func,
 		    NonPagedPoolNx,
 		    0,

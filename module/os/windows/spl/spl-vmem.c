@@ -221,6 +221,7 @@
 #include <sys/debug.h>
 #include <sys/types.h>
 #include <stdbool.h>
+#include <sys/lookasidelist.h>
 
 #include <Trace.h>
 
@@ -345,6 +346,8 @@ uint32_t vmem_mtbf;	/* mean time between failures [default: off] */
 size_t vmem_seg_size = sizeof (vmem_seg_t);
 
 static struct bsd_timeout_wrapper vmem_update_timer;
+
+static lookasidelist_cache_t* fast_bucket_cache[12];
 
 
 // must match with include/sys/vmem_impl.h
@@ -2520,8 +2523,9 @@ xnu_alloc_throttled(vmem_t *bvmp, size_t size, int vmflag)
 	uint64_t now = zfs_lbolt();
 	const uint64_t entry_now = now;
 
-	void *m = spl_vmem_malloc_if_no_pressure(size);
-
+	ASSERT(fast_bucket_cache[vmem_bucket_id_to_bucket_number[bvmp->vm_id]] != NULL);
+	void *m = lookasidelist_cache_alloc(fast_bucket_cache[vmem_bucket_id_to_bucket_number[bvmp->vm_id]]);
+	
 	if (m != NULL) {
 		atomic_inc_64(&spl_xat_success);
 		spl_xat_lastalloc = gethrtime();
@@ -2740,7 +2744,8 @@ xnu_free_throttled(vmem_t *vmp, void *vaddr, size_t size)
 	// If there is more than one thread in this function, osif_free() is
 	// protected by is_freeing.   Release it after the osif_free()
 	// call has been made and the lastfree bookkeeping has been done.
-	osif_free(vaddr, size);
+	ASSERT(fast_bucket_cache[vmem_bucket_id_to_bucket_number[vmp->vm_id]] != NULL);
+	lookasidelist_cache_free(fast_bucket_cache[vmem_bucket_id_to_bucket_number[vmp->vm_id]], vaddr);
 	spl_xat_lastfree = gethrtime();
 	is_freeing = false;
 	a_waiters--;
@@ -3408,6 +3413,12 @@ vmem_init(const char *heap_name,
 		 * These will serve power-of-two sized blocks to the
 		 * bucket_heap arena.
 		 */
+		char name[64];
+		snprintf(name, sizeof(name), "bucket_cache_%u", bucket_number);
+		lookasidelist_cache_t* fastCache = lookasidelist_cache_create(name, bucket_largest_size);
+		ASSERT(fastCache != NULL);
+		fast_bucket_cache[bucket_number] = fastCache;
+
 		vmem_t *b = vmem_create(buf, NULL, 0,
 		    // MAX(heap_quantum, bucket_largest_size),
 		    heap_quantum,
@@ -3419,6 +3430,7 @@ vmem_init(const char *heap_name,
 		b->vm_source = b;
 		vmem_bucket_arena[bucket_number] = b;
 		vmem_bucket_id_to_bucket_number[b->vm_id] = bucket_number;
+		
 	}
 
 	vmem_free(spl_default_arena, buf, VMEM_NAMELEN + 21);
@@ -3451,17 +3463,7 @@ vmem_init(const char *heap_name,
 	if (real_total_memory >= 8ULL * gib)
 		resv_size = 512ULL * mib;
 	if (real_total_memory >= 16ULL * gib)
-		resv_size = gib;
-	if (real_total_memory >= 32ULL * gib)
-		resv_size = 2ULL * gib;
-	if (real_total_memory >= 64ULL * gib)
-		resv_size = 4ULL * gib;
-	if (real_total_memory >= 128ULL * gib)
-		resv_size = 8ULL * gib;
-	if (real_total_memory >= 256ULL * gib)
-		resv_size = 12ULL * gib;
-	if (real_total_memory >= 512ULL * gib)
-		resv_size = 16ULL * gib;
+		resv_size = gib;	
 
 	dprintf("SPL: %s adding fixed allocation of %llu to the bucket_heap\n",
 	    __func__, (uint64_t)resv_size);
@@ -3675,6 +3677,8 @@ vmem_fini(vmem_t *heap)
 
 		vmem_walk(vmem_bucket_arena[bucket], VMEM_ALLOC,
 		    vmem_fini_freelist, vmem_bucket_arena[bucket]);
+
+		lookasidelist_cache_destroy(fast_bucket_cache[i-VMEM_BUCKET_LOWBIT]);
 	}
 	vmem_free_span_list();
 
