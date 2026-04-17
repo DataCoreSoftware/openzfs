@@ -4235,7 +4235,7 @@ spl_free_wrapper(void)
 int64_t
 spl_free_manual_pressure_wrapper(void)
 {
-	return (spl_free_manual_pressure);
+	return (0);
 }
 
 uint64_t
