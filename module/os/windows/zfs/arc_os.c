@@ -59,6 +59,7 @@
 #include <sys/kstat_windows.h>
 
 extern arc_stats_t arc_stats;
+extern uint64_t zfs_arc_max;
 
 static kmutex_t			arc_reclaim_lock;
 static kcondvar_t		arc_reclaim_thread_cv;
@@ -127,7 +128,7 @@ arc_free_memory(void)
 int64_t
 arc_available_memory(void)
 {
-	return (arc_free_memory() - arc_sys_free);
+	return (zfs_arc_max - aggsum_value(&arc_sums.arcstat_size));
 }
 
 int
@@ -137,8 +138,7 @@ arc_memory_throttle(spa_t *spa, uint64_t reserve, uint64_t txg)
 	/* possibly wake up arc reclaim thread */
 
 	if (arc_reclaim_in_loop == B_FALSE) {
-		if (spl_free_manual_pressure_wrapper() != 0 ||
-		    !spl_minimal_physmem_p() ||
+		if (!spl_minimal_physmem_p() ||
 		    arc_reclaim_needed()) {
 			cv_signal(&arc_reclaim_thread_cv);
 			kpreempt(KPREEMPT_SYNC);
@@ -798,7 +798,7 @@ arc_prune_async(int64_t adjust)
 int64_t
 arc_available_memory(void)
 {
-	return (arc_free_memory() - arc_sys_free);
+	return (zfs_arc_max - aggsum_value(&arc_sums.arcstat_size));  
 }
 
 int
