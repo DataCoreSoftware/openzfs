@@ -307,9 +307,6 @@ adc_update(txg_adc_t* adc, uint64_t txg,
 	    (u_longlong_t)(next >> 20));
     }
 }
-
-
-
 /*
  * Prepare the txg subsystem.
  */
