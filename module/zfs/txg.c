@@ -113,6 +113,203 @@ static void txg_quiesce_thread(void *arg);
 
 int zfs_txg_timeout = 1;	/* max seconds worth of delta per txg */
 
+#define DIRTY_FLOOR_BYTES       (153ULL << 20)
+#define DIRTY_CEIL_BYTES        (4ULL << 30)
+uint_t zfs_adc_target_sync_pct = 75;
+/* PID gains, all scaled ×1000 to avoid floating point */
+int zfs_adc_kp = 200;   /* Proportional: main corrective force    */
+int zfs_adc_ki = 15;    /* Integral: eliminates steady-state bias  */
+int zfs_adc_kd = 100;   /* Derivative: damping against oscillation */
+
+/* EMA smoothing window in TXG count */
+uint_t zfs_adc_ema_alpha_pct = 25;  /* 25% weight on new sample   */
+/* Minimum TXGs between dirty_max updates (anti-flapping) */
+uint_t zfs_adc_holdoff_txgs = 2;
+/* Master enable — 0 reverts to stock ZFS behavior instantly */
+int zfs_adc_enable = 1;
+
+typedef struct {
+    /* PID state */
+    int64_t     adc_integral;       /* accumulated error (I term)  */
+    int64_t     adc_prev_error;     /* last error sample (D term)  */
+    clock_t     adc_ema_delta;      /* smoothed spa_sync duration  */
+    uint64_t    adc_last_txg;       /* TXG of last adjustment      */
+
+    /* Bounds in bytes, computed once from physmem */
+    uint64_t    adc_min_dirty;
+    uint64_t    adc_max_dirty;
+
+    /* Diagnostics / kstat shadow */
+    uint64_t    adc_n_syncs;        /* total TXGs observed         */
+    uint64_t    adc_n_raised;       /* times dirty_max was raised  */
+    uint64_t    adc_n_lowered;      /* times dirty_max was lowered */
+    uint64_t    adc_n_clamped;      /* times a bound was hit       */
+    int64_t     adc_last_p;         /* last P term for debug       */
+    int64_t     adc_last_i;         /* last I term for debug       */
+    int64_t     adc_last_d;         /* last D term for debug       */
+} txg_adc_t;
+
+static inline clock_t
+adc_ema(clock_t prev, clock_t sample, uint_t alpha_pct)
+{
+    return (prev + (clock_t)(((int64_t)sample - prev)
+	* alpha_pct / 100));
+}
+
+static void
+adc_init(txg_adc_t* adc, clock_t target_ticks)
+{    
+    bzero(adc, sizeof(*adc));
+
+    adc->adc_min_dirty = DIRTY_FLOOR_BYTES;
+    adc->adc_max_dirty = DIRTY_CEIL_BYTES;
+
+    /* Defensive: ensure min < max regardless of tunable misconfiguration */
+    if (adc->adc_min_dirty >= adc->adc_max_dirty)
+	adc->adc_min_dirty = adc->adc_max_dirty / 8;
+
+    /* Seed EMA at target — controller starts in steady state */
+    adc->adc_ema_delta = target_ticks;
+    adc->adc_prev_error = 0;
+    adc->adc_integral = 0;
+}
+
+static void
+adc_update(txg_adc_t* adc, uint64_t txg,
+    clock_t raw_delta, clock_t target_ticks)
+{
+    int64_t  error;         /* normalized error × 1000             */
+    int64_t  p_term;        /* proportional correction             */
+    int64_t  i_term;        /* integral correction                 */
+    int64_t  d_term;        /* derivative correction               */
+    int64_t  pid_out;       /* combined PID output                 */
+    int64_t  adjustment;    /* byte delta for dirty_max            */
+    uint64_t cur, proposed, next;
+
+    adc->adc_n_syncs++;
+
+    /* Step 1: Update smoothed sync duration via EMA */
+    adc->adc_ema_delta = adc_ema(adc->adc_ema_delta,
+	raw_delta, zfs_adc_ema_alpha_pct);
+
+    /* Step 2: Enforce adjustment holdoff (anti-flapping) */
+    if (adc->adc_last_txg != 0 &&
+	(txg - adc->adc_last_txg) < zfs_adc_holdoff_txgs)
+	return;
+
+    /* Step 3: Compute normalized error
+     *
+     * error = (ema_delta - target) / target × 1000
+     *
+     *  > 0 : sync taking too long → dirty_max too high → must shrink
+     *  < 0 : sync finishing early → dirty_max too low  → can grow
+     *  = 0 : perfect operating point
+     *
+     * Example: ema=6s, target=5s → error = +200 (20% over)
+     * Example: ema=3s, target=5s → error = -400 (40% under)
+     */
+    if (target_ticks == 0)
+	return; /* Safety: avoid divide-by-zero on misconfiguration */
+
+    error = ((int64_t)adc->adc_ema_delta - (int64_t)target_ticks)
+	* 1000LL / (int64_t)target_ticks;
+
+    /* Step 4: P term — immediate response to current error */
+    p_term = (int64_t)zfs_adc_kp * error / 1000LL;
+
+    /* Step 5: I term — accumulate to eliminate steady-state offset
+     *
+     * Anti-windup clamp: prevents integral from growing unboundedly
+     * during sustained overload (e.g., pool degraded, resilver running).
+     * Clamped at ±(30 × Kp) which limits I contribution to ≤3× P max.
+     */
+    adc->adc_integral += error;
+    {
+	int64_t windup_limit = 30LL * (int64_t)zfs_adc_kp;
+	if (adc->adc_integral > windup_limit) adc->adc_integral = windup_limit;
+	if (adc->adc_integral < -windup_limit) adc->adc_integral = -windup_limit;
+    }
+    i_term = (int64_t)zfs_adc_ki * adc->adc_integral / 1000LL;
+
+    /* Step 6: D term — dampen oscillation via rate-of-change */
+    d_term = (int64_t)zfs_adc_kd
+	* (error - adc->adc_prev_error) / 1000LL;
+    adc->adc_prev_error = error;
+
+    /* Save for diagnostics */
+    adc->adc_last_p = p_term;
+    adc->adc_last_i = i_term;
+    adc->adc_last_d = d_term;
+
+    /* Step 7: Combine PID output
+     *
+     * pid_out > 0 → sync was slow → DECREASE dirty_max
+     * pid_out < 0 → sync was fast → INCREASE dirty_max
+     * (sign inversion applied in Step 8)
+     */
+    pid_out = p_term + i_term + d_term;
+
+    if (pid_out == 0)
+	return;
+
+    /* Step 8: Convert PID output to byte adjustment
+     *
+     * adjustment = -(pid_out / 1000) × dirty_max × step_scale
+     *
+     * pid_out is in units of 0.1% so dividing by 1000 gives fraction.
+     * Maximum single-step is capped at 20% of current dirty_max to
+     * prevent catastrophic collapse from one anomalous TXG.
+     */
+    cur = zfs_dirty_data_max;
+
+    adjustment = -((int64_t)cur / 1000LL) * pid_out;
+
+    /* Cap single-step adjustment at ±20% of current dirty_max */
+    {
+	int64_t max_step = (int64_t)(cur / 5);
+	if (adjustment > max_step) adjustment = max_step;
+	if (adjustment < -max_step) adjustment = -max_step;
+    }
+
+    /* Step 9: Apply bounds */
+    proposed = (int64_t)cur + adjustment;
+
+    if (proposed <= adc->adc_min_dirty) {
+	next = adc->adc_min_dirty;
+	adc->adc_n_clamped++;
+    }
+    else if (proposed >= adc->adc_max_dirty) {
+	next = adc->adc_max_dirty;
+	adc->adc_n_clamped++;
+    }
+    else {
+	next = proposed;
+    }
+
+    /* Step 10: Commit — single store, visible to txg_delay() immediately */
+    if (next != cur) {
+	zfs_dirty_data_max = next;
+	adc->adc_last_txg = txg;
+	if (next > cur) adc->adc_n_raised++;
+	else            adc->adc_n_lowered++;
+
+	zfs_dbgmsg("txg_adc txg=%llu ema_delta=%ldms target=%ldms "
+	    "err=%lld P=%lld I=%lld D=%lld "
+	    "dirty_max %lluMB→%lluMB",
+	    (u_longlong_t)txg,
+	    (long)(((uint64_t)adc->adc_ema_delta * 1000ULL) / hz),
+	    (long)(((uint64_t)target_ticks * 1000ULL) / hz),
+	    (longlong_t)error,
+	    (longlong_t)p_term,
+	    (longlong_t)i_term,
+	    (longlong_t)d_term,
+	    (u_longlong_t)(cur >> 20),
+	    (u_longlong_t)(next >> 20));
+    }
+}
+
+
+
 /*
  * Prepare the txg subsystem.
  */
@@ -531,11 +728,18 @@ txg_sync_thread(void *arg)
 	tx_state_t *tx = &dp->dp_tx;
 	callb_cpr_t cpr;
 	clock_t start, delta;
+	txg_adc_t    adc;
 
 	(void) spl_fstrans_mark();
 	txg_thread_enter(tx, &cpr);
 
 	start = delta = 0;
+	clock_t adc_target = (clock_t)(zfs_txg_timeout * hz)
+	    * zfs_adc_target_sync_pct / 100;
+
+	if (zfs_adc_enable)
+	    adc_init(&adc, adc_target);
+
 	for (;;) {
 		clock_t timeout = zfs_txg_timeout * hz;
 		clock_t timer;
@@ -598,6 +802,12 @@ txg_sync_thread(void *arg)
 		spa_sync(spa, txg);
 		delta = ddi_get_lbolt() - start;
 		spa_txg_history_fini_io(spa, ts);
+
+		if (zfs_adc_enable) {
+		    adc_target = (clock_t)(zfs_txg_timeout * hz)
+			* zfs_adc_target_sync_pct / 100;
+		    adc_update(&adc, txg, delta, adc_target);
+		}
 
 		mutex_enter(&tx->tx_sync_lock);
 		tx->tx_synced_txg = txg;
