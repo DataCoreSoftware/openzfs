@@ -113,6 +113,7 @@ windows_kstat_t windows_kstat = {
 	{"spa_mode_global",				KSTAT_DATA_INT64  },
 	{"zfs_flags",					KSTAT_DATA_INT64  },
 	{"zfs_txg_timeout",				KSTAT_DATA_INT64  },
+	{"zfs_adc_enable",				KSTAT_DATA_INT64  },
 	{"zfs_vdev_cache_max",			KSTAT_DATA_INT64  },
 	{"zfs_vdev_cache_size",			KSTAT_DATA_INT64  },
 	{"zfs_vdev_cache_bshift",		KSTAT_DATA_INT64  },
@@ -175,6 +176,7 @@ windows_kstat_t windows_kstat = {
 	{ "cpu_avx_supported",			KSTAT_DATA_UINT32 },
 	{ "zvol_io_threads",			KSTAT_DATA_UINT32 },
 	{ "zfs_prealloc_percent",		KSTAT_DATA_UINT32 },
+	{ "zfs_adc_target_sync_pct",		KSTAT_DATA_UINT32 },
 };
 
 
@@ -291,6 +293,8 @@ windows_kstat_update(kstat_t *ksp, int rw)
 		    ks->zfs_flags.value.i64;
 		zfs_txg_timeout =
 		    ks->zfs_txg_timeout.value.i64;
+		zfs_adc_enable =
+		    ks->zfs_adc_enable.value.i64;
 		zfs_vdev_cache_max =
 		    ks->zfs_vdev_cache_max.value.i64;
 		zfs_vdev_cache_size =
@@ -386,6 +390,8 @@ windows_kstat_update(kstat_t *ksp, int rw)
 		    ks->cpu_avx_supported.value.ui32;
 		zfs_prealloc_percent =
 		    ks->zfs_prealloc_percent.value.ui32;
+		zfs_adc_target_sync_pct =
+		    ks->zfs_adc_target_sync_pct.value.ui32;
 	} else {
 
 		/* kstat READ */
@@ -485,6 +491,8 @@ windows_kstat_update(kstat_t *ksp, int rw)
 		    zfs_flags;
 		ks->zfs_txg_timeout.value.i64 =
 		    zfs_txg_timeout;
+		ks->zfs_adc_enable.value.i64 =
+		    zfs_adc_enable;
 		ks->zfs_vdev_cache_max.value.i64 =
 		    zfs_vdev_cache_max;
 		ks->zfs_vdev_cache_size.value.i64 =
@@ -578,6 +586,8 @@ windows_kstat_update(kstat_t *ksp, int rw)
 		    zvol_threads;
 		ks->zfs_prealloc_percent.value.ui32 =
 		    zfs_prealloc_percent;
+		ks->zfs_adc_target_sync_pct.value.ui32 =
+		    zfs_adc_target_sync_pct;		
 	}
 	arc_kstat_update_windows(ksp, rw);
 	return (0);

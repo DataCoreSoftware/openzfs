@@ -139,6 +139,8 @@ extern void *txg_list_next(txg_list_t *tl, void *p, uint64_t txg);
 
 /* Global tuning */
 extern int zfs_txg_timeout;
+extern int zfs_adc_enable;
+extern uint_t zfs_adc_target_sync_pct;
 
 
 #ifdef ZFS_DEBUG

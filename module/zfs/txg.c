@@ -34,6 +34,7 @@
 #include <sys/zil.h>
 #include <sys/callb.h>
 #include <sys/trace_zfs.h>
+#include<sys/kstat.h>
 
 /*
  * ZFS Transaction Groups
@@ -114,8 +115,17 @@ static void txg_quiesce_thread(void *arg);
 int zfs_txg_timeout = 1;	/* max seconds worth of delta per txg */
 
 #define DIRTY_FLOOR_BYTES       (153ULL << 20)
-#define DIRTY_CEIL_BYTES        (4ULL << 30)
+
+/*
+ * Target spa_sync duration as a fraction of zfs_txg_timeout.
+ * 75 = target 75% of timeout. This headroom allows for burst
+ * without immediately hitting throttle.
+ *
+ * Lower → more headroom, lower peak throughput
+ * Higher → more throughput, less burst tolerance
+ */
 uint_t zfs_adc_target_sync_pct = 75;
+
 /* PID gains, all scaled ×1000 to avoid floating point */
 int zfs_adc_kp = 200;   /* Proportional: main corrective force    */
 int zfs_adc_ki = 15;    /* Integral: eliminates steady-state bias  */
@@ -123,10 +133,17 @@ int zfs_adc_kd = 100;   /* Derivative: damping against oscillation */
 
 /* EMA smoothing window in TXG count */
 uint_t zfs_adc_ema_alpha_pct = 25;  /* 25% weight on new sample   */
+
 /* Minimum TXGs between dirty_max updates (anti-flapping) */
 uint_t zfs_adc_holdoff_txgs = 2;
+
 /* Master enable — 0 reverts to stock ZFS behavior instantly */
 int zfs_adc_enable = 1;
+
+/* ============================================================
+ * ADC STATE — one instance on the stack of txg_sync_thread
+ * No heap allocation, no lock needed (single-threaded use)
+ * ============================================================ */
 
 typedef struct {
     /* PID state */
@@ -149,6 +166,16 @@ typedef struct {
     int64_t     adc_last_d;         /* last D term for debug       */
 } txg_adc_t;
 
+/*
+ * adc_ema — Exponential moving average, integer arithmetic.
+ *
+ * new_ema = prev × (1 - α) + sample × α
+ *         = prev + (sample - prev) × alpha_pct / 100
+ *
+ * alpha_pct=25 means 25% weight on the newest sample, giving
+ * a smoothing time constant of ~3 TXGs — fast enough to track
+ * load changes, slow enough to ignore one-off scrub/snapshot bursts.
+ */
 static inline clock_t
 adc_ema(clock_t prev, clock_t sample, uint_t alpha_pct)
 {
@@ -156,13 +183,19 @@ adc_ema(clock_t prev, clock_t sample, uint_t alpha_pct)
 	* alpha_pct / 100));
 }
 
+/*
+ * adc_init — called once before the txg_sync_thread loop.
+ *
+ * Seeds the EMA at the target so the first TXG doesn't trigger
+ * an aggressive correction from a cold zero baseline.
+ */
 static void
 adc_init(txg_adc_t* adc, clock_t target_ticks)
 {    
     bzero(adc, sizeof(*adc));
 
     adc->adc_min_dirty = DIRTY_FLOOR_BYTES;
-    adc->adc_max_dirty = DIRTY_CEIL_BYTES;
+    adc->adc_max_dirty = dirty_ceil_bytes;
 
     /* Defensive: ensure min < max regardless of tunable misconfiguration */
     if (adc->adc_min_dirty >= adc->adc_max_dirty)
@@ -174,6 +207,17 @@ adc_init(txg_adc_t* adc, clock_t target_ticks)
     adc->adc_integral = 0;
 }
 
+/*
+ * adc_update — core PID + dirty_max adjustment.
+ *
+ * Called every TXG with the just-measured spa_sync duration.
+ * Modifies zfs_dirty_data_max in place.
+ *
+ * @adc:          controller state
+ * @txg:          current TXG id (for holdoff tracking)
+ * @raw_delta:    ddi_get_lbolt() delta from this spa_sync
+ * @target_ticks: desired spa_sync duration in lbolt ticks
+ */
 static void
 adc_update(txg_adc_t* adc, uint64_t txg,
     clock_t raw_delta, clock_t target_ticks)
@@ -725,15 +769,20 @@ txg_sync_thread(void *arg)
 	tx_state_t *tx = &dp->dp_tx;
 	callb_cpr_t cpr;
 	clock_t start, delta;
+	/* ◄── ADC: declare controller state — stack allocated,
+	*      zero overhead when zfs_adc_enable == 0           */
 	txg_adc_t    adc;
 
 	(void) spl_fstrans_mark();
 	txg_thread_enter(tx, &cpr);
 
 	start = delta = 0;
+	/* ◄── ADC: compute target once; recomputed if timeout changes.
+	*    target = zfs_txg_timeout × target_pct / 100            */
 	clock_t adc_target = (clock_t)(zfs_txg_timeout * hz)
 	    * zfs_adc_target_sync_pct / 100;
 
+	/* ◄── ADC: initialize controller — seeds EMA, computes bounds */
 	if (zfs_adc_enable)
 	    adc_init(&adc, adc_target);
 
@@ -775,7 +824,7 @@ txg_sync_thread(void *arg)
 		}
 
 		if (tx->tx_exiting)
-			txg_thread_exit(tx, &cpr, &tx->tx_sync_thread);
+		    txg_thread_exit(tx, &cpr, &tx->tx_sync_thread);
 
 		/*
 		 * Consume the quiesced txg which has been handed off to
@@ -800,6 +849,11 @@ txg_sync_thread(void *arg)
 		delta = ddi_get_lbolt() - start;
 		spa_txg_history_fini_io(spa, ts);
 
+		/* ◄── ADC: feed measured delta into controller.
+		 *    This is the ONLY net-new call in the hot path.
+		 *    adc_update() is O(1), no allocation, no lock.	     
+		 *    Recompute target here to pick up runtime tunable changes
+		 *    (operator can adjust zfs_txg_timeout or target_pct live).  */
 		if (zfs_adc_enable) {
 		    adc_target = (clock_t)(zfs_txg_timeout * hz)
 			* zfs_adc_target_sync_pct / 100;
