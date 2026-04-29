@@ -115,7 +115,16 @@ static void txg_quiesce_thread(void *arg);
 int zfs_txg_timeout = 1;	/* max seconds worth of delta per txg */
 
 #define DIRTY_FLOOR_BYTES       (153ULL << 20)
+kstat_t* dd_ksp;
+int64_t kstat_adc_target = 0;
+int64_t kstat_spa_sync_time = 0;
+int64_t kstat_data_flushed_per_sync = 0;
 
+dynamic_dirty_data_stats_t dynamic_dirty_data_stats = {
+    { "adc_target",	KSTAT_DATA_INT64 },
+    { "spa_sync_time",	KSTAT_DATA_INT64 },
+    { "data_flushed_per_sync",	KSTAT_DATA_INT64 },
+};
 /*
  * Target spa_sync duration as a fraction of zfs_txg_timeout.
  * 75 = target 75% of timeout. This headroom allows for burst
@@ -166,6 +175,21 @@ typedef struct {
     int64_t     adc_last_d;         /* last D term for debug       */
 } txg_adc_t;
 
+static int
+dynamic_dirty_data_kstat_update(kstat_t* ksp, int rw) {
+    dynamic_dirty_data_stats_t* as = ksp->ks_data;
+
+    if (rw == KSTAT_WRITE)
+	return (SET_ERROR(EACCES));
+    as->adc_target.value.i64 =
+	kstat_adc_target;
+    as->spa_sync_time.value.i64 =
+	kstat_spa_sync_time;
+    as->data_flushed_per_sync.value.i64 =
+	kstat_data_flushed_per_sync;
+
+    return (0);
+}
 /*
  * adc_ema — Exponential moving average, integer arithmetic.
  *
@@ -205,6 +229,15 @@ adc_init(txg_adc_t* adc, clock_t target_ticks)
     adc->adc_ema_delta = target_ticks;
     adc->adc_prev_error = 0;
     adc->adc_integral = 0;
+
+    dd_ksp = kstat_create("zfs", 0, "dynamic_dirty_data_stats", "misc", KSTAT_TYPE_NAMED,
+	sizeof(dynamic_dirty_data_stats) / sizeof(kstat_named_t), KSTAT_FLAG_VIRTUAL);
+
+    if (dd_ksp != NULL) {
+	dd_ksp->ks_data = &dynamic_dirty_data_stats;
+	dd_ksp->ks_update = dynamic_dirty_data_kstat_update;
+	kstat_install(dd_ksp);
+    }
 }
 
 /*
@@ -220,7 +253,7 @@ adc_init(txg_adc_t* adc, clock_t target_ticks)
  */
 static void
 adc_update(txg_adc_t* adc, uint64_t txg,
-    clock_t raw_delta, clock_t target_ticks)
+    clock_t raw_delta, clock_t target_ticks, int64_t data_flushed)
 {
     int64_t  error;         /* normalized error × 1000             */
     int64_t  p_term;        /* proportional correction             */
@@ -229,6 +262,10 @@ adc_update(txg_adc_t* adc, uint64_t txg,
     int64_t  pid_out;       /* combined PID output                 */
     int64_t  adjustment;    /* byte delta for dirty_max            */
     uint64_t cur, proposed, next;
+
+    kstat_adc_target = (long)(((uint64_t)target_ticks * 1000ULL) / hz);
+    kstat_spa_sync_time = (long)(((uint64_t)raw_delta * 1000ULL) / hz);
+    kstat_data_flushed_per_sync = data_flushed;
 
     adc->adc_n_syncs++;
 
@@ -844,6 +881,7 @@ txg_sync_thread(void *arg)
 		mutex_exit(&tx->tx_sync_lock);
 
 		txg_stat_t *ts = spa_txg_history_init_io(spa, txg, dp);
+		int64_t dirty_flushed = spa->spa_dsl_pool->dp_dirty_pertxg[txg & TXG_MASK];
 		start = ddi_get_lbolt();
 		spa_sync(spa, txg);
 		delta = ddi_get_lbolt() - start;
@@ -857,7 +895,7 @@ txg_sync_thread(void *arg)
 		if (zfs_adc_enable) {
 		    adc_target = (clock_t)(zfs_txg_timeout * hz)
 			* zfs_adc_target_sync_pct / 100;
-		    adc_update(&adc, txg, delta, adc_target);
+		    adc_update(&adc, txg, delta, adc_target, dirty_flushed);
 		}
 
 		mutex_enter(&tx->tx_sync_lock);
