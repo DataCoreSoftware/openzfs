@@ -118,12 +118,15 @@ int zfs_txg_timeout = 1;	/* max seconds worth of delta per txg */
 kstat_t* dd_ksp;
 int64_t kstat_adc_target = 0;
 int64_t kstat_spa_sync_time = 0;
-int64_t kstat_data_flushed_per_sync = 0;
+uint64_t kstat_data_flushed_per_sync = 0;
+uint64_t kstat_total_dirty_data = 0;
 
 dynamic_dirty_data_stats_t dynamic_dirty_data_stats = {
     { "adc_target",	KSTAT_DATA_INT64 },
     { "spa_sync_time",	KSTAT_DATA_INT64 },
-    { "data_flushed_per_sync",	KSTAT_DATA_INT64 },
+    { "data_flushed_per_sync",	KSTAT_DATA_UINT64 },
+    { "total_dirty_data",	KSTAT_DATA_UINT64 },
+
 };
 /*
  * Target spa_sync duration as a fraction of zfs_txg_timeout.
@@ -185,8 +188,10 @@ dynamic_dirty_data_kstat_update(kstat_t* ksp, int rw) {
 	kstat_adc_target;
     as->spa_sync_time.value.i64 =
 	kstat_spa_sync_time;
-    as->data_flushed_per_sync.value.i64 =
+    as->data_flushed_per_sync.value.ui64 =
 	kstat_data_flushed_per_sync;
+    as->total_dirty_data.value.ui64 =
+	kstat_total_dirty_data;
 
     return (0);
 }
@@ -253,7 +258,7 @@ adc_init(txg_adc_t* adc, clock_t target_ticks)
  */
 static void
 adc_update(txg_adc_t* adc, uint64_t txg,
-    clock_t raw_delta, clock_t target_ticks, int64_t data_flushed)
+    clock_t raw_delta, clock_t target_ticks, uint64_t data_flushed, uint64_t total_dirty)
 {
     int64_t  error;         /* normalized error × 1000             */
     int64_t  p_term;        /* proportional correction             */
@@ -266,6 +271,7 @@ adc_update(txg_adc_t* adc, uint64_t txg,
     kstat_adc_target = (long)(((uint64_t)target_ticks * 1000ULL) / hz);
     kstat_spa_sync_time = (long)(((uint64_t)raw_delta * 1000ULL) / hz);
     kstat_data_flushed_per_sync = data_flushed;
+    kstat_total_dirty_data = total_dirty;
 
     adc->adc_n_syncs++;
 
@@ -806,20 +812,20 @@ txg_sync_thread(void *arg)
 	tx_state_t *tx = &dp->dp_tx;
 	callb_cpr_t cpr;
 	clock_t start, delta;
-	/* ◄── ADC: declare controller state — stack allocated,
-	*      zero overhead when zfs_adc_enable == 0           */
+	/* ADC: declare controller state — stack allocated,
+	* zero overhead when zfs_adc_enable == 0           */
 	txg_adc_t    adc;
 
 	(void) spl_fstrans_mark();
 	txg_thread_enter(tx, &cpr);
 
 	start = delta = 0;
-	/* ◄── ADC: compute target once; recomputed if timeout changes.
-	*    target = zfs_txg_timeout × target_pct / 100            */
+	/* ADC: compute target once; recomputed if timeout changes.
+	* target = zfs_txg_timeout × target_pct / 100            */
 	clock_t adc_target = (clock_t)(zfs_txg_timeout * hz)
 	    * zfs_adc_target_sync_pct / 100;
 
-	/* ◄── ADC: initialize controller — seeds EMA, computes bounds */
+	/* ADC: initialize controller — seeds EMA, computes bounds */
 	if (zfs_adc_enable)
 	    adc_init(&adc, adc_target);
 
@@ -881,13 +887,14 @@ txg_sync_thread(void *arg)
 		mutex_exit(&tx->tx_sync_lock);
 
 		txg_stat_t *ts = spa_txg_history_init_io(spa, txg, dp);
-		int64_t dirty_flushed = spa->spa_dsl_pool->dp_dirty_pertxg[txg & TXG_MASK];
+		uint64_t dirty_flushed = spa->spa_dsl_pool->dp_dirty_pertxg[txg & TXG_MASK];
+		uint64_t total_dirty = dp->dp_dirty_total;
 		start = ddi_get_lbolt();
 		spa_sync(spa, txg);
 		delta = ddi_get_lbolt() - start;
 		spa_txg_history_fini_io(spa, ts);
 
-		/* ◄── ADC: feed measured delta into controller.
+		/*    ADC: feed measured delta into controller.
 		 *    This is the ONLY net-new call in the hot path.
 		 *    adc_update() is O(1), no allocation, no lock.	     
 		 *    Recompute target here to pick up runtime tunable changes
@@ -895,7 +902,7 @@ txg_sync_thread(void *arg)
 		if (zfs_adc_enable) {
 		    adc_target = (clock_t)(zfs_txg_timeout * hz)
 			* zfs_adc_target_sync_pct / 100;
-		    adc_update(&adc, txg, delta, adc_target, dirty_flushed);
+		    adc_update(&adc, txg, delta, adc_target, dirty_flushed, total_dirty);
 		}
 
 		mutex_enter(&tx->tx_sync_lock);

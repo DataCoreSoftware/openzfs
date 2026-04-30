@@ -146,6 +146,7 @@ typedef struct dynamic_dirty_data_stats {
     kstat_named_t adc_target;
     kstat_named_t spa_sync_time;
     kstat_named_t data_flushed_per_sync;
+    kstat_named_t total_dirty_data;
 } dynamic_dirty_data_stats_t;
 
 #ifdef ZFS_DEBUG

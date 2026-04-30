@@ -531,7 +531,9 @@ spl_start(PUNICODE_STRING RegistryPath)
 	spl_kmem_init(total_memory);
 
 	// lets get the registry value now, because the zfs loads the registry little later
-	zfs_prealloc_percent = spl_getZfsPreallocSize(RegistryPath);
+	int reg_val = spl_getZfsPreallocSize(RegistryPath);
+	if (reg_val != 0)
+	    zfs_prealloc_percent = reg_val;
 
 	spl_vnode_init();
 	spl_kmem_thread_init();
