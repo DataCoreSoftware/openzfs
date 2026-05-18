@@ -4234,8 +4234,15 @@ spl_free_wrapper(void)
 // when arc_reclaim_thread() calls spl_free_set_pressure(0);
 int64_t
 spl_free_manual_pressure_wrapper(void)
-{
-	return (0);
+{      	
+    if (arc_target_size() >= ((zfs_arc_max * 95ULL) / 100ULL)) {
+	return (spl_free_manual_pressure); 
+    }
+    else if ((segkmem_total_mem_allocated * 100ULL) / total_memory > 95) {
+	return (spl_free_manual_pressure);
+    }
+        
+    return (0);
 }
 
 uint64_t

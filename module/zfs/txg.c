@@ -126,7 +126,6 @@ dynamic_dirty_data_stats_t dynamic_dirty_data_stats = {
     { "spa_sync_time",	KSTAT_DATA_INT64 },
     { "data_flushed_per_sync",	KSTAT_DATA_UINT64 },
     { "total_dirty_data",	KSTAT_DATA_UINT64 },
-
 };
 /*
  * Target spa_sync duration as a fraction of zfs_txg_timeout.
@@ -208,7 +207,7 @@ dynamic_dirty_data_kstat_update(kstat_t* ksp, int rw) {
 static inline clock_t
 adc_ema(clock_t prev, clock_t sample, uint_t alpha_pct)
 {
-    return (prev + (clock_t)(((int64_t)sample - prev)
+    return (prev + (clock_t)(((int64_t)sample - (int64_t)prev)
 	* alpha_pct / 100));
 }
 
@@ -245,6 +244,25 @@ adc_init(txg_adc_t* adc, clock_t target_ticks)
     }
 }
 
+void
+adc_fini(void)
+{
+    if (dd_ksp != NULL) {
+	kstat_delete(dd_ksp);
+	dd_ksp = NULL;
+    }
+
+    /*
+     * Zero the shadow globals so a subsequent kstat read
+     * before the next adc_init() returns 0 rather than
+     * stale values from the previous pool.
+     */
+    kstat_adc_target = 0;
+    kstat_spa_sync_time = 0;
+    kstat_data_flushed_per_sync = 0;
+    kstat_total_dirty_data = 0;
+}
+
 /*
  * adc_update — core PID + dirty_max adjustment.
  *
@@ -268,10 +286,12 @@ adc_update(txg_adc_t* adc, uint64_t txg,
     int64_t  adjustment;    /* byte delta for dirty_max            */
     uint64_t cur, proposed, next;
 
-    kstat_adc_target = (long)(((uint64_t)target_ticks * 1000ULL) / hz);
-    kstat_spa_sync_time = (long)(((uint64_t)raw_delta * 1000ULL) / hz);
+    kstat_adc_target = (long)(((int64_t)target_ticks * 1000ULL) / hz);
+    kstat_spa_sync_time = (long)(((int64_t)raw_delta * 1000ULL) / hz);
     kstat_data_flushed_per_sync = data_flushed;
     kstat_total_dirty_data = total_dirty;
+
+    if (data_flushed < DIRTY_FLOOR_BYTES) return;
 
     adc->adc_n_syncs++;
 
@@ -378,14 +398,14 @@ adc_update(txg_adc_t* adc, uint64_t txg,
 	zfs_dirty_data_max = next;
 	adc->adc_last_txg = txg;
 	if (next > cur) adc->adc_n_raised++;
-	else            adc->adc_n_lowered++;
+	else adc->adc_n_lowered++;
 
 	zfs_dbgmsg("txg_adc txg=%llu ema_delta=%ldms target=%ldms "
 	    "err=%lld P=%lld I=%lld D=%lld "
 	    "dirty_max %lluMB→%lluMB",
 	    (u_longlong_t)txg,
-	    (long)(((uint64_t)adc->adc_ema_delta * 1000ULL) / hz),
-	    (long)(((uint64_t)target_ticks * 1000ULL) / hz),
+	    (long)(((int64_t)adc->adc_ema_delta * 1000ULL) / hz),
+	    (long)(((int64_t)target_ticks * 1000ULL) / hz),
 	    (longlong_t)error,
 	    (longlong_t)p_term,
 	    (longlong_t)i_term,
@@ -866,8 +886,12 @@ txg_sync_thread(void *arg)
 			txg_thread_wait(tx, &cpr, &tx->tx_quiesce_done_cv, 0);
 		}
 
-		if (tx->tx_exiting)
+		if (tx->tx_exiting) {
+		    /* ADC: clean up kstat before thread exits */
+		    if (zfs_adc_enable)
+			adc_fini();
 		    txg_thread_exit(tx, &cpr, &tx->tx_sync_thread);
+		}
 
 		/*
 		 * Consume the quiesced txg which has been handed off to

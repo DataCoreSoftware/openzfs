@@ -131,6 +131,12 @@ arc_available_memory(void)
 	return (zfs_arc_max - aggsum_value(&arc_sums.arcstat_size));
 }
 
+int64_t
+arc_target_size(void)
+{
+    return (arc_c);
+}
+
 int
 arc_memory_throttle(spa_t *spa, uint64_t reserve, uint64_t txg)
 {
@@ -138,7 +144,7 @@ arc_memory_throttle(spa_t *spa, uint64_t reserve, uint64_t txg)
 	/* possibly wake up arc reclaim thread */
 
 	if (arc_reclaim_in_loop == B_FALSE) {
-		if (!spl_minimal_physmem_p() ||
+		if (spl_free_manual_pressure_wrapper() != 0 || !spl_minimal_physmem_p() ||
 		    arc_reclaim_needed()) {
 			cv_signal(&arc_reclaim_thread_cv);
 			kpreempt(KPREEMPT_SYNC);
