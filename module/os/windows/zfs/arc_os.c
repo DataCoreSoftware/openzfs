@@ -128,7 +128,7 @@ arc_free_memory(void)
 int64_t
 arc_available_memory(void)
 {
-	return (zfs_arc_max - aggsum_value(&arc_sums.arcstat_size));
+	return (arc_free_memory() - arc_sys_free);
 }
 
 int64_t
@@ -806,7 +806,7 @@ arc_prune_async(int64_t adjust)
 int64_t
 arc_available_memory(void)
 {
-	return (zfs_arc_max - aggsum_value(&arc_sums.arcstat_size));  
+	return (arc_free_memory() - arc_sys_free);
 }
 
 int

@@ -4227,21 +4227,132 @@ kmem_cache_fini()
 int64_t
 spl_free_wrapper(void)
 {
+    if (zfs_prealloc_percent == 0)
 	return (spl_free);
+
+    extern vmem_t* abd_arena;
+
+    /*
+     * If abd_arena is not yet initialized, fall back to the standard
+     * spl_free path rather than returning 0 (which would block ARC growth).
+     */
+    if (abd_arena == NULL)
+	return (spl_free);
+
+    /*
+     * Read abd_cache vmem kstat counters.
+     *
+     * mem_import: total bytes committed from OS to abd_cache slabs.
+     *             This is fully counted in os_mem_alloc.
+     * mem_inuse:  bytes actively held by live ABD objects (ARC data).
+     * free_warm:  mem_import - mem_inuse
+     *             Memory OS has committed, sitting free in the slab.
+     *             ARC can consume this at zero additional OS cost.
+     *             os_mem_alloc counts this as "used" — that is wrong
+     *             from ARC's perspective, so we discount it.
+     */
+    const int64_t mem_import =
+	(int64_t)abd_arena->vm_kstat.vk_mem_import.value.ui64;
+    const int64_t mem_inuse =
+	(int64_t)abd_arena->vm_kstat.vk_mem_inuse.value.ui64;
+
+    /*
+     * Sanity: mem_import should always be >= mem_inuse.
+     * Guard against transient races where counters are momentarily
+     * inconsistent (both updated non-atomically by vmem internals).
+     */
+    const int64_t free_warm =
+	(mem_import > mem_inuse) ? (mem_import - mem_inuse) : 0;
+
+    /*
+     * Effective OS pressure = what os_mem_alloc reports, minus the
+     * portion that is free in the slab (pre-paid by prealloc, costs
+     * nothing for ARC to consume).
+     *
+     * os_mem_alloc is extern'd from spl-vmem.c — same source spl_free uses.
+     */
+    const int64_t effective_os_alloc =
+	segkmem_total_mem_allocated - free_warm;
+
+    /*
+     * OS headroom: how much more can we allocate before hitting the
+     * system memory ceiling. Cast total_memory to int64_t BEFORE
+     * multiplying to avoid uint64_t overflow.
+     */
+    const int64_t memory_limit =
+	((int64_t)total_memory * 95) / 100;   /* 95% of physical RAM */
+
+    const int64_t os_headroom = memory_limit - effective_os_alloc;
+
+    /*
+     * ARC headroom: how far below arc_max is arc_c right now.
+     * ARC must never grow past arc_max regardless of OS headroom.
+     */
+    const int64_t arc_headroom =
+	zfs_arc_max - arc_target_size();
+
+    /*
+     * Available = minimum of both constraints.
+     * Clamp to spl_free as a lower bound so we never report
+     * more freedom than the base (non-prealloc) path would.
+     */
+    const int64_t available = MIN(os_headroom, arc_headroom);
+    
+    return available;
+}
+
+bool critical_memory_state(int64_t bufferzone)
+{
+    int64_t remainder = (total_memory - segkmem_total_mem_allocated);
+    if (remainder < bufferzone) return 1;
+    return 0;
 }
 
 // this is intended to substitute for kmem_avail() in arc.c
 // when arc_reclaim_thread() calls spl_free_set_pressure(0);
 int64_t
 spl_free_manual_pressure_wrapper(void)
-{      	
-    if (arc_target_size() >= ((zfs_arc_max * 95ULL) / 100ULL)) {
-	return (spl_free_manual_pressure); 
+{   
+    int64_t five_percent = (total_memory * 5) / 100;
+    int64_t five_hundred_mb = 500LL * 1024 * 1024; // 500 MB in bytes
+
+    int64_t buffer_zone = MIN(five_hundred_mb, five_percent);
+    int64_t safe_threshold = total_memory - buffer_zone;
+
+    if (critical_memory_state(buffer_zone)) return 500LL * 1024 * 1024;
+
+    extern vmem_t* abd_arena;
+
+    if (abd_arena == NULL)
+	return (0);
+
+    const int64_t mem_import =
+	(int64_t)abd_arena->vm_kstat.vk_mem_import.value.ui64;
+    const int64_t mem_inuse =
+	(int64_t)abd_arena->vm_kstat.vk_mem_inuse.value.ui64;
+  
+    const int64_t free_warm =
+	(mem_import > mem_inuse) ? (mem_import - mem_inuse) : 0;   
+
+    // 3. Calculate effective active allocations by discounting the unused warm memory.
+    // This stops the preallocation thread from generating false out-of-memory pressure at boot.
+    int64_t active_os_alloc = segkmem_total_mem_allocated - free_warm;
+    if (active_os_alloc < 0) {
+	active_os_alloc = 0;
     }
-    else if ((segkmem_total_mem_allocated * 100ULL) / total_memory > 95) {
-	return (spl_free_manual_pressure);
+
+    // 4. Evaluate whether active consumption has breached our safety perimeter
+    if (active_os_alloc > safe_threshold) {
+	// Calculate the exact number of bytes we have overshot the safe zone boundary
+	int64_t overshoot = active_os_alloc - safe_threshold;
+
+	// Define an aggressive baseline target (e.g., 150 MB) to replace the weak legacy 14 MB cap
+	int64_t aggressive_reap_base = 200LL * 1024 * 1024;
+
+	// Return whichever value is larger to ensure the ARC acts decisively to clear the bottleneck
+	return (overshoot > aggressive_reap_base) ? overshoot : aggressive_reap_base;
     }
-        
+    
     return (0);
 }
 
