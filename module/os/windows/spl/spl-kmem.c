@@ -1,4 +1,4 @@
-/*
+﻿/*
  * CDDL HEADER START
  *
  * The contents of this file are subject to the terms of the
@@ -88,6 +88,24 @@ _Atomic uint32_t spl_vm_pages_reclaimed = 0;
 _Atomic uint32_t spl_vm_pages_wanted = 0;
 _Atomic uint32_t spl_vm_pressure_level = 0;
 
+/*
+ * Global flag set by prealloc thread.
+ *
+ * PREALLOC_PHASE_IDLE     : prealloc not running
+ * PREALLOC_PHASE_ALLOC    : thread is allocating (Phase 1)
+ *                           free_warm ≈ 0, pressure is FAKE → suppress
+ * PREALLOC_PHASE_FREE     : thread is freeing back to slab (Phase 2)
+ *                           free_warm growing, discount valid
+ * PREALLOC_PHASE_DONE     : prealloc complete, normal operation
+ */
+typedef enum {
+    PREALLOC_PHASE_IDLE = 0,
+    PREALLOC_PHASE_ALLOC = 1,
+    PREALLOC_PHASE_FREE = 2,
+    PREALLOC_PHASE_DONE = 3,
+} prealloc_phase_t;
+
+volatile prealloc_phase_t prealloc_phase = PREALLOC_PHASE_IDLE;
 
 /*
  * the spl_pressure_level enum only goes to four,
@@ -4223,6 +4241,39 @@ kmem_cache_fini()
 	list_destroy(&freelist);
 }
 
+static int64_t
+abd_free_warm_bytes(void)
+{
+    extern vmem_t* abd_arena;
+
+    /*
+     * During Phase 1 (prealloc allocating), mem_inuse ≈ mem_import
+     * so free_warm ≈ 0 anyway, but guard explicitly to be clear.
+     */
+    if (abd_arena == NULL ||
+	prealloc_phase == PREALLOC_PHASE_ALLOC ||
+	prealloc_phase == PREALLOC_PHASE_IDLE)
+	return (0);
+
+    const int64_t mem_import =
+	(int64_t)abd_arena->vm_kstat.vk_mem_import.value.ui64;
+    const int64_t mem_inuse =
+	(int64_t)abd_arena->vm_kstat.vk_mem_inuse.value.ui64;
+
+    return ((mem_import > mem_inuse) ? (mem_import - mem_inuse) : 0);
+}
+
+static bool
+critical_memory_state(int64_t bufferzone, int64_t *rem)
+{   
+    const int64_t remainder = (int64_t)total_memory - (int64_t)segkmem_total_mem_allocated;
+    if (rem != NULL) {
+	*rem = remainder;
+    }
+
+    return (remainder < bufferzone);
+}
+
 // this is intended to substitute for kmem_avail() in arc.c
 int64_t
 spl_free_wrapper(void)
@@ -4232,127 +4283,139 @@ spl_free_wrapper(void)
 
     extern vmem_t* abd_arena;
 
-    /*
-     * If abd_arena is not yet initialized, fall back to the standard
-     * spl_free path rather than returning 0 (which would block ARC growth).
-     */
     if (abd_arena == NULL)
 	return (spl_free);
 
     /*
-     * Read abd_cache vmem kstat counters.
-     *
-     * mem_import: total bytes committed from OS to abd_cache slabs.
-     *             This is fully counted in os_mem_alloc.
-     * mem_inuse:  bytes actively held by live ABD objects (ARC data).
-     * free_warm:  mem_import - mem_inuse
-     *             Memory OS has committed, sitting free in the slab.
-     *             ARC can consume this at zero additional OS cost.
-     *             os_mem_alloc counts this as "used" � that is wrong
-     *             from ARC's perspective, so we discount it.
+     * During prealloc Phase 1 (allocating), free_warm = 0 and
+     * segkmem_total_mem_allocated is artificially high.
+     * Fall back to spl_free to avoid negative available values
+     * that would trigger an immediate arc_evict storm.
      */
-    const int64_t mem_import =
-	(int64_t)abd_arena->vm_kstat.vk_mem_import.value.ui64;
-    const int64_t mem_inuse =
-	(int64_t)abd_arena->vm_kstat.vk_mem_inuse.value.ui64;
+    if (prealloc_phase == PREALLOC_PHASE_ALLOC ||
+	prealloc_phase == PREALLOC_PHASE_IDLE)
+	return (spl_free);
+
+    const int64_t free_warm = abd_free_warm_bytes();
 
     /*
-     * Sanity: mem_import should always be >= mem_inuse.
-     * Guard against transient races where counters are momentarily
-     * inconsistent (both updated non-atomically by vmem internals).
-     */
-    const int64_t free_warm =
-	(mem_import > mem_inuse) ? (mem_import - mem_inuse) : 0;
-
-    /*
-     * Effective OS pressure = what os_mem_alloc reports, minus the
-     * portion that is free in the slab (pre-paid by prealloc, costs
-     * nothing for ARC to consume).
-     *
-     * os_mem_alloc is extern'd from spl-vmem.c � same source spl_free uses.
+     * Effective OS pressure: discount free-warm slab memory.
+     * These bytes are already counted in segkmem_total_mem_allocated
+     * but cost ARC nothing to consume.
      */
     const int64_t effective_os_alloc =
-	segkmem_total_mem_allocated - free_warm;
+	MAX((int64_t)segkmem_total_mem_allocated - free_warm, 0);
 
-    /*
-     * OS headroom: how much more can we allocate before hitting the
-     * system memory ceiling. Cast total_memory to int64_t BEFORE
-     * multiplying to avoid uint64_t overflow.
-     */
+    /* 95% of physical RAM — ceiling before we start hurting the OS */
     const int64_t memory_limit =
-	((int64_t)total_memory * 95) / 100;   /* 95% of physical RAM */
+	((int64_t)total_memory * 95) / 100;
 
     const int64_t os_headroom = memory_limit - effective_os_alloc;
-
-    /*
-     * ARC headroom: how far below arc_max is arc_c right now.
-     * ARC must never grow past arc_max regardless of OS headroom.
-     */
     const int64_t arc_headroom =
-	zfs_arc_max - arc_target_size();
+	(int64_t)zfs_arc_max - arc_target_size();
+
+    const int64_t available = MIN(os_headroom, arc_headroom);
 
     /*
-     * Available = minimum of both constraints.
-     * Clamp to spl_free as a lower bound so we never report
-     * more freedom than the base (non-prealloc) path would.
+     * Floor at spl_free: never return a value more pessimistic
+     * than what the base pressure path reports. This ensures
+     * the prealloc path is strictly an optimistic correction.
      */
-    const int64_t available = MIN(os_headroom, arc_headroom);
-    
-    return available;
-}
-
-bool critical_memory_state(int64_t bufferzone)
-{
-    int64_t remainder = (total_memory - segkmem_total_mem_allocated);
-    if (remainder < bufferzone) return 1;
-    return 0;
+    return (MAX(available, spl_free));
 }
 
 // this is intended to substitute for kmem_avail() in arc.c
 // when arc_reclaim_thread() calls spl_free_set_pressure(0);
 int64_t
 spl_free_manual_pressure_wrapper(void)
-{   
-    int64_t five_percent = (total_memory * 5) / 100;
-    int64_t five_hundred_mb = 500LL * 1024 * 1024; // 500 MB in bytes
+{
+    /*
+     * Persisted across calls.
+     *   last_shrink_time - when we last issued a non-zero reduction.
+     *   inflight_reduce  - bytes already requested but not yet seen reclaimed
+     *                      in the OS counters. This is what stops rapid repeat
+     *                      calls from stacking reductions on top of each other.
+     */
+    static hrtime_t last_shrink_time = 0;
+    static int64_t  inflight_reduce = 0;
 
-    int64_t buffer_zone = MIN(five_hundred_mb, five_percent);
-    int64_t safe_threshold = total_memory - buffer_zone;
+    const hrtime_t now = gethrtime();
+    const hrtime_t settle_ns = SEC2NSEC(1);   /* assumed reclaim latency */
 
-    if (critical_memory_state(buffer_zone)) return 500LL * 1024 * 1024;
+    const int64_t five_percent = ((int64_t)total_memory * 5) / 100;
+    const int64_t five_hundred_mb = 500LL * 1024 * 1024;
+    const int64_t buffer_zone = MIN(five_hundred_mb, five_percent);
 
-    extern vmem_t* abd_arena;
+    /*
+     * Bleed off the in-flight estimate, modeled as draining linearly over
+     * settle_ns; anything older is treated as fully reclaimed. This single
+     * change is what makes the function safe to call at any frequency.
+     */
+    if (inflight_reduce > 0) {
+	const hrtime_t age = now - last_shrink_time;
+	if (age >= settle_ns)
+	    inflight_reduce = 0;
+	else
+	    inflight_reduce -= (inflight_reduce * age) / settle_ns;
+    }
 
-    if (abd_arena == NULL)
+    int64_t rem = 0;
+
+    /* 1. Hard perimeter - true system emergency. Smooth proportional ramp on
+     *    how deep we are into the buffer zone, netted against what's pending. */
+    if (critical_memory_state(buffer_zone, &rem)) {
+	const int64_t crit_floor = 100LL * 1024 * 1024;
+	const int64_t crit_cap = 200LL * 1024 * 1024;
+
+	int64_t depth = buffer_zone - rem;          /* 0 at edge, == zone at wall */
+	if (depth < 0)           depth = 0;
+	if (depth > buffer_zone) depth = buffer_zone;
+
+	int64_t target = crit_floor +
+	    ((crit_cap - crit_floor) * depth) / buffer_zone;
+
+	int64_t net = target - inflight_reduce;     /* only what's not on its way */
+	if (net < crit_floor)
+	    return (0);                             /* already covered - let it land */
+	if (net > crit_cap)
+	    net = crit_cap;
+
+	last_shrink_time = now;
+	inflight_reduce += net;
+	return (net);
+    }
+
+    if (prealloc_phase == PREALLOC_PHASE_ALLOC ||
+	prealloc_phase == PREALLOC_PHASE_IDLE)
 	return (0);
 
-    const int64_t mem_import =
-	(int64_t)abd_arena->vm_kstat.vk_mem_import.value.ui64;
-    const int64_t mem_inuse =
-	(int64_t)abd_arena->vm_kstat.vk_mem_inuse.value.ui64;
-  
-    const int64_t free_warm =
-	(mem_import > mem_inuse) ? (mem_import - mem_inuse) : 0;   
+    /* 2. Proportional overshoot reclaim (steady state). */
+    if (now < last_shrink_time + settle_ns)
+	return (0);
 
-    // 3. Calculate effective active allocations by discounting the unused warm memory.
-    // This stops the preallocation thread from generating false out-of-memory pressure at boot.
-    int64_t active_os_alloc = segkmem_total_mem_allocated - free_warm;
-    if (active_os_alloc < 0) {
+    const int64_t free_warm = abd_free_warm_bytes();
+    int64_t active_os_alloc = (int64_t)segkmem_total_mem_allocated - free_warm;
+    if (active_os_alloc < 0)
 	active_os_alloc = 0;
-    }
 
-    // 4. Evaluate whether active consumption has breached our safety perimeter
+    const int64_t safe_threshold = (int64_t)total_memory - buffer_zone;
+
     if (active_os_alloc > safe_threshold) {
-	// Calculate the exact number of bytes we have overshot the safe zone boundary
-	int64_t overshoot = active_os_alloc - safe_threshold;
+	const int64_t reap_floor = 10LL * 1024 * 1024;
+	const int64_t reap_cap = 50LL * 1024 * 1024;
+	const int64_t overshoot = active_os_alloc - safe_threshold;
 
-	// Define an aggressive baseline target (e.g., 150 MB) to replace the weak legacy 14 MB cap
-	int64_t aggressive_reap_base = 200LL * 1024 * 1024;
+	int64_t net = overshoot - inflight_reduce;
+	if (net < reap_floor)
+	    return (0);
+	if (net > reap_cap)
+	    net = reap_cap;
 
-	// Return whichever value is larger to ensure the ARC acts decisively to clear the bottleneck
-	return (overshoot > aggressive_reap_base) ? overshoot : aggressive_reap_base;
+	last_shrink_time = now;
+	inflight_reduce += net;
+	return (net);
     }
-    
+
     return (0);
 }
 
@@ -5058,6 +5121,7 @@ spl_abd_prealloc_thread(void *notused)
 	    segkmem_total_mem_allocated, total_memory));
 
 	dprintf("SPL: beginning spl_abd_prealloc_thread() loop\n");
+	prealloc_phase = PREALLOC_PHASE_ALLOC;
 
 	list_create(&abd_prealloc_list, sizeof (abd_prealloc_node_t), offsetof(abd_prealloc_node_t, node));
 
@@ -5077,12 +5141,14 @@ spl_abd_prealloc_thread(void *notused)
 		list_insert_tail(&abd_prealloc_list, node);
 	}
 
+	prealloc_phase = PREALLOC_PHASE_FREE;
 	while ((node = list_remove_head(&abd_prealloc_list)) != NULL) {
 		kmem_cache_free(abd_chunk_cache, node);
 	}
 
 	spl_abd_prealloc_thread_exit = FALSE;
 	dprintf("SPL: %s thread_exit\n", __func__);
+	prealloc_phase = PREALLOC_PHASE_DONE;
 
 	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "SPL: abd prealloc done segkmem_total_mem_allocated: %lld total_memory: %lld zfs_arc_max: %llu zfs_prealloc_percent: %d%\n",
 	    segkmem_total_mem_allocated, total_memory, zfs_arc_max, zfs_prealloc_percent));
