@@ -88,6 +88,7 @@ typedef struct windows_kstat {
 	kstat_named_t spa_mode_global;
 	kstat_named_t zfs_flags;
 	kstat_named_t zfs_txg_timeout;
+	kstat_named_t zfs_adc_enable;
 	kstat_named_t zfs_vdev_cache_max;
 	kstat_named_t zfs_vdev_cache_size;
 	kstat_named_t zfs_vdev_cache_bshift;
@@ -150,6 +151,8 @@ typedef struct windows_kstat {
 	kstat_named_t zfs_removal_suspend_progress;
 	kstat_named_t cpu_avx_supported;
 	kstat_named_t zvol_io_threads;
+	kstat_named_t zfs_prealloc_percent;
+	kstat_named_t zfs_adc_target_sync_pct;
 } windows_kstat_t;
 
 
@@ -261,6 +264,8 @@ extern int zfs_autoimport_disable;
 extern int zfs_removal_suspend_progress;
 extern int cpu_avx_supported;
 extern int zvol_threads;
+extern int zfs_prealloc_percent;
+extern uint_t zfs_adc_target_sync_pct;
 
 int  kstat_windows_init(void *);
 void kstat_windows_fini(void);
@@ -268,5 +273,6 @@ void kstat_windows_fini(void);
 int arc_kstat_update(kstat_t *ksp, int rw);
 int arc_kstat_update_windows(kstat_t *ksp, int rw);
 int spl_kstat_registry(void *pRegistryPath, kstat_t *ksp);
+int dynamic_dirty_data_kstat_update(kstat_t* ksp, int rw);
 
 #endif

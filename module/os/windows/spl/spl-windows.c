@@ -53,12 +53,14 @@ volatile unsigned int vm_page_speculative_count = 5500;
 
 uint64_t spl_GetPhysMem(void);
 uint64_t spl_GetZfsTotalMemory(PUNICODE_STRING RegistryPath);
+uint64_t spl_getZfsPreallocSize(PUNICODE_STRING RegistryPath);
 
 #include <sys/types.h>
 #include <Trace.h>
 
 // Size in bytes of the memory allocated in seg_kmem
 extern uint64_t	segkmem_total_mem_allocated;
+extern int zfs_prealloc_percent;
 #define	MAXHOSTNAMELEN 64
 extern char hostname[MAXHOSTNAMELEN];
 
@@ -528,6 +530,11 @@ spl_start(PUNICODE_STRING RegistryPath)
 	spl_mutex_subsystem_init();
 	spl_kmem_init(total_memory);
 
+	// lets get the registry value now, because the zfs loads the registry little later
+	int reg_val = spl_getZfsPreallocSize(RegistryPath);
+	if (reg_val != 0)
+	    zfs_prealloc_percent = reg_val;
+
 	spl_vnode_init();
 	spl_kmem_thread_init();
 	spl_kmem_mp_init();
@@ -741,6 +748,94 @@ spl_GetZfsTotalMemory(PUNICODE_STRING RegistryPath)
 				newvalue = *(uint64_t *)((uint8_t *)regBuffer
 				    + regBuffer->DataOffset);
 				dprintf("%s: zfs_total_memory_limit is set to:"
+				    " %llu\n", __func__, newvalue);
+			}
+			break;
+		}
+		ExFreePool(regBuffer);
+		regBuffer = NULL;
+	}
+
+	if (regBuffer)
+		ExFreePool(regBuffer);
+
+	ZwClose(h);
+	return (newvalue);
+}
+
+uint64_t
+spl_getZfsPreallocSize(PUNICODE_STRING RegistryPath)
+{
+	OBJECT_ATTRIBUTES		ObjectAttributes;
+	HANDLE				h;
+	NTSTATUS			status;
+	uint64_t			newvalue = 0;
+
+	InitializeObjectAttributes(&ObjectAttributes,
+	    RegistryPath,
+	    OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+	    NULL,
+	    NULL);
+
+	status = ZwOpenKey(&h, // KeyHandle
+	    KEY_ALL_ACCESS, // DesiredAccess
+	    &ObjectAttributes); // ObjectAttributes
+
+	if (!NT_SUCCESS(status)) {
+		dprintf("%s: Unable to open Registry %wZ: 0x%x. "
+		    "Going with defaults.\n", __func__, RegistryPath, status);
+		return (0);
+	}
+
+	ULONG index = 0;
+	ULONG length = 0;
+	PKEY_VALUE_FULL_INFORMATION    regBuffer = NULL;
+
+	for (index = 0; status != STATUS_NO_MORE_ENTRIES; index++) {
+		// Get the buffer size necessary
+		status = ZwEnumerateValueKey(h, index, KeyValueFullInformation,
+		    NULL, 0, &length);
+
+		if ((status != STATUS_BUFFER_TOO_SMALL) &&
+		    (status != STATUS_BUFFER_OVERFLOW))
+			break; // Something is wrong - or we finished
+
+		// Allocate space to hold
+		regBuffer = (PKEY_VALUE_FULL_INFORMATION)ExAllocatePoolWithTag(
+		    NonPagedPoolNx, length, 'zfsr');
+
+		if (regBuffer == NULL)
+			break;
+
+		status = ZwEnumerateValueKey(h, index, KeyValueFullInformation,
+		    regBuffer, length, &length);
+		if (!NT_SUCCESS(status)) {
+			break;
+		}
+		// Convert name to straight ascii so we compare with kstat
+		ULONG outlen = 0;
+		char keyname[KSTAT_STRLEN + 1] = { 0 };
+		status = RtlUnicodeToUTF8N(keyname, KSTAT_STRLEN, &outlen,
+		    regBuffer->Name, regBuffer->NameLength);
+
+		// Conversion failed? move along..
+		if (status != STATUS_SUCCESS && status
+		    != STATUS_SOME_NOT_MAPPED)
+			break;
+
+		// Output string is only null terminated if input is,
+		// so do so now.
+		keyname[outlen] = 0;
+		if (strcasecmp("zfs_prealloc_percent", keyname) == 0) {
+			if (regBuffer->Type != REG_DWORD ||
+			    regBuffer->DataLength != sizeof (uint32_t)) {
+				dprintf("%s: registry '%s' did not match. "
+				    "Type needs to be REG_QWORD. (8 bytes)\n",
+				    __func__, keyname);
+			} else {
+				newvalue = *(uint32_t *)((uint8_t *)regBuffer
+				    + regBuffer->DataOffset);
+				dprintf("%s: zfs_prealloc_percent is set to:"
 				    " %llu\n", __func__, newvalue);
 			}
 			break;
