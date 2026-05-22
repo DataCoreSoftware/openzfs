@@ -139,7 +139,15 @@ extern void *txg_list_next(txg_list_t *tl, void *p, uint64_t txg);
 
 /* Global tuning */
 extern int zfs_txg_timeout;
+extern int zfs_adc_enable;
+extern uint_t zfs_adc_target_sync_pct;
 
+typedef struct dynamic_dirty_data_stats {
+    kstat_named_t adc_target;
+    kstat_named_t spa_sync_time;
+    kstat_named_t data_flushed_per_sync;
+    kstat_named_t total_dirty_data;
+} dynamic_dirty_data_stats_t;
 
 #ifdef ZFS_DEBUG
 #define	TXG_VERIFY(spa, txg)		txg_verify(spa, txg)

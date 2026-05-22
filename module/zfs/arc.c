@@ -462,6 +462,7 @@ int zfs_arc_meta_prune = 10000;
 int zfs_arc_meta_strategy = ARC_STRATEGY_META_BALANCED;
 int zfs_arc_meta_adjust_restarts = 4096;
 int zfs_arc_lotsfree_percent = 10;
+uint64_t dirty_ceil_bytes;
 
 /* The 6 states: */
 arc_state_t ARC_anon;
@@ -7998,6 +7999,8 @@ arc_init(void)
 		zfs_dirty_data_max = MIN(zfs_dirty_data_max,
 		    zfs_dirty_data_max_max);
 	}
+
+	dirty_ceil_bytes = zfs_dirty_data_max;
 }
 
 void
