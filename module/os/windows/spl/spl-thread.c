@@ -39,7 +39,78 @@
 
 uint64_t zfs_threads = 0;
 
-kthread_t *
+
+kthread_t*
+spl_thread_create(
+    caddr_t     stk,
+    size_t      stksize,
+    void        (*proc)(void*),
+    void* arg,
+    size_t      len,
+    int state,
+#ifdef SPL_DEBUG_THREAD
+    char* filename,
+    int line,
+#endif
+    pri_t       pri)
+{
+    NTSTATUS    status;
+    HANDLE      hThread = NULL;
+    PETHREAD    eThread = NULL;
+
+#ifdef SPL_DEBUG_THREAD
+    dprintf("Start thread pri %d\n", pri);
+#endif
+
+    status = PsCreateSystemThread(
+	&hThread,
+	THREAD_ALL_ACCESS,
+	NULL,
+	NULL,
+	NULL,
+	proc,
+	arg);
+
+    if (!NT_SUCCESS(status))
+	return NULL;
+
+    /* Convert HANDLE ETHREAD */
+    status = ObReferenceObjectByHandle(
+	hThread,
+	THREAD_ALL_ACCESS,
+	*PsThreadType,
+	KernelMode,
+	(PVOID*)&eThread,
+	NULL);
+
+    /* We no longer need the handle */
+    ZwClose(hThread);
+
+    if (!NT_SUCCESS(status))
+	return NULL;
+
+    /* Clamp priority to safe Windows range */
+    KPRIORITY newPri = (KPRIORITY)pri;
+
+    if (newPri > maxclsyspri)
+	newPri = maxclsyspri;
+
+    if (newPri < minclsyspri)
+	newPri = minclsyspri;
+
+    /* Set absolute priority */
+    KeSetPriorityThread((PKTHREAD)eThread, newPri);
+
+#ifdef SPL_DEBUG_THREAD
+    dprintf("Thread created with priority %d\n", newPri);
+#endif
+
+    atomic_inc_64(&zfs_threads);
+
+    return (kthread_t*)eThread;
+}
+
+/*kthread_t*
 spl_thread_create(
     caddr_t	stk,
     size_t	stksize,
@@ -72,12 +143,7 @@ spl_thread_create(
 	if (result != STATUS_SUCCESS)
 		return (NULL);
 
-	/*
-	 * Improve the priority when asked to do so
-	 * Thread priorities range from 0 to 31, where 0 is the lowest
-	 * priority and 31 is the highest
-	 */
-
+	
 	if (pri > minclsyspri) {
 		// thread_precedence_policy_data_t policy;
 		// policy.importance = pri - minclsyspri;
@@ -102,7 +168,7 @@ spl_thread_create(
 	ObDereferenceObject(eThread);
 	ZwClose(thread);
 	return ((kthread_t *)eThread);
-}
+}*/
 
 kthread_t *
 spl_current_thread(void)

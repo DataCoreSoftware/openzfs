@@ -1,4 +1,4 @@
-/*
+﻿/*
  * CDDL HEADER START
  *
  * The contents of this file are subject to the terms of the
@@ -76,6 +76,7 @@ static volatile _Atomic int64_t spl_free = 0;
 int64_t spl_free_delta_ema;
 
 static boolean_t spl_event_thread_exit = FALSE;
+static boolean_t spl_abd_prealloc_thread_exit = FALSE;
 PKEVENT low_mem_event = NULL;
 
 static volatile _Atomic int64_t spl_free_manual_pressure = 0;
@@ -87,6 +88,24 @@ _Atomic uint32_t spl_vm_pages_reclaimed = 0;
 _Atomic uint32_t spl_vm_pages_wanted = 0;
 _Atomic uint32_t spl_vm_pressure_level = 0;
 
+/*
+ * Global flag set by prealloc thread.
+ *
+ * PREALLOC_PHASE_IDLE     : prealloc not running
+ * PREALLOC_PHASE_ALLOC    : thread is allocating (Phase 1)
+ *                           free_warm ≈ 0, pressure is FAKE → suppress
+ * PREALLOC_PHASE_FREE     : thread is freeing back to slab (Phase 2)
+ *                           free_warm growing, discount valid
+ * PREALLOC_PHASE_DONE     : prealloc complete, normal operation
+ */
+typedef enum {
+    PREALLOC_PHASE_IDLE = 0,
+    PREALLOC_PHASE_ALLOC = 1,
+    PREALLOC_PHASE_FREE = 2,
+    PREALLOC_PHASE_DONE = 3,
+} prealloc_phase_t;
+
+volatile prealloc_phase_t prealloc_phase = PREALLOC_PHASE_IDLE;
 
 /*
  * the spl_pressure_level enum only goes to four,
@@ -130,6 +149,10 @@ extern uint64_t		zfs_active_rwlock;
 
 extern uint64_t		total_memory;
 extern uint64_t		real_total_memory;
+
+extern kmem_cache_t *abd_chunk_cache;
+extern uint64_t zfs_arc_max;
+extern int zfs_prealloc_percent;
 
 #define	MULT 1
 
@@ -4218,11 +4241,87 @@ kmem_cache_fini()
 	list_destroy(&freelist);
 }
 
+static int64_t
+abd_free_warm_bytes(void)
+{
+    extern vmem_t* abd_arena;
+
+    /*
+     * During Phase 1 (prealloc allocating), mem_inuse ≈ mem_import
+     * so free_warm ≈ 0 anyway, but guard explicitly to be clear.
+     */
+    if (abd_arena == NULL ||
+	prealloc_phase == PREALLOC_PHASE_ALLOC ||
+	prealloc_phase == PREALLOC_PHASE_IDLE)
+	return (0);
+
+    const int64_t mem_import =
+	(int64_t)abd_arena->vm_kstat.vk_mem_import.value.ui64;
+    const int64_t mem_inuse =
+	(int64_t)abd_arena->vm_kstat.vk_mem_inuse.value.ui64;
+
+    return ((mem_import > mem_inuse) ? (mem_import - mem_inuse) : 0);
+}
+
+static bool
+critical_memory_state(int64_t bufferzone, int64_t *rem)
+{   
+    const int64_t remainder = (int64_t)total_memory - (int64_t)segkmem_total_mem_allocated;
+    if (rem != NULL) {
+	*rem = remainder;
+    }
+
+    return (remainder < bufferzone);
+}
+
 // this is intended to substitute for kmem_avail() in arc.c
 int64_t
 spl_free_wrapper(void)
 {
+    if (zfs_prealloc_percent == 0)
 	return (spl_free);
+
+    extern vmem_t* abd_arena;
+
+    if (abd_arena == NULL)
+	return (spl_free);
+
+    /*
+     * During prealloc Phase 1 (allocating), free_warm = 0 and
+     * segkmem_total_mem_allocated is artificially high.
+     * Fall back to spl_free to avoid negative available values
+     * that would trigger an immediate arc_evict storm.
+     */
+    if (prealloc_phase == PREALLOC_PHASE_ALLOC ||
+	prealloc_phase == PREALLOC_PHASE_IDLE)
+	return (spl_free);
+
+    const int64_t free_warm = abd_free_warm_bytes();
+
+    /*
+     * Effective OS pressure: discount free-warm slab memory.
+     * These bytes are already counted in segkmem_total_mem_allocated
+     * but cost ARC nothing to consume.
+     */
+    const int64_t effective_os_alloc =
+	MAX((int64_t)segkmem_total_mem_allocated - free_warm, 0);
+
+    /* 95% of physical RAM — ceiling before we start hurting the OS */
+    const int64_t memory_limit =
+	((int64_t)total_memory * 95) / 100;
+
+    const int64_t os_headroom = memory_limit - effective_os_alloc;
+    const int64_t arc_headroom =
+	(int64_t)zfs_arc_max - arc_target_size();
+
+    const int64_t available = MIN(os_headroom, arc_headroom);
+
+    /*
+     * Floor at spl_free: never return a value more pessimistic
+     * than what the base pressure path reports. This ensures
+     * the prealloc path is strictly an optimistic correction.
+     */
+    return (MAX(available, spl_free));
 }
 
 // this is intended to substitute for kmem_avail() in arc.c
@@ -4230,7 +4329,94 @@ spl_free_wrapper(void)
 int64_t
 spl_free_manual_pressure_wrapper(void)
 {
-	return (spl_free_manual_pressure);
+    /*
+     * Persisted across calls.
+     *   last_shrink_time - when we last issued a non-zero reduction.
+     *   inflight_reduce  - bytes already requested but not yet seen reclaimed
+     *                      in the OS counters. This is what stops rapid repeat
+     *                      calls from stacking reductions on top of each other.
+     */
+    static hrtime_t last_shrink_time = 0;
+    static int64_t  inflight_reduce = 0;
+
+    const hrtime_t now = gethrtime();
+    const hrtime_t settle_ns = SEC2NSEC(1);   /* assumed reclaim latency */
+
+    const int64_t five_percent = ((int64_t)total_memory * 5) / 100;
+    const int64_t five_hundred_mb = 500LL * 1024 * 1024;
+    const int64_t buffer_zone = MIN(five_hundred_mb, five_percent);
+
+    /*
+     * Bleed off the in-flight estimate, modeled as draining linearly over
+     * settle_ns; anything older is treated as fully reclaimed. This single
+     * change is what makes the function safe to call at any frequency.
+     */
+    if (inflight_reduce > 0) {
+	const hrtime_t age = now - last_shrink_time;
+	if (age >= settle_ns)
+	    inflight_reduce = 0;
+	else
+	    inflight_reduce -= (inflight_reduce * age) / settle_ns;
+    }
+
+    int64_t rem = 0;
+
+    /* 1. Hard perimeter - true system emergency. Smooth proportional ramp on
+     *    how deep we are into the buffer zone, netted against what's pending. */
+    if (critical_memory_state(buffer_zone, &rem)) {
+	const int64_t crit_floor = 100LL * 1024 * 1024;
+	const int64_t crit_cap = 200LL * 1024 * 1024;
+
+	int64_t depth = buffer_zone - rem;          /* 0 at edge, == zone at wall */
+	if (depth < 0)           depth = 0;
+	if (depth > buffer_zone) depth = buffer_zone;
+
+	int64_t target = crit_floor +
+	    ((crit_cap - crit_floor) * depth) / buffer_zone;
+
+	int64_t net = target - inflight_reduce;     /* only what's not on its way */
+	if (net < crit_floor)
+	    return (0);                             /* already covered - let it land */
+	if (net > crit_cap)
+	    net = crit_cap;
+
+	last_shrink_time = now;
+	inflight_reduce += net;
+	return (net);
+    }
+
+    if (prealloc_phase == PREALLOC_PHASE_ALLOC ||
+	prealloc_phase == PREALLOC_PHASE_IDLE)
+	return (0);
+
+    /* 2. Proportional overshoot reclaim (steady state). */
+    if (now < last_shrink_time + settle_ns)
+	return (0);
+
+    const int64_t free_warm = abd_free_warm_bytes();
+    int64_t active_os_alloc = (int64_t)segkmem_total_mem_allocated - free_warm;
+    if (active_os_alloc < 0)
+	active_os_alloc = 0;
+
+    const int64_t safe_threshold = (int64_t)total_memory - buffer_zone;
+
+    if (active_os_alloc > safe_threshold) {
+	const int64_t reap_floor = 10LL * 1024 * 1024;
+	const int64_t reap_cap = 50LL * 1024 * 1024;
+	const int64_t overshoot = active_os_alloc - safe_threshold;
+
+	int64_t net = overshoot - inflight_reduce;
+	if (net < reap_floor)
+	    return (0);
+	if (net > reap_cap)
+	    net = reap_cap;
+
+	last_shrink_time = now;
+	inflight_reduce += net;
+	return (net);
+    }
+
+    return (0);
 }
 
 uint64_t
@@ -4479,6 +4665,7 @@ spl_free_thread()
 		    spl_vm_pressure_level != MAGIC_PRESSURE_UNAVAILABLE) {
 			/* there is pressure */
 			lowmem = true;
+			KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "spl_vm_pressure_level: %lu\n",spl_vm_pressure_level));
 			new_spl_free = -(2LL * PAGE_SIZE * spl_vm_pages_wanted);
 			if (spl_vm_pressure_level > 1) {
 				emergency_lowmem = true;
@@ -4533,6 +4720,7 @@ spl_free_thread()
 			int64_t old_pressure = spl_free_manual_pressure;
 			new_spl_free -= old_pressure * 2LL;
 			lowmem = true;
+			KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "spl_free_manual_pressure: %llu\n",spl_free_manual_pressure));
 			if (spl_free_fast_pressure) {
 				emergency_lowmem = true;
 				new_spl_free -= old_pressure * 4LL;
@@ -4630,6 +4818,7 @@ spl_free_thread()
 			new_spl_free += bminus;
 			lowmem = true;
 			emergency_lowmem = true;
+			KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "spl_vm_pages_wanted %lu\n", spl_vm_pages_wanted));
 			// atomic swaps to set these variables used in arc.c
 			int64_t previous_highest_pressure = 0;
 			int64_t new_p = -bminus;
@@ -4650,6 +4839,7 @@ spl_free_thread()
 			new_spl_free -= bytes_wanted;
 			if (reserve_low && !early_lots_free) {
 				lowmem = true;
+				KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "spl_vm_pages_wanted: %lu reserve_low: %lu early_lots_free: %lu\n", spl_vm_pages_wanted, reserve_low, early_lots_free));
 				if (recent_lowmem == 0) {
 					recent_lowmem = time_now;
 				}
@@ -4760,6 +4950,7 @@ spl_free_thread()
 			    real_total_memory) > 75) {
 				new_spl_free -= total_mem_used / 32;
 				lowmem = true;
+				KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "segkmem_total_mem_allocated: %llu real_total_memory: %llu\n", segkmem_total_mem_allocated, real_total_memory));
 			}
 		}
 
@@ -4911,6 +5102,56 @@ spl_event_thread(void *notused)
 
 	spl_event_thread_exit = FALSE;
 	dprintf("SPL: %s thread_exit\n", __func__);
+	thread_exit();
+}
+
+static void
+spl_abd_prealloc_thread(void *notused)
+{
+	NTSTATUS Status;
+
+	typedef struct abd_prealloc_node {
+		list_node_t node;
+	} abd_prealloc_node_t;
+
+	abd_prealloc_node_t *node;
+	list_t abd_prealloc_list;
+
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "SPL: abd prealloc start segkmem_total_mem_allocated: %lld total_memory: %lld\n",
+	    segkmem_total_mem_allocated, total_memory));
+
+	dprintf("SPL: beginning spl_abd_prealloc_thread() loop\n");
+	prealloc_phase = PREALLOC_PHASE_ALLOC;
+
+	list_create(&abd_prealloc_list, sizeof (abd_prealloc_node_t), offsetof(abd_prealloc_node_t, node));
+
+	while (!spl_abd_prealloc_thread_exit) {
+
+		if (!abd_chunk_cache || !zfs_arc_max) {
+			delay(hz);
+			continue;
+		}
+
+		if (segkmem_total_mem_allocated >=
+                    (zfs_arc_max * zfs_prealloc_percent) / 100) {
+                        break;
+                }
+
+		node = (abd_prealloc_node_t *)kmem_cache_alloc(abd_chunk_cache, KM_SLEEP);
+		list_insert_tail(&abd_prealloc_list, node);
+	}
+
+	prealloc_phase = PREALLOC_PHASE_FREE;
+	while ((node = list_remove_head(&abd_prealloc_list)) != NULL) {
+		kmem_cache_free(abd_chunk_cache, node);
+	}
+
+	spl_abd_prealloc_thread_exit = FALSE;
+	dprintf("SPL: %s thread_exit\n", __func__);
+	prealloc_phase = PREALLOC_PHASE_DONE;
+
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "SPL: abd prealloc done segkmem_total_mem_allocated: %lld total_memory: %lld zfs_arc_max: %llu zfs_prealloc_percent: %d%\n",
+	    segkmem_total_mem_allocated, total_memory, zfs_arc_max, zfs_prealloc_percent));
 	thread_exit();
 }
 
@@ -5342,8 +5583,13 @@ spl_kmem_thread_init(void)
 	(void) thread_create(NULL, 0, spl_free_thread, 0, 0, 0, 0, 92);
 	spl_free_thread_running = TRUE;
 
-	spl_event_thread_exit = FALSE;
-	(void) thread_create(NULL, 0, spl_event_thread, 0, 0, 0, 0, 92);
+	if (zfs_prealloc_percent) {
+		spl_abd_prealloc_thread_exit = FALSE;
+		(void) thread_create(NULL, 0, spl_abd_prealloc_thread, 0, 0, 0, 0, 92);
+	} else {
+		spl_event_thread_exit = FALSE;
+		(void) thread_create(NULL, 0, spl_event_thread, 0, 0, 0, 0, 92);
+	}
 }
 
 void
@@ -5351,6 +5597,7 @@ spl_kmem_thread_fini(void)
 {
 	shutting_down = 1;
 
+	spl_abd_prealloc_thread_exit = TRUE;
 	if (low_mem_event != NULL) {
 		dprintf("SPL: stopping spl_event_thread\n");
 		spl_event_thread_exit = TRUE;
