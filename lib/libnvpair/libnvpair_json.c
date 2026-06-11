@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * This file and its contents are supplied under the terms of the
  * Common Development and Distribution License ("CDDL"), version 1.0.
@@ -15,10 +16,14 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <strings.h>
-#include <sys/types.h>
+#include <string.h>
 #include <wchar.h>
 #include <sys/debug.h>
+
+#ifdef _WIN32
+#include <wosix.h>
+#define	fprintf wosix_fprintf
+#endif
 
 #include "libnvpair.h"
 
@@ -47,11 +52,9 @@
 static int
 nvlist_print_json_string(FILE *fp, const char *input)
 {
-	mbstate_t mbr;
+	mbstate_t mbr = {0};
 	wchar_t c;
 	size_t sz;
-
-	bzero(&mbr, sizeof (mbr));
 
 	FPRINTF(fp, "\"");
 	while ((sz = mbrtowc(&c, input, MB_CUR_MAX, &mbr)) > 0) {
@@ -137,7 +140,7 @@ nvlist_print_json(FILE *fp, nvlist_t *nvl)
 
 		switch (type) {
 		case DATA_TYPE_STRING: {
-			char *string = fnvpair_value_string(curr);
+			const char *string = fnvpair_value_string(curr);
 			if (nvlist_print_json_string(fp, string) == -1)
 				return (-1);
 			break;
@@ -223,7 +226,7 @@ nvlist_print_json(FILE *fp, nvlist_t *nvl)
 		}
 
 		case DATA_TYPE_STRING_ARRAY: {
-			char **val;
+			const char **val;
 			uint_t valsz, i;
 			VERIFY0(nvpair_value_string_array(curr, &val, &valsz));
 			FPRINTF(fp, "[");

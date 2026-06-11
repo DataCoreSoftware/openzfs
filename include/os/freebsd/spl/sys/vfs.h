@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2007 Pawel Jakub Dawidek <pjd@FreeBSD.org>
  * All rights reserved.
@@ -101,7 +102,7 @@ void vfs_setmntopt(vfs_t *vfsp, const char *name, const char *arg,
 void vfs_clearmntopt(vfs_t *vfsp, const char *name);
 int vfs_optionisset(const vfs_t *vfsp, const char *opt, char **argp);
 int mount_snapshot(kthread_t *td, vnode_t **vpp, const char *fstype,
-    char *fspath, char *fspec, int fsflags);
+    char *fspath, char *fspec, int fsflags, vfs_t *parent_vfsp);
 
 typedef	uint64_t	vfs_feature_t;
 
@@ -116,10 +117,6 @@ typedef	uint64_t	vfs_feature_t;
 #define	VFSFT_REPARSE		0x100000100	/* Supports reparse point */
 #define	VFSFT_ZEROCOPY_SUPPORTED	0x100000200
 				/* Support loaning /returning cache buffer */
-
-#define	vfs_set_feature(vfsp, feature)		do { } while (0)
-#define	vfs_clear_feature(vfsp, feature)	do { } while (0)
-#define	vfs_has_feature(vfsp, feature)		(0)
 
 #include <sys/mount.h>
 #endif	/* _OPENSOLARIS_SYS_VFS_H_ */

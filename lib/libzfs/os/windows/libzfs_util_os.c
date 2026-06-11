@@ -18,6 +18,7 @@
  *
  * CDDL HEADER END
  *
+ * Copyright (c) 2017 Jorgen Lundman <lundman@lundman.net>
  * Portions Copyright 2022 Andrew Innes <andrew.c12@gmail.com>
  *
  */
@@ -29,7 +30,6 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <strings.h>
 #include <unistd.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -47,13 +47,6 @@
 #include <sys/zfs_sysfs.h>
 
 #define	ZDIFF_SHARESDIR		"/.zfs/shares/"
-
-
-int
-zfs_ioctl(libzfs_handle_t *hdl, int request, zfs_cmd_t *zc)
-{
-	return (zfs_ioctl_fd(hdl->libzfs_fd, request, zc));
-}
 
 const char *
 libzfs_error_init(int error)
@@ -123,30 +116,37 @@ find_shares_object(differ_info_t *di)
  * Fill given version buffer with zfs kernel version read from ZFS_SYSFS_DIR
  * Returns 0 on success, and -1 on error (with errno set)
  */
-int
-zfs_version_kernel(char *version, int len)
+char *
+zfs_version_kernel(void)
 {
 	HKEY hKey; // SYSTEM\ControlSet001\Services\OpenZFS
 	LSTATUS status = RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-	    "SYSTEM\\ControlSet001\\Services\\ZFSin", 0, KEY_READ, &hKey);
+	    "SYSTEM\\ControlSet001\\Services\\OpenZFS", 0, KEY_READ, &hKey);
 
 	if (status != ERROR_SUCCESS)
-		return (-1);
+		return (NULL);
 
-	DWORD count = len;
+	DWORD count = 0;
 	DWORD type;
 
-	status = RegQueryValueExA(hKey, "version", 0, &type, version, &count);
+	/* This must match module/os/windows/spl/spl-windows.c: zfs_version */
+	status = RegQueryValueExA(hKey, "zfs_version", 0, &type, NULL, &count);
+
+	char *version = malloc(count + 1);
+	if (version == NULL)
+		return (NULL);
+
+	status = RegQueryValueExA(hKey, "zfs_version", 0, &type, version,
+	    &count);
 
 	RegCloseKey(hKey);
 
 	if (status == ERROR_SUCCESS &&
 	    (type == REG_SZ)) {
-		return (0);
+		version[count] = 0;
+		return (version);
 	}
-
-	snprintf(version, len, "(registry lookup failed)");
-	return (0);
+	return (NULL);
 }
 
 static int
@@ -206,9 +206,9 @@ execvPe(const char *name, const char *path, char * const *argv,
 			    16);
 			continue;
 		}
-		bcopy(p, buf, lp);
+		memcpy(buf, p, lp);
 		buf[lp] = '/';
-		bcopy(name, buf + lp + 1, ln);
+		memcpy(buf + lp + 1, name, ln);
 		buf[lp + ln + 1] = '\0';
 
 retry:
@@ -229,7 +229,7 @@ retry:
 			}
 			memp[0] = "sh";
 			memp[1] = bp;
-			bcopy(argv + 1, memp + 2, cnt * sizeof (char *));
+			memcpy(memp + 2, argv + 1, cnt * sizeof (char *));
 //			execve(_PATH_BSHELL, __DECONST(char **, memp),
 //			    envp);
 			goto done;
@@ -272,17 +272,19 @@ done:
 void
 zfs_rollback_os(zfs_handle_t *zhp)
 {
-}
-
-
-void
-libzfs_set_pipe_max(int infd)
-{
+	(void) zhp;
 }
 
 int
 libzfs_run_process_impl(const char *path, char *argv[], char *env[],
     int flags, char **lines[], int *lines_cnt)
 {
+	return (0);
+}
+
+int
+zfs_destroy_snaps_nvl_os(libzfs_handle_t *hdl, nvlist_t *snaps)
+{
+	(void) hdl, (void) snaps;
 	return (0);
 }

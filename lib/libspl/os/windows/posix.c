@@ -34,14 +34,36 @@
 #include <sys/mntent.h>
 #include <sys/mount.h>
 #include <fcntl.h>
-#include <sys/zfs_ioctl.h>
+// #include <sys/zfs_ioctl.h>
 #include <pthread.h>
 #include <Windows.h>
 #include <langinfo.h>
-#include <os/windows/zfs/sys/zfs_ioctl_compat.h>
+// #include <os/windows/zfs/sys/zfs_ioctl_compat.h>
 #include <sys/mman.h>
+#include <sys/mnttab.h>
+#include <sys/utsname.h>
+#include <sys/uio.h>
+#include <termios.h>
+#include <wfunopen.h>
+#include <pwd.h>
+#include <grp.h>
 
+/* Magic instruction to compiler to add library */
 #pragma comment(lib, "ws2_32.lib")
+
+/*
+ * Windows needs the winsock2 code to be initialised before
+ * use, and we don't really know who will be called first.
+ */
+static __attribute__((constructor)) void
+posix_init_winsock(void)
+{
+	WSADATA wsaData;
+	int ret;
+	ret = WSAStartup(MAKEWORD(2, 2), &wsaData);
+	if (ret != 0)
+		fprintf(stderr, "Initialising winsock2 failed: %d\r\n", ret);
+}
 
 void
 clock_gettime(clock_type_t t, struct timespec *ts)
@@ -49,7 +71,6 @@ clock_gettime(clock_type_t t, struct timespec *ts)
 	LARGE_INTEGER time;
 	LARGE_INTEGER frequency;
 	FILETIME ft;
-	ULONGLONG tmp;
 
 	switch (t) {
 	case CLOCK_MONOTONIC:
@@ -116,16 +137,119 @@ getexecname(void)
 	return (execname);
 }
 
-struct passwd *
-getpwnam(const char *login)
+/*
+ * Map a Windows SID to a POSIX uid using the same scheme as the kernel's
+ * spl_sid_to_uid().  Uses Win32 SID accessor macros (no direct struct access).
+ */
+static uid_t
+win_sid_to_uid(SID *sid)
 {
-	return (NULL);
+	SID_IDENTIFIER_AUTHORITY *auth = GetSidIdentifierAuthority(sid);
+	UCHAR nsub = *GetSidSubAuthorityCount(sid);
+
+	/* S-1-5-18 (SYSTEM) -> root */
+	if (auth->Value[5] == 5 && nsub == 1 &&
+	    *GetSidSubAuthority(sid, 0) == 18)
+		return (0);
+
+	/* S-1-22-1-X (Samba unix-user) */
+	if (auth->Value[5] == 22 && nsub == 2 &&
+	    *GetSidSubAuthority(sid, 0) == 1)
+		return ((uid_t)*GetSidSubAuthority(sid, 1));
+
+	/* S-1-5-21-*-*-*-RID (domain / local account) */
+	if (auth->Value[5] == 5 && nsub >= 5 &&
+	    *GetSidSubAuthority(sid, 0) == 21)
+		return ((uid_t)*GetSidSubAuthority(sid, nsub - 1));
+
+	/* S-1-5-22-*-*-*-RID */
+	if (auth->Value[5] == 5 && nsub >= 5 &&
+	    *GetSidSubAuthority(sid, 0) == 22)
+		return ((uid_t)*GetSidSubAuthority(sid, nsub - 1));
+
+	return (65534); /* nobody */
+}
+
+/*
+ * Map a Windows SID to a POSIX gid using the same scheme as the kernel's
+ * spl_sid_to_gid().
+ */
+static gid_t
+win_sid_to_gid(SID *sid)
+{
+	SID_IDENTIFIER_AUTHORITY *auth = GetSidIdentifierAuthority(sid);
+	UCHAR nsub = *GetSidSubAuthorityCount(sid);
+
+	/* S-1-22-2-0 / S-1-22-2-X (Samba unix-group) */
+	if (auth->Value[5] == 22 && nsub >= 1 &&
+	    *GetSidSubAuthority(sid, 0) == 2) {
+		if (nsub == 1)
+			return (0);
+		return ((gid_t)*GetSidSubAuthority(sid, 1));
+	}
+
+	/* S-1-5-21-*-*-*-RID (domain / local group) */
+	if (auth->Value[5] == 5 && nsub >= 5 &&
+	    *GetSidSubAuthority(sid, 0) == 21)
+		return ((gid_t)*GetSidSubAuthority(sid, nsub - 1));
+
+	return (65534); /* nobody */
 }
 
 struct passwd *
+getpwnam(const char *login)
+{
+	static __declspec(thread) struct passwd pw;
+	static __declspec(thread) char name_buf[256];
+	BYTE sid_buf[SECURITY_MAX_SID_SIZE];
+	DWORD sid_size = sizeof (sid_buf);
+	char domain[256];
+	DWORD domain_size = sizeof (domain);
+	SID_NAME_USE sid_use;
+
+	if (!LookupAccountNameA(NULL, login, sid_buf, &sid_size,
+	    domain, &domain_size, &sid_use))
+		return (NULL);
+
+	if (sid_use != SidTypeUser)
+		return (NULL);
+
+	strlcpy(name_buf, login, sizeof (name_buf));
+	pw.pw_name = name_buf;
+	pw.pw_passwd = "";
+	pw.pw_uid = win_sid_to_uid((SID *)sid_buf);
+	pw.pw_gid = pw.pw_uid;
+	pw.pw_gecos = name_buf;
+	pw.pw_dir = "";
+	pw.pw_shell = "";
+	return (&pw);
+}
+
+struct group *
 getgrnam(const char *group)
 {
-	return (NULL);
+	static __declspec(thread) struct group grp;
+	static __declspec(thread) char name_buf[256];
+	BYTE sid_buf[SECURITY_MAX_SID_SIZE];
+	DWORD sid_size = sizeof (sid_buf);
+	char domain[256];
+	DWORD domain_size = sizeof (domain);
+	SID_NAME_USE sid_use;
+
+	if (!LookupAccountNameA(NULL, group, sid_buf, &sid_size,
+	    domain, &domain_size, &sid_use))
+		return (NULL);
+
+	if (sid_use != SidTypeGroup && sid_use != SidTypeAlias &&
+	    sid_use != SidTypeWellKnownGroup)
+		return (NULL);
+
+	strlcpy(name_buf, group, sizeof (name_buf));
+	grp.gr_name = name_buf;
+	grp.gr_passwd = "";
+	grp.gr_gid = win_sid_to_gid((SID *)sid_buf);
+	grp.gr_mem = NULL;
+	return (&grp);
 }
 
 struct tm *
@@ -195,20 +319,21 @@ statfs(const char *path, struct statfs *buf)
 	if (GetDiskFreeSpaceEx(path,
 	    &lpFreeBytesAvailable,
 	    &lpTotalNumberOfBytes,
-	    &lpTotalNumberOfFreeBytes))
+	    &lpTotalNumberOfFreeBytes)) {
 		return (-1);
+	}
 #endif
 
 	DISK_GEOMETRY_EX geometry_ex;
 	HANDLE handle;
 	DWORD len;
 
-	int fd = open(path, O_RDONLY | O_BINARY);
-	handle = (HANDLE) _get_osfhandle(fd);
+	handle = wosix_open(path, O_RDONLY | O_BINARY);
+
 	if (!DeviceIoControl(handle, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, NULL, 0,
 	    &geometry_ex, sizeof (geometry_ex), &len, NULL))
 		return (-1);
-	close(fd);
+	wosix_close(handle);
 	lbsize = (uint_t)geometry_ex.Geometry.BytesPerSector;
 
 	buf->f_bsize = lbsize;
@@ -302,6 +427,30 @@ mkstemp(char *tmpl)
 }
 
 int
+mkostemps(char *template, int suffixlen, DWORD flags)
+{
+	// Generate a temporary file name
+	char tempPath[MAX_PATH];
+	GetTempPathA(MAX_PATH, tempPath);
+
+	char tempFileName[MAX_PATH];
+	if (GetTempFileNameA(tempPath, "temp", 0, tempFileName) == 0)
+		return (-1);
+
+	strcpy(template, tempFileName);
+	// strncpy(template + strlen(template) - suffixlen, SUFFIX, suffixlen);
+
+	// Open the file with desired flags
+	HANDLE hFile = CreateFileA(template, GENERIC_READ | GENERIC_WRITE, 0,
+	    NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY |
+	    FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+	if (hFile == INVALID_HANDLE_VALUE) {
+		return (-1);
+	}
+	return (HTOI(hFile));
+}
+
+int
 readlink(const char *path, char *buf, size_t bufsize)
 {
 	return (-1);
@@ -363,6 +512,40 @@ strncasecmp(const char *s1, const char *s2, size_t n)
 	}
 
 	return (tolower(*(unsigned char *)s1) - tolower(*(unsigned char *)s2));
+}
+
+char *
+strchrnul(const char *p, int ch)
+{
+	for (; *p != 0 && *p != ch; p++)
+		;
+	return (__DECONST(char *, p));
+}
+
+
+/*
+ * Find the first occurrence of find in s, where the search is limited to the
+ * first slen characters of s.
+ */
+char *
+strnstr(const char *s, const char *find, size_t slen)
+{
+	char c, sc;
+	size_t len;
+
+	if ((c = *find++) != '\0') {
+		len = strlen(find);
+		do {
+			do {
+				if (slen-- < 1 || (sc = *s++) == '\0')
+					return (NULL);
+			} while (sc != c);
+			if (len > slen)
+				return (NULL);
+		} while (strncmp(s, find, len) != 0);
+		s--;
+	}
+	return (__DECONST(char *, s));
 }
 
 #define	DIRNAME		0
@@ -605,13 +788,13 @@ gethostid(void)
 	DWORD len;
 
 	Status = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
-	    "SYSTEM\\ControlSet001\\Services\\ZFSin",
+	    "SYSTEM\\ControlSet001\\Services\\OpenZFS",
 	    0, KEY_READ, &key);
 	if (Status != ERROR_SUCCESS)
 		return (0UL);
 
 	len = sizeof (hostid);
-	Status = RegQueryValueEx(key, "hostid", NULL, &type,
+	Status = RegQueryValueEx(key, "spl_hostid", NULL, &type,
 	    (LPBYTE)&hostid, &len);
 	if (Status != ERROR_SUCCESS)
 		hostid = 0;
@@ -626,19 +809,66 @@ gethostid(void)
 uid_t
 geteuid(void)
 {
-	return (0); // woah, root?
+	BOOL elevated = FALSE;
+	HANDLE token;
+	if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+		TOKEN_ELEVATION elev;
+		DWORD sz = sizeof (elev);
+		if (GetTokenInformation(token, TokenElevation,
+		    &elev, sz, &sz))
+			elevated = elev.TokenIsElevated;
+		CloseHandle(token);
+	}
+	return (elevated ? 0 : 1);
 }
 
 struct passwd *
 getpwuid(uid_t uid)
 {
-	return (NULL);
+	static __declspec(thread) struct passwd pw;
+	static __declspec(thread) char name_buf[256];
+	DWORD name_size = sizeof (name_buf);
+	char domain[256];
+	DWORD domain_size = sizeof (domain);
+	SID_NAME_USE sid_use;
+
+	/*
+	 * Construct S-1-5-18 for uid 0 (SYSTEM / root).  Other uids would
+	 * require knowing the machine/domain SID to reconstruct the full
+	 * S-1-5-21-*-*-*-RID, so we leave them unresolved for now.
+	 */
+	if (uid != 0)
+		return (NULL);
+
+	SID_IDENTIFIER_AUTHORITY nt_auth = SECURITY_NT_AUTHORITY;
+	BYTE sid_buf[SECURITY_MAX_SID_SIZE];
+	PSID sid = (PSID)sid_buf;
+
+	if (!AllocateAndInitializeSid(&nt_auth, 1,
+	    SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &sid))
+		return (NULL);
+
+	BOOL ok = LookupAccountSidA(NULL, sid, name_buf, &name_size,
+	    domain, &domain_size, &sid_use);
+	FreeSid(sid);
+
+	if (!ok)
+		return (NULL);
+
+	pw.pw_name = name_buf;
+	pw.pw_passwd = "";
+	pw.pw_uid = 0;
+	pw.pw_gid = 0;
+	pw.pw_gecos = name_buf;
+	pw.pw_dir = "";
+	pw.pw_shell = "";
+	return (&pw);
 }
 
 const char *
 win_ctime_r(char *buffer, size_t bufsize, time_t cur_time)
 {
-	errno_t e = ctime_s(buffer, bufsize, &cur_time);
+	ctime_s(buffer, bufsize, cur_time);
 	return (buffer);
 }
 
@@ -681,10 +911,22 @@ openlog(const char *ident, int logopt, int facility)
 
 }
 
+#define	ZEDLOG ZFSEXECDIR "/zed.txt"
 void
 syslog(int priority, const char *message, ...)
 {
-
+	FILE *fd;
+	fd = fopen(ZEDLOG, "a");
+	if (fd != NULL) {
+		va_list args;
+		va_start(args, message);
+		vfprintf(fd, message, args);
+		va_end(args);
+		fclose(fd);
+	} else {
+		int ret = GetLastError();
+		printf("%d\n", ret);
+	}
 }
 
 void
@@ -722,11 +964,11 @@ strlcpy(register char *s, register const char *t, register size_t n)
 				*s = 0;
 				break;
 			}
-		} while (*s++ = *t++);
-		if (!n)
-			while (*t++)
-				;
-		return (t - o - 1);
+		} while ((*s++ = *t++));
+	if (!n)
+		while (*t++)
+			;
+	return (t - o - 1);
 }
 
 extern size_t
@@ -735,7 +977,7 @@ strlcat(register char *s, register const char *t, register size_t n)
 	register size_t m;
 	const char *o = t;
 
-	if (m = n) {
+	if ((m = n)) {
 		while (n && *s)	{
 			n--;
 			s++;
@@ -747,7 +989,7 @@ strlcat(register char *s, register const char *t, register size_t n)
 					*s = 0;
 					break;
 				}
-			} while (*s++ = *t++);
+			} while ((*s++ = *t++));
 		else
 			*s = 0;
 	}
@@ -791,7 +1033,7 @@ void
 console_echo(boolean_t willecho)
 {
 	HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
-	int constype = isatty(hStdin);
+	int constype = isatty(HTOI(hStdin));
 	switch (constype) {
 	case 0:
 	default:
@@ -816,17 +1058,21 @@ console_echo(boolean_t willecho)
 // Not really getline, just used for password input in libzfs_crypto.c
 #define	MAX_GETLINE 128
 ssize_t
-getline(char **linep, size_t *linecapp,
-    FILE *stream)
+getline_impl(char **linep, size_t *linecapp,
+    FILE *stream, boolean_t internal)
 {
 	static char getpassbuf[MAX_GETLINE + 1];
 	size_t i = 0;
+	fakeFILE *fFILE = (fakeFILE *)stream;
 
 	console_echo(FALSE);
 
 	int c;
 	for (;;) {
-		c = getc(stream);
+		if (internal)
+			fFILE->readfn(fFILE->cookie, (char *)&c, 1);
+		else
+			c = getc(stream);
 		if ((c == '\r') || (c == '\n')) {
 			getpassbuf[i] = '\0';
 			break;
@@ -845,6 +1091,14 @@ getline(char **linep, size_t *linecapp,
 	console_echo(TRUE);
 
 	return (i);
+}
+
+#undef getline
+ssize_t
+getline(char **linep, size_t *linecapp, FILE *stream)
+{
+	return (getline_impl(linep, linecapp,
+	    stream, FALSE));
 }
 
 
@@ -866,6 +1120,7 @@ wosix_open(const char *inpath, int oflag, ...)
 	DWORD mode = GENERIC_READ; // RDONLY=0, WRONLY=1, RDWR=2;
 	DWORD how = OPEN_EXISTING;
 	DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;
+	DWORD dwFlagsAndAttributes = 0;
 	char otherpath[MAXPATHLEN];
 	char *path;
 	char *copy_path, *r;
@@ -905,8 +1160,26 @@ wosix_open(const char *inpath, int oflag, ...)
 	if (oflag&O_APPEND) mode |= FILE_APPEND_DATA;
 
 #ifdef O_EXLOCK
-	if (!oflag&O_EXLOCK) share |= FILE_SHARE_WRITE;
+	if (oflag&O_EXLOCK) share &= ~FILE_SHARE_WRITE;
 #endif
+
+	dwFlagsAndAttributes = oflag & O_DIRECTORY ?
+	    FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL;
+
+	if (oflag & O_DIRECT) {
+		dwFlagsAndAttributes |=
+		    FILE_FLAG_WRITE_THROUGH|FILE_FLAG_NO_BUFFERING;
+	}
+
+	// URLs have to start with "/" as in, "/C:"
+	if (path[0] == '\\' && path[2] == ':')
+		path++;
+
+	// Win users might not supply \\?\ paths, make them so
+	if (path[1] == ':' && strncmp("\\\\.\\", path, 4) != 0) {
+		snprintf(otherpath, MAXPATHLEN, "\\\\.\\%s", &path[0]);
+		path = otherpath;
+	}
 
 	// Support expansion of "SystemRoot"
 	if (strncmp(path, "\\SystemRoot\\", 12) == 0) {
@@ -915,13 +1188,25 @@ wosix_open(const char *inpath, int oflag, ...)
 		path = otherpath;
 	}
 
+	if (strncmp(path, "\\dev\\null", 9) == 0) {
+		snprintf(otherpath, MAXPATHLEN, "NUL:");
+		path = otherpath;
+	}
+
+
 	// Try to open verbatim, but if that fail, check if it is the
 	// "#offset#length#name" style, and try again. We let it fail first
 	// just in case someone names their file with a starting '#'.
 
 	h = CreateFile(path, mode, share, NULL, how,
-	    oflag & O_DIRECTORY ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL,
+	    dwFlagsAndAttributes,
 	    NULL);
+
+	// Could be a directory (but we come from stat so no O_DIRECTORY)
+	if (h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED)
+		h = CreateFile(path, mode, share, NULL, how,
+		    FILE_FLAG_BACKUP_SEMANTICS,
+		    NULL);
 
 	if (h == INVALID_HANDLE_VALUE && path[0] == '#') {
 		char *end = NULL;
@@ -933,7 +1218,7 @@ wosix_open(const char *inpath, int oflag, ...)
 		while (end && *end == '#') end++;
 
 		h = CreateFile(end, mode, share, NULL, how,
-		    oflag & O_DIRECTORY ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL,
+		    dwFlagsAndAttributes,
 		    NULL);
 		if (h != INVALID_HANDLE_VALUE) {
 			// Upper layer probably handles this, but let's help
@@ -969,7 +1254,7 @@ wosix_open(const char *inpath, int oflag, ...)
 			errno = EBUSY; // BSD: EWOULDBLOCK
 			// fall through
 		default:
-			fprintf(stderr, "wosix_open(%s): error %d / 0x%x\n",
+			fprintf(stderr, "wosix_open(%s): error %lu / 0x%lx\n",
 			    path, GetLastError(), GetLastError());
 		}
 		free(copy_path);
@@ -978,9 +1263,6 @@ wosix_open(const char *inpath, int oflag, ...)
 	free(copy_path);
 	return (HTOI(h));
 }
-
-// Figure out when to call WSAStartup();
-static int posix_init_winsock = 0;
 
 int
 wosix_close(int fd)
@@ -1001,17 +1283,38 @@ wosix_close(int fd)
 }
 
 int
-wosix_ioctl(int fd, unsigned long request, zfs_iocparm_t *wrap)
+wosix_ioctl_len(int fd, unsigned long request, void *wrap, size_t len)
 {
 	int error;
 	ULONG bytesReturned;
 
+	if (request == TIOCGWINSZ) {
+		struct winsize {
+			unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel;
+		};
+		CONSOLE_SCREEN_BUFFER_INFO csbi;
+		struct winsize *ws = (struct winsize *)wrap;
+
+		if (!GetConsoleScreenBufferInfo(ITOH(fd), &csbi)) {
+			errno = ENOTTY;
+			return (-1);
+		}
+
+		ws->ws_col = (unsigned short)
+		    (csbi.srWindow.Right - csbi.srWindow.Left + 1);
+		ws->ws_row = (unsigned short)
+		    (csbi.srWindow.Bottom - csbi.srWindow.Top + 1);
+		ws->ws_xpixel = 0;
+		ws->ws_ypixel = 0;
+		return (0);
+	}
+
 	error = DeviceIoControl(ITOH(fd),
 	    (DWORD)request,
 	    wrap,
-	    (DWORD)sizeof (zfs_iocparm_t),
+	    (DWORD)len,
 	    wrap,
-	    (DWORD)sizeof (zfs_iocparm_t),
+	    (DWORD)len,
 	    &bytesReturned,
 	    NULL);
 
@@ -1020,28 +1323,6 @@ wosix_ioctl(int fd, unsigned long request, zfs_iocparm_t *wrap)
 	else
 		error = 0;
 
-#ifdef DEBUG
-	fprintf(stderr,
-	    "    (ioctl 0x%x (%s) status %d bytes %ld)\n",
-	    (request & 0x2ffc) >> 2,
-	    getIoctlAsString((request & 0x2ffc) >> 2), error,
-	    bytesReturned);
-	fflush(stderr);
-#endif
-#if 0
-	for (int x = 0; x < 16; x++)
-		fprintf(stderr, "%02x ", ((unsigned char *)zc)[x]);
-	fprintf(stderr, "\n");
-	fflush(stderr);
-	fprintf(stderr,
-	    "returned ioctl on 0x%x (raw 0x%x) struct size %d in "
-	    "%p:%d out %p:%d\n",
-	    (request & 0x2ffc) >> 2, request,
-	    sizeof (zfs_cmd_t),
-	    zc->zc_nvlist_src, zc->zc_nvlist_src_size,
-	    zc->zc_nvlist_dst, zc->zc_nvlist_dst_size);
-	fflush(stderr);
-#endif
 	errno = error;
 	return (error);
 }
@@ -1096,10 +1377,70 @@ wosix_write(int fd, const void *data, uint32_t len)
 		if (!WriteFile(ITOH(fd), data, len, &wrote, &ow))
 			return (-1);
 	} else {
-		if (!WriteFile(ITOH(fd), data, len, &wrote, NULL))
+		if (!WriteFile(ITOH(fd), data, len, &wrote, NULL)) {
+			errno = GetLastError();
 			return (-1);
+		}
 	}
 	return (wrote);
+}
+
+ssize_t
+writev(int fd, struct iovec *iov, unsigned iov_cnt)
+{
+	unsigned int i = 0;
+	ssize_t ret = 0;
+	while (i < iov_cnt) {
+		ssize_t r = wosix_write(fd, iov[i].iov_base, iov[i].iov_len);
+
+		if (r > 0) {
+			ret += r;
+		} else if (!r) {
+			break;
+		} else if (errno == EINTR) {
+			continue;
+		} else {
+			/*
+			 * else it is some "other" error,
+			 * only return if there was no data processed.
+			 */
+			if (ret == 0) {
+				ret = -1;
+			}
+			break;
+		}
+		+i++;
+	}
+	return (ret);
+}
+
+ssize_t
+readv(int fd, const struct iovec *iov, int iov_cnt)
+{
+	unsigned int i = 0;
+	ssize_t ret = 0;
+	while (i < iov_cnt) {
+		ssize_t r = wosix_read(fd, iov[i].iov_base, iov[i].iov_len);
+
+		if (r > 0) {
+			ret += r;
+		} else if (!r) {
+			break;
+		} else if (errno == EINTR) {
+			continue;
+		} else {
+			/*
+			 * else it is some "other" error,
+			 * only return if there was no data processed.
+			 */
+			if (ret == 0) {
+				ret = -1;
+			}
+			break;
+		}
+		+i++;
+	}
+	return (ret);
 }
 
 #define	is_wprefix(s, prefix) \
@@ -1118,7 +1459,7 @@ wosix_isatty(int fd)
 {
 	DWORD mode;
 	HANDLE h = ITOH(fd);
-	int ret;
+	// int ret;
 
 	// First, check if we are in a regular dos box, if yes, return.
 	// If not, check for cygwin ...
@@ -1170,6 +1511,11 @@ wosix_isatty(int fd)
 						p = NULL;
 					}
 				}
+				/* ZFS elevation relay pipe is interactive */
+				if (p == NULL &&
+				    is_wprefix(nameinfo->FileName,
+				    L"\\zfs_elev_"))
+					p = nameinfo->FileName;
 			}
 			free(nameinfo);
 			if (p != NULL)
@@ -1261,16 +1607,16 @@ wosix_fstat_blk(int fd, struct _stat64 *st)
 	// Try device first
 	if (DeviceIoControl(handle, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, NULL, 0,
 	    &geometry_ex, sizeof (geometry_ex), &len, NULL)) {
-	    st->st_size = (diskaddr_t)geometry_ex.DiskSize.QuadPart;
-	    st->st_mode = S_IFBLK;
-	    return (0);
+		st->st_size = (diskaddr_t)geometry_ex.DiskSize.QuadPart;
+		st->st_mode = S_IFBLK;
+		return (0);
 	}
 
 	// Try regular file
 	if (GetFileSizeEx(handle, &size)) {
-	    st->st_size = (diskaddr_t)size.QuadPart;
-	    st->st_mode = S_IFREG;
-	    return (0);
+		st->st_size = (diskaddr_t)size.QuadPart;
+		st->st_mode = S_IFREG;
+		return (0);
 	}
 
 	return (-1); // errno?
@@ -1280,8 +1626,8 @@ wosix_fstat_blk(int fd, struct _stat64 *st)
 int
 pread_win(HANDLE h, void *buf, size_t nbyte, off_t offset)
 {
-	uint64_t off;
 	DWORD red;
+	int total_red = 0;
 	LARGE_INTEGER large;
 	LARGE_INTEGER lnew;
 	// This code does all seeks based on "current" so we can
@@ -1299,10 +1645,8 @@ pread_win(HANDLE h, void *buf, size_t nbyte, off_t offset)
 
 	ok = ReadFile(h, buf, nbyte, &red, NULL);
 
-	if (!ok) {
-		red = GetLastError();
-		red = -red;
-	}
+	if (!ok || red == 0)
+		red = -GetLastError();
 
 	// Restore position
 	SetFilePointerEx(h, lnew, NULL, FILE_BEGIN);
@@ -1320,7 +1664,6 @@ int
 wosix_pwrite(int fd, const void *buf, size_t nbyte, off_t offset)
 {
 	HANDLE h = ITOH(fd);
-	uint64_t off;
 	DWORD wrote;
 	LARGE_INTEGER large;
 	LARGE_INTEGER lnew;
@@ -1371,7 +1714,7 @@ wosix_ftruncate(int fd, off_t length)
 const char *
 check_file_mode(const char *mode)
 {
-	/* Unknown mode cauises abort() */
+	/* Unknown mode causes abort() */
 	if (strcmp(mode, "re") == 0)
 		return ("rb");
 	if (strcmp(mode, "r") == 0)
@@ -1379,12 +1722,67 @@ check_file_mode(const char *mode)
 	return (mode);
 }
 
+int
+file_mode_fmode(const char *mode)
+{
+	/* Unknown mode causes abort() */
+	if (strcmp(mode, "rb") == 0)
+		return (O_RDONLY | O_BINARY);
+	if (strcmp(mode, "r") == 0)
+		return (O_RDONLY);
+	if (strcmp(mode, "w") == 0)
+		return (O_WRONLY);
+	if (strcmp(mode, "wb") == 0)
+		return (O_WRONLY | O_BINARY);
+	if (strcmp(mode, "a") == 0)
+		return (O_WRONLY | O_APPEND);
+	if (strcmp(mode, "ab") == 0)
+		return (O_WRONLY | O_BINARY | O_APPEND);
+	if (strcmp(mode, "at") == 0)
+		return (O_WRONLY | O_TEXT | O_APPEND);
+	return (O_RDWR | O_BINARY);
+}
+
 FILE *
 wosix_fopen(const char *name, const char *mode)
 {
+	int fd;
+	int fmode = 0;
+	FILE *fp;
+
 	mode = check_file_mode(mode);
-#undef fopen
-	return (fopen(name, mode));
+
+	fmode = file_mode_fmode(mode);
+
+	// Special hack for Linux NOT using setmntent(), but
+	// calling fopen(MNTTAB, directly. Boo. Let's use
+	// our existing wrapper for funopen()
+	if (strcmp(name, MNTTAB) == 0) {
+		return (setmntent(name, mode));
+	}
+
+	// Lets enjoy the path translation work we do
+	// in open.
+	fd = wosix_open(name, fmode);
+	if (fd < 0)
+		return (NULL);
+
+	fp = wosix_fdopen(fd, mode);
+
+	if (fp == NULL) {
+		wosix_close(fd);
+		return (NULL);
+	}
+
+	fakeFILE *fFILE = malloc(sizeof (fakeFILE));
+	if (!fFILE) {
+		fclose(fp);
+		return (NULL);
+	}
+
+	fFILE->magic = WFUNOPEN_MAGIC;
+	fFILE->realFILE = fp;
+	return ((FILE *)fFILE);
 }
 
 FILE *
@@ -1406,9 +1804,6 @@ wosix_fdopen(int fd, const char *mode)
 		return (NULL);
 	}
 
-	// Why is this print required?
-	fprintf(stderr, "\r\n");
-
 	// fclose(f) will also call _close() on temp.
 	return (f);
 }
@@ -1421,19 +1816,6 @@ wosix_socketpair(int domain, int type, int protocol, int sv[2])
 	int nameLen;
 	unsigned long option_arg = 1;
 	int err = 0;
-	WSADATA wsaData;
-
-	// Do we need to init winsock? Is this the right way, should we
-	// add _init/_exit calls? If socketpair is the only winsock call
-	// we have, this might be ok.
-	if (posix_init_winsock == 0) {
-		posix_init_winsock = 1;
-		err = WSAStartup(MAKEWORD(2, 2), &wsaData);
-		if (err != 0) {
-			errno = err;
-			return (-1);
-		}
-	}
 
 	nameLen = sizeof (saddr);
 
@@ -1514,7 +1896,7 @@ wosix_socketpair(int domain, int type, int protocol, int sv[2])
 int
 wosix_dup2(int fildes, int fildes2)
 {
-	return (-1);
+	return (0);
 }
 
 void *
@@ -1527,8 +1909,8 @@ wosix_mmap(void *addr, size_t len, int prot, int flags,
 	void *mapaddr = NULL;
 
 	/* Make a vague effort at matching flags */
-  
-	if (prot & PROT_READ) { 
+
+	if (prot & PROT_READ) {
 		winprot = PAGE_READONLY;
 		winflags = FILE_MAP_READ;
 	}
@@ -1565,9 +1947,9 @@ wosix_munmap(void *addr, size_t len)
 
 
 
-static long GetLogicalProcessors(void);
+static uint64_t GetLogicalProcessors(void);
 
-long
+uint64_t
 sysconf(int name)
 {
 	SYSTEM_INFO info;
@@ -1611,7 +1993,7 @@ CountSetBits(ULONG_PTR bitMask)
 	return (bitSetCount);
 }
 
-static long
+static uint64_t
 GetLogicalProcessors(void)
 {
 	LPFN_GLPI glpi;
@@ -1619,7 +2001,7 @@ GetLogicalProcessors(void)
 	PSYSTEM_LOGICAL_PROCESSOR_INFORMATION buffer = NULL;
 	PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = NULL;
 	DWORD returnLength = 0;
-	DWORD logicalProcessorCount = 0;
+	uint64_t logicalProcessorCount = 0;
 	DWORD numaNodeCount = 0;
 	DWORD processorCoreCount = 0;
 	DWORD processorL1CacheCount = 0;
@@ -1633,7 +2015,7 @@ GetLogicalProcessors(void)
 	    GetModuleHandle(TEXT("kernel32")),
 	    "GetLogicalProcessorInformation");
 	if (NULL == glpi)
-		return (-1);
+		return (0);
 
 	while (!done) {
 		DWORD rc = glpi(buffer, &returnLength);
@@ -1647,9 +2029,9 @@ GetLogicalProcessors(void)
 				    malloc(returnLength);
 
 				if (NULL == buffer)
-					return (-1);
+					return (0);
 			} else {
-				return (-1);
+				return (0);
 			}
 		} else {
 			done = TRUE;
@@ -1710,7 +2092,7 @@ mprotect(void *addr, size_t len, int prot)
 	return (0);
 }
 
-int
+uid_t
 getuid(void)
 {
 	return (1);
@@ -1740,11 +2122,11 @@ uname(struct utsname *buf)
 		strcpy(buf->nodename, "localhost");
 
 	versionex.dwOSVersionInfoSize = sizeof (OSVERSIONINFOEX);
-	GetVersionEx(&versionex);
+	// GetVersionEx(&versionex);
+	VerifyVersionInfo(&versionex, VER_MAJORVERSION | VER_MINORVERSION, 0);
 	snprintf(buf->sysname, sizeof (buf->sysname), "Windows_NT-%u.%u",
 	    (unsigned int) versionex.dwMajorVersion,
 	    (unsigned int) versionex.dwMinorVersion);
-
 
 	GetSystemInfo(&info);
 
@@ -1785,11 +2167,11 @@ wosix_openat(int fd, const char *path, int oflag, ...)
 
 	if (fd == AT_FDCWD)
 		return (wosix_open(path, oflag));
-    
+
 	/*
 	 * Fetch the directory name, and stitch the name together.
 	 * Another option is using NTCreateFile with RootDirectory=handle
-	 */ 
+	 */
 
 	if (GetFinalPathNameByHandleA(h, fullpath,
 	    MAXPATHLEN, FILE_NAME_NORMALIZED) > 0) {
@@ -1809,4 +2191,91 @@ FILE *
 wosix_freopen(const char *path, const char *mode, FILE *stream)
 {
 	return ((FILE *)path); // Anything not NULL
+}
+
+int
+timer_create(clockid_t id, struct sigevent *__restrict se,
+    timer_t *__restrict t)
+{
+	return (0);
+}
+
+int
+timer_delete(timer_t t)
+{
+	return (0);
+}
+
+int
+timer_gettime(timer_t t, struct itimerspec *v)
+{
+	return (0);
+}
+
+int
+timer_getoverrun(timer_t t)
+{
+	return (0);
+}
+
+int
+timer_settime(timer_t t, int x, const struct itimerspec *tv,
+    struct itimerspec *itv)
+{
+	return (0);
+}
+
+int
+wosix_access(const char *name, int mode)
+{
+	DWORD dwAttrib = GetFileAttributes(name);
+	boolean_t isFile;
+
+	isFile = (dwAttrib != INVALID_FILE_ATTRIBUTES &&
+	    !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY));
+
+	if (!isFile) {
+		errno = ENOENT;
+		return (-1);
+	}
+
+	/* Windows does not have X_OK (execute), and it assert()s */
+	if (mode == X_OK)
+		return (0);
+
+	mode &= ~X_OK;
+
+#undef access
+	return (access(name, mode));
+}
+
+char *
+strptime(const char *s,
+    const char *f,
+    struct tm *tm)
+{
+	/* This desperately needs implementing */
+	localtime(tm);
+	return (s);
+}
+
+int
+getpwnam_r(const char *name, struct passwd *pwd,
+    char *buf, size_t buflen, struct passwd **result)
+{
+	*result = NULL;
+	return (0);
+}
+
+int
+getgrnam_r(const char *name, struct group *grp,
+    char *buf, size_t buflen, struct group **result)
+{
+	*result = NULL;
+	return (0);
+}
+
+extern pid_t setsid(void)
+{
+	return (0);
 }

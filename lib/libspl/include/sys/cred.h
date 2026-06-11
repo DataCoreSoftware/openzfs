@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -7,7 +8,7 @@
  * with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -27,6 +28,24 @@
 #ifndef _LIBSPL_SYS_CRED_H
 #define	_LIBSPL_SYS_CRED_H
 
+#include <sys/stat.h>
+
+/*
+ * Credentials
+ */
+
 typedef struct cred cred_t;
+
+extern uid_t crgetuid(cred_t *cr);
+extern uid_t crgetruid(cred_t *cr);
+extern gid_t crgetgid(cred_t *cr);
+extern int crgetngroups(cred_t *cr);
+extern gid_t *crgetgroups(cred_t *cr);
+
+#define	kcred		NULL
+#define	CRED()		NULL
+
+#define	crhold(cr)	((void)cr)
+#define	crfree(cr)	((void)cr)
 
 #endif

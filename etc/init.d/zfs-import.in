@@ -1,4 +1,6 @@
 #!@DEFAULT_INIT_SHELL@
+# SPDX-License-Identifier: BSD-2-Clause
+# shellcheck disable=SC2154
 #
 # zfs-import    This script will import ZFS pools
 #
@@ -57,8 +59,7 @@ find_pools()
 	local pools
 
 	pools=$("$@" 2> /dev/null | \
-		grep -E "pool:|^[a-zA-Z0-9]" | \
-		sed 's@.*: @@' | \
+		sed -Ee '/pool:|^[a-zA-Z0-9]/!d' -e 's@.*: @@' | \
 		sort | \
 		tr '\n' ';')
 
@@ -307,7 +308,7 @@ do_start()
 
 # ----------------------------------------------------
 
-if [ ! -e /sbin/openrc-run ]
+if @IS_SYSV_RC@
 then
 	case "$1" in
 		start)

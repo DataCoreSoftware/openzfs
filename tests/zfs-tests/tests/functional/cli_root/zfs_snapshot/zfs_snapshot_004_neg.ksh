@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -44,9 +45,7 @@ verify_runnable "both"
 
 function cleanup
 {
-	if datasetexists $initfs ; then
-		log_must zfs destroy -rf $initfs
-	fi
+	datasetexists $initfs && destroy_dataset $initfs -rf
 }
 
 log_assert "Verify recursive snapshotting could not break ZFS."
@@ -61,20 +60,18 @@ while ((ret == 0)); do
 	ret=$?
 
 	if ((ret != 0)); then
-		len=$(echo $basefs| wc -c)
+		len=${#basefs}
 		log_note "The deeply-nested filesystem len: $len"
 
 		#
-		# Make sure there are at lease 2 characters left
+		# Make sure there are at least 2 characters left
 		# for snapshot name space, otherwise snapshot name
 		# is incorrect
 		#
 		if ((len >= 255)); then
-			if datasetexists $basefs; then
-				log_must zfs destroy -r $basefs
-			fi
+			datasetexists $basefs && destroy_dataset $basefs -r
 			basefs=${basefs%/*}
-			len=$(echo $basefs| wc -c)
+			len=${#basefs}
 		fi
 		break
 	fi

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -40,7 +41,7 @@
 #define	_SYS_XVATTR_H
 
 #include <sys/vnode.h>
-#include <sys/strings.h>
+#include <sys/string.h>
 
 #define	AV_SCANSTAMP_SZ	32		/* length of anti-virus scanstamp */
 
@@ -67,6 +68,10 @@ typedef struct xoptattr {
 	uint8_t		xoa_sparse;
 	uint8_t		xoa_projinherit;
 	uint64_t	xoa_projid;
+	uint8_t		xoa_tracked; /* macOS */;
+	uint8_t		xoa_sappendonly; /* macOS */;
+	uint8_t		xoa_simmutable; /* macOS */;
+	uint8_t		xoa_case_sensitive_dir; /* Win */
 } xoptattr_t;
 
 /*
@@ -174,12 +179,18 @@ typedef struct xvattr {
 #define	XAT0_SPARSE	0x00010000	/* sparse */
 #define	XAT0_PROJINHERIT	0x00020000	/* Create with parent projid */
 #define	XAT0_PROJID	0x00040000	/* Project ID */
+#define	XAT0_TRACKED	0x00080000	/* macOS UF_TRACKED */
+#define	XAT0_SAPPENDONLY	0x00100000	/* macOS SF_APPENDONLY */
+#define	XAT0_SIMMUTABLE	0x00200000	/* macOS SF_IMMUTABLE */
+#define	XAT0_CASESENSITIVEDIR	0x00400000	/* win */
+
 
 #define	XAT0_ALL_ATTRS	(XAT0_CREATETIME|XAT0_ARCHIVE|XAT0_SYSTEM| \
     XAT0_READONLY|XAT0_HIDDEN|XAT0_NOUNLINK|XAT0_IMMUTABLE|XAT0_APPENDONLY| \
     XAT0_NODUMP|XAT0_OPAQUE|XAT0_AV_QUARANTINED|  XAT0_AV_MODIFIED| \
-    XAT0_AV_SCANSTAMP|XAT0_REPARSE|XATO_GEN|XAT0_OFFLINE|XAT0_SPARSE| \
-    XAT0_PROJINHERIT | XAT0_PROJID)
+    XAT0_AV_SCANSTAMP|XAT0_REPARSE|XAT0_GEN|XAT0_OFFLINE|XAT0_SPARSE| \
+    XAT0_PROJINHERIT | XAT0_PROJID|XAT0_TRACKED|XAT0_SAPPENDONLY| \
+    XAT0_SIMMUTABLE|XAT0_CASESENSITIVEDIR)
 
 /* Support for XAT_* optional attributes */
 #define	XVA_MASK		0xffffffff	/* Used to mask off 32 bits */
@@ -218,6 +229,10 @@ typedef struct xvattr {
 #define	XAT_SPARSE		((XAT0_INDEX << XVA_SHFT) | XAT0_SPARSE)
 #define	XAT_PROJINHERIT		((XAT0_INDEX << XVA_SHFT) | XAT0_PROJINHERIT)
 #define	XAT_PROJID		((XAT0_INDEX << XVA_SHFT) | XAT0_PROJID)
+#define	XAT_TRACKED		((XAT0_INDEX << XVA_SHFT) | XAT0_TRACKED)
+#define	XAT_SAPPENDONLY		((XAT0_INDEX << XVA_SHFT) | XAT0_SAPPENDONLY)
+#define	XAT_SIMMUTABLE		((XAT0_INDEX << XVA_SHFT) | XAT0_SIMMUTABLE)
+#define	XAT_CASESENSITIVEDIR ((XAT0_INDEX << XVA_SHFT) | XAT0_CASESENSITIVEDIR)
 
 /*
  * The returned attribute map array (xva_rtnattrmap[]) is located past the
@@ -282,7 +297,7 @@ typedef struct xvattr {
 static inline void
 xva_init(xvattr_t *xvap)
 {
-	bzero(xvap, sizeof (xvattr_t));
+	memset(xvap, 0, sizeof (xvattr_t));
 	xvap->xva_mapsize = XVA_MAPSIZE;
 	xvap->xva_magic = XVA_MAGIC;
 	xvap->xva_vattr.va_mask = ATTR_XVATTR;
@@ -310,6 +325,7 @@ xva_getxoptattr(xvattr_t *xvap)
  */
 #define	V_ACE_MASK	0x1	/* mask represents  NFSv4 ACE permissions */
 #define	V_APPEND	0x2	/* want to do append only check */
+#define	V_NAMEDATTR	0x4	/* is a named attribute check */
 
 /*
  * Structure used on VOP_GETSECATTR and VOP_SETSECATTR operations

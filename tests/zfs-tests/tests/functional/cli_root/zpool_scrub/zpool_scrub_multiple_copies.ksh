@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -50,7 +51,7 @@ log_assert "Scrubs and self healing must work with additional copies"
 log_must zfs create -o copies=3 $TESTPOOL/$TESTFS2
 typeset mntpnt=$(get_prop mountpoint $TESTPOOL/$TESTFS2)
 log_must mkfile 10m $mntpnt/file
-log_must zpool sync $TESTPOOL
+sync_pool $TESTPOOL
 
 log_must zinject -a -t data -C 0,1 -e io $mntpnt/file
 

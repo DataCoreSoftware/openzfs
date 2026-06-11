@@ -1,3 +1,4 @@
+.\" SPDX-License-Identifier: CDDL-1.0
 .\"
 .\" CDDL HEADER START
 .\"
@@ -6,7 +7,7 @@
 .\" You may not use this file except in compliance with the License.
 .\"
 .\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or http://www.opensolaris.org/os/licensing.
+.\" or https://opensource.org/licenses/CDDL-1.0.
 .\" See the License for the specific language governing permissions
 .\" and limitations under the License.
 .\"
@@ -26,7 +27,7 @@
 .\" Copyright 2017 Nexenta Systems, Inc.
 .\" Copyright (c) 2017 Open-E, Inc. All Rights Reserved.
 .\"
-.Dd May 29, 2021
+.Dd July 11, 2022
 .Dt ZPOOL-REPLACE 8
 .Os
 .
@@ -49,7 +50,7 @@ This is equivalent to attaching
 .Ar new-device ,
 waiting for it to resilver, and then detaching
 .Ar device .
-Any in progress scrub will be cancelled.
+Any in progress scrub will be canceled.
 .Pp
 The size of
 .Ar new-device
@@ -85,7 +86,7 @@ The only property supported at the moment is
 The
 .Ar new-device
 is reconstructed sequentially to restore redundancy as quickly as possible.
-Checksums are not verfied during sequential reconstruction so a scrub is
+Checksums are not verified during sequential reconstruction so a scrub is
 started when the resilver completes.
 Sequential reconstruction is not supported for raidz configurations.
 .It Fl w

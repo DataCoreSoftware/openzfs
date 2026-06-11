@@ -20,6 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright(c) 2015 Jorgen Lundman <lundman@lundman.net>
  * Portions Copyright 2022 Andrew Innes <andrew.c12@gmail.com>
  */
 
@@ -73,6 +74,7 @@ struct zfsvfs {
 	struct zfs_fuid_info *z_fuid_replay; /* fuid info for replay */
 	uint64_t	z_assign;	/* TXG_NOWAIT or set by zil_replay() */
 	zilog_t	*z_log;	/* intent log pointer */
+	uint_t	z_acl_type;	/* acl chmod/mode behavior */
 	uint_t	z_acl_mode;	/* acl chmod/mode behavior */
 	uint_t	z_acl_inherit;	/* acl inheritance behavior */
 	zfs_case_t	z_case;	/* case-sense */
@@ -88,11 +90,11 @@ struct zfsvfs {
 	uint64_t	z_ctldir_startid;	/* Start of snapdir range */
 	boolean_t	z_show_ctldir; 	/* expose .zfs in the root dir */
 	boolean_t	z_issnap;	/* true if this is a snapshot */
-	boolean_t	z_vscan;	/* virus scan on/off */
 	boolean_t	z_use_fuids;	/* version allows fuids */
 	boolean_t	z_replay;	/* set during ZIL replay */
 	boolean_t	z_use_sa;	/* version allow system attributes */
 	boolean_t	z_xattr_sa;	/* allow xattrs to be stores as SA */
+	boolean_t	z_longname;	/* Dataset supports long names */
 	uint64_t	z_version;
 	uint64_t	z_shares_dir;	/* hidden shares dir */
 	kmutex_t	z_lock;
@@ -109,6 +111,12 @@ struct zfsvfs {
 	uint64_t	z_groupobjquota_obj;
 	uint64_t	z_projectquota_obj;
 	uint64_t	z_projectobjquota_obj;
+	uint64_t	z_defaultuserquota;
+	uint64_t	z_defaultgroupquota;
+	uint64_t	z_defaultprojectquota;
+	uint64_t	z_defaultuserobjquota;
+	uint64_t	z_defaultgroupobjquota;
+	uint64_t	z_defaultprojectobjquota;
 
 #ifdef _WIN32
 	dev_t	z_rdev;	/* proxy device for mount */
@@ -120,16 +128,14 @@ struct zfsvfs {
 	avl_tree_t	z_hardlinks;	/* linkid hash avl tree for vget */
 	avl_tree_t	z_hardlinks_linkid;	/* sorted on linkid */
 	krwlock_t	z_hardlinks_lock;	/* lock to access z_hardlinks */
-
-	uint64_t	z_notification_conditions; /* HFSIOC_VOLUME_STATUS */
+	uint64_t	z_mimic; /* zfs? ntfs ? */
+	boolean_t	z_vscan;			/* virus scan on/off */
+	uint64_t	z_notification_conditions;
 	uint64_t	z_freespace_notify_warninglimit;
 	uint64_t	z_freespace_notify_dangerlimit;
 	uint64_t	z_freespace_notify_desiredlevel;
-
-	void	*z_devdisk; /* Hold fake disk if prop devdisk is on */
-
+	void	*z_devdisk;			/* Hold fake disk if prop devdisk is on */
 	uint64_t	z_findernotify_space;
-
 #endif
 	uint64_t	z_replay_eof;	/* New end of file - replay only */
 	sa_attr_type_t	*z_attr_table;	/* SA attr mapping->id */
@@ -155,38 +161,35 @@ typedef struct hardlinks_struct hardlinks_t;
 
 #define	ZSB_XATTR	0x0001		/* Enable user xattrs */
 
-#define ZFS_TEARDOWN_INIT(zfsvfs)               \
-        rrm_init(&(zfsvfs)->z_teardown_lock, B_FALSE)
+#define	ZFS_TEARDOWN_INIT(zfsvfs)               \
+	rrm_init(&(zfsvfs)->z_teardown_lock, B_FALSE)
 
-#define ZFS_TEARDOWN_DESTROY(zfsvfs)            \
-        rrm_destroy(&(zfsvfs)->z_teardown_lock)
+#define	ZFS_TEARDOWN_DESTROY(zfsvfs)            \
+	rrm_destroy(&(zfsvfs)->z_teardown_lock)
 
-#define ZFS_TEARDOWN_TRY_ENTER_READ(zfsvfs)     \
-        rw_tryenter(&(zfsvfs)->z_teardown_lock, RW_READER)
+#define	ZFS_TEARDOWN_ENTER_READ(zfsvfs, tag)    \
+	rrm_enter_read(&(zfsvfs)->z_teardown_lock, tag);
 
-#define ZFS_TEARDOWN_ENTER_READ(zfsvfs, tag)    \
-        rrm_enter_read(&(zfsvfs)->z_teardown_lock, tag);
+#define	ZFS_TEARDOWN_EXIT_READ(zfsvfs, tag)     \
+	rrm_exit(&(zfsvfs)->z_teardown_lock, tag)
 
-#define ZFS_TEARDOWN_EXIT_READ(zfsvfs, tag)     \
-        rrm_exit(&(zfsvfs)->z_teardown_lock, tag)
+#define	ZFS_TEARDOWN_ENTER_WRITE(zfsvfs, tag)   \
+	rrm_enter(&(zfsvfs)->z_teardown_lock, RW_WRITER, tag)
 
-#define ZFS_TEARDOWN_ENTER_WRITE(zfsvfs, tag)   \
-        rrm_enter(&(zfsvfs)->z_teardown_lock, RW_WRITER, tag)
+#define	ZFS_TEARDOWN_EXIT_WRITE(zfsvfs)         \
+	rrm_exit(&(zfsvfs)->z_teardown_lock, tag)
 
-#define ZFS_TEARDOWN_EXIT_WRITE(zfsvfs)         \
-        rrm_exit(&(zfsvfs)->z_teardown_lock, tag)
+#define	ZFS_TEARDOWN_EXIT(zfsvfs, tag)          \
+	rrm_exit(&(zfsvfs)->z_teardown_lock, tag)
 
-#define ZFS_TEARDOWN_EXIT(zfsvfs, tag)          \
-        rrm_exit(&(zfsvfs)->z_teardown_lock, tag)
+#define	ZFS_TEARDOWN_READ_HELD(zfsvfs)          \
+	RRM_READ_HELD(&(zfsvfs)->z_teardown_lock)
 
-#define ZFS_TEARDOWN_READ_HELD(zfsvfs)          \
-        RRM_READ_HELD(&(zfsvfs)->z_teardown_lock)
+#define	ZFS_TEARDOWN_WRITE_HELD(zfsvfs)         \
+	RRM_WRITE_HELD(&(zfsvfs)->z_teardown_lock)
 
-#define ZFS_TEARDOWN_WRITE_HELD(zfsvfs)         \
-        RRM_WRITE_HELD(&(zfsvfs)->z_teardown_lock)
-
-#define ZFS_TEARDOWN_HELD(zfsvfs)               \
-        RRM_LOCK_HELD(&(zfsvfs)->z_teardown_lock)
+#define	ZFS_TEARDOWN_HELD(zfsvfs)               \
+	RRM_LOCK_HELD(&(zfsvfs)->z_teardown_lock)
 
 /*
  * Normal filesystems (those not under .zfs/snapshot) have a total
@@ -242,8 +245,6 @@ extern int zfs_suspend_fs(zfsvfs_t *zfsvfs);
 extern int zfs_resume_fs(zfsvfs_t *zfsvfs, struct dsl_dataset *ds);
 extern int zfs_userspace_one(zfsvfs_t *zfsvfs, zfs_userquota_prop_t type,
     const char *domain, uint64_t rid, uint64_t *valuep);
-extern int zfs_userspace_many(zfsvfs_t *zfsvfs, zfs_userquota_prop_t type,
-    uint64_t *cookiep, void *vbuf, uint64_t *bufsizep);
 extern int zfs_set_userquota(zfsvfs_t *zfsvfs, zfs_userquota_prop_t type,
     const char *domain, uint64_t rid, uint64_t quota);
 extern boolean_t zfs_owner_overquota(zfsvfs_t *zfsvfs, struct znode *,
@@ -262,11 +263,6 @@ extern void zfs_sb_free(zfsvfs_t *zfsvfs);
 extern int zfs_check_global_label(const char *dsname, const char *hexsl);
 extern boolean_t zfs_is_readonly(zfsvfs_t *zfsvfs);
 
-
-
-
-extern int  zfs_vfs_init(struct vfsconf *vfsp);
-extern int  zfs_vfs_start(struct mount *mp, int flags, vfs_context_t context);
 extern int  zfs_vfs_mount(struct mount *mp, vnode_t *devvp,
     user_addr_t data, vfs_context_t context);
 extern int  zfs_vfs_unmount(struct mount *mp, int mntflags,
@@ -300,6 +296,8 @@ extern int zfs_get_temporary_prop(dsl_dataset_t *ds, zfs_prop_t zfs_prop,
     uint64_t *val, char *setpoint);
 
 extern int zfs_end_fs(zfsvfs_t *zfsvfs, struct dsl_dataset *ds);
+extern int zfs_set_default_quota(zfsvfs_t *zfsvfs, zfs_prop_t zfs_prop,
+    uint64_t quota);
 
 #ifdef	__cplusplus
 }

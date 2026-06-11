@@ -74,13 +74,24 @@ spl_cv_signal(kcondvar_t *cvp)
 	if (cvp->cv_initialised != CONDVAR_INIT)
 		panic("%s: not cv_initialised", __func__);
 
-	uint32_t have_waiters = cvp->cv_waiters_count > 0;
-
-	if (have_waiters)
-		KeSetEvent(&cvp->cv_kevent[CV_SIGNAL], 0, FALSE);
+	/*
+	 * Always set the event even when cv_waiters_count == 0.  A thread may
+	 * be about to call spl_cv_wait() but hasn't incremented the counter
+	 * yet (it increments before releasing the mutex).  Because the caller
+	 * holds the same mutex, the signal cannot arrive between the counter
+	 * increment and the KeWaitForMultipleObjects call — but it CAN arrive
+	 * before the counter increment if the signaller holds the mutex while
+	 * calling us and the waiter hasn't acquired it yet.  Skipping
+	 * KeSetEvent in that window causes a missed wakeup.
+	 *
+	 * CV_SIGNAL is a SynchronizationEvent (auto-reset): it auto-clears
+	 * after waking one waiter, so there is no spurious-wakeup accumulation
+	 * risk from always setting it.
+	 */
+	KeSetEvent(&cvp->cv_kevent[CV_SIGNAL], 0, FALSE);
 }
 
-// WakeConditionVariable or WakeAllConditionVariable function.
+/* WakeConditionVariable or WakeAllConditionVariable function. */
 
 void
 spl_cv_broadcast(kcondvar_t *cvp)
@@ -88,10 +99,27 @@ spl_cv_broadcast(kcondvar_t *cvp)
 	if (cvp->cv_initialised != CONDVAR_INIT)
 		panic("%s: not cv_initialised", __func__);
 
-	int have_waiters = cvp->cv_waiters_count > 0;
-
-	if (have_waiters)
-		KeSetEvent(&cvp->cv_kevent[CV_BROADCAST], 0, FALSE);
+	/*
+	 * Always set the event even when cv_waiters_count == 0.  The classic
+	 * missed-wakeup scenario:
+	 *
+	 *   txg_sync_thread (holds tx_sync_lock):
+	 *     cv_broadcast(&tx->tx_quiesce_more_cv)   // cv_waiters_count == 0
+	 *     → spl_cv_broadcast skips KeSetEvent      // < BUG: signal lost
+	 *     cv_wait(tx_quiesce_done_cv, ...)         // releases lock, sleeps
+	 *
+	 *   txg_quiesce_thread (acquires tx_sync_lock):
+	 *     cv_wait(tx_quiesce_more_cv, ...)   // increments count, sleeps
+	 *     → broadcast event never set → hangs forever
+	 *
+	 * CV_BROADCAST is a NotificationEvent (manual-reset): it remains set
+	 * until KeClearEvent is called by the last exiting waiter (which holds
+	 * the same mutex as the broadcaster), so there is no accumulation of
+	 * stale signals across unrelated wait cycles.  All callers already wrap
+	 * cv_wait in a while loop that re-checks the condition, so a spurious
+	 * wakeup from a stale broadcast is always handled correctly.
+	 */
+	KeSetEvent(&cvp->cv_kevent[CV_BROADCAST], 0, FALSE);
 }
 
 /*
@@ -117,17 +145,40 @@ spl_cv_wait(kcondvar_t *cvp, kmutex_t *mp, int flags, const char *msg)
 	void *locks[CV_MAX_EVENTS] =
 		{ &cvp->cv_kevent[CV_SIGNAL], &cvp->cv_kevent[CV_BROADCAST] };
 
-	result = KeWaitForMultipleObjects(2, locks, WaitAny, Executive,
-	    KernelMode, FALSE, NULL, NULL);
+	LARGE_INTEGER timeout;
+	timeout.QuadPart = -10000000LL;  // 1s
 
-	// If last listener, clear BROADCAST event. (Even if it was SIGNAL
-	// overclearing will not hurt?)
+	/*
+	 * This variant blocks forever, unless PCATCH is supplied
+	 * (the cv_wait_sig() variant, then we need to periodically
+	 * surface to see if the process has been told to terminate
+	 */
+	do {
+
+		result = KeWaitForMultipleObjects(CV_MAX_EVENTS,
+		    locks, WaitAny, Executive, KernelMode, FALSE,
+		    (flags & PCATCH) ? &timeout : NULL, NULL);
+
+		if (PsIsThreadTerminating(PsGetCurrentThread()))
+			result = STATUS_ALERTED;
+
+	} while (result == STATUS_TIMEOUT);
+
 	mutex_enter(mp);
 
-	if (cvp->cv_waiters_count == 1)
-		KeClearEvent(&cvp->cv_kevent[CV_BROADCAST]);
-
 	atomic_dec_32(&cvp->cv_waiters_count);
+
+	/*
+	 * If we were the last waiter and we woke on the broadcast event,
+	 * clear it so stale signals don't cause spurious wakeups for the
+	 * next unrelated wait cycle.  We do this after decrementing the
+	 * counter (and while still holding mp) so that a concurrent
+	 * cv_broadcast() — which also runs under mp — cannot have its
+	 * KeSetEvent silently undone by our KeClearEvent.
+	 */
+	if (result == STATUS_WAIT_0 + CV_BROADCAST &&
+	    cvp->cv_waiters_count == 0)
+		KeClearEvent(&cvp->cv_kevent[CV_BROADCAST]);
 
 #ifdef SPL_DEBUG_MUTEX
 	spl_wdlist_settime(mp->leak, gethrestime_sec());
@@ -186,19 +237,21 @@ spl_cv_timedwait(kcondvar_t *cvp, kmutex_t *mp, clock_t tim, int flags,
 	void *locks[CV_MAX_EVENTS] =
 		{ &cvp->cv_kevent[CV_SIGNAL], &cvp->cv_kevent[CV_BROADCAST] };
 
-	result = KeWaitForMultipleObjects(2, locks, WaitAny, Executive,
-	    KernelMode, FALSE, &timeout, NULL);
-
-	int last_waiter =
-	    result == STATUS_WAIT_0 + CV_BROADCAST &&
-	    cvp->cv_waiters_count == 1;
-
-	if (last_waiter)
-		KeClearEvent(&cvp->cv_kevent[CV_BROADCAST]);
+	result = KeWaitForMultipleObjects(CV_MAX_EVENTS, locks, WaitAny,
+	    Executive, KernelMode, FALSE, &timeout, NULL);
 
 	atomic_dec_32(&cvp->cv_waiters_count);
 
 	mutex_enter(mp);
+
+	/*
+	 * Clear the broadcast event only after reacquiring the mutex so that
+	 * a concurrent cv_broadcast() (which also runs under that mutex) cannot
+	 * race with KeClearEvent and have its KeSetEvent silently undone.
+	 */
+	if (result == STATUS_WAIT_0 + CV_BROADCAST &&
+	    cvp->cv_waiters_count == 0)
+		KeClearEvent(&cvp->cv_kevent[CV_BROADCAST]);
 
 #ifdef SPL_DEBUG_MUTEX
 	spl_wdlist_settime(mp->leak, gethrestime_sec());
@@ -260,19 +313,21 @@ cv_timedwait_hires(kcondvar_t *cvp, kmutex_t *mp, hrtime_t tim,
 	void *locks[CV_MAX_EVENTS] =
 	    { &cvp->cv_kevent[CV_SIGNAL], &cvp->cv_kevent[CV_BROADCAST] };
 
-	result = KeWaitForMultipleObjects(2, locks, WaitAny, Executive,
-	    KernelMode, FALSE, &timeout, NULL);
-
-	int last_waiter =
-	    result == STATUS_WAIT_0 + CV_BROADCAST &&
-	    cvp->cv_waiters_count == 1;
-
-	if (last_waiter)
-		KeClearEvent(&cvp->cv_kevent[CV_BROADCAST]);
+	result = KeWaitForMultipleObjects(CV_MAX_EVENTS, locks, WaitAny,
+	    Executive, KernelMode, FALSE, &timeout, NULL);
 
 	atomic_dec_32(&cvp->cv_waiters_count);
 
 	mutex_enter(mp);
+
+	/*
+	 * Clear the broadcast event only after reacquiring the mutex so that
+	 * a concurrent cv_broadcast() (which also runs under that mutex) cannot
+	 * race with KeClearEvent and have its KeSetEvent silently undone.
+	 */
+	if (result == STATUS_WAIT_0 + CV_BROADCAST &&
+	    cvp->cv_waiters_count == 0)
+		KeClearEvent(&cvp->cv_kevent[CV_BROADCAST]);
 
 #ifdef SPL_DEBUG_MUTEX
 	spl_wdlist_settime(mp->leak, gethrestime_sec());

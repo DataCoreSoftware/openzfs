@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -136,7 +137,8 @@ bptree_add(objset_t *os, uint64_t obj, blkptr_t *bp, uint64_t birth_txg,
 	bte = kmem_zalloc(sizeof (*bte), KM_SLEEP);
 	bte->be_birth_txg = birth_txg;
 	bte->be_bp = *bp;
-	dmu_write(os, obj, bt->bt_end * sizeof (*bte), sizeof (*bte), bte, tx);
+	dmu_write(os, obj, bt->bt_end * sizeof (*bte), sizeof (*bte), bte, tx,
+	    DMU_READ_NO_PREFETCH);
 	kmem_free(bte, sizeof (*bte));
 
 	dmu_buf_will_dirty(db, tx);
@@ -147,11 +149,11 @@ bptree_add(objset_t *os, uint64_t obj, blkptr_t *bp, uint64_t birth_txg,
 	dmu_buf_rele(db, FTAG);
 }
 
-/* ARGSUSED */
 static int
 bptree_visit_cb(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
     const zbookmark_phys_t *zb, const dnode_phys_t *dnp, void *arg)
 {
+	(void) zilog, (void) dnp;
 	int err;
 	struct bptree_args *ba = arg;
 
@@ -246,7 +248,8 @@ bptree_iterate(objset_t *os, uint64_t obj, boolean_t free, bptree_itor_t func,
 				    ZB_DESTROYED_OBJSET);
 				ASSERT0(bte.be_zb.zb_level);
 				dmu_write(os, obj, i * sizeof (bte),
-				    sizeof (bte), &bte, tx);
+				    sizeof (bte), &bte, tx,
+				    DMU_READ_NO_PREFETCH);
 				if (err == EIO || err == ECKSUM ||
 				    err == ENXIO) {
 					/*
@@ -268,7 +271,8 @@ bptree_iterate(objset_t *os, uint64_t obj, boolean_t free, bptree_itor_t func,
 				 */
 				bte.be_birth_txg = UINT64_MAX;
 				dmu_write(os, obj, i * sizeof (bte),
-				    sizeof (bte), &bte, tx);
+				    sizeof (bte), &bte, tx,
+				    DMU_READ_NO_PREFETCH);
 			}
 
 			if (!ioerr) {

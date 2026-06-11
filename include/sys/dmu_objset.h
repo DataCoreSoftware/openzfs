@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -72,6 +73,10 @@ struct dmu_tx;
  */
 #define	OBJSET_CRYPT_PORTABLE_FLAGS_MASK	(0)
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wgnu-variable-sized-type-not-at-end"
+#endif
 typedef struct objset_phys {
 	dnode_phys_t os_meta_dnode;
 	zil_header_t os_zil_header;
@@ -88,6 +93,9 @@ typedef struct objset_phys {
 	char os_pad1[OBJSET_PHYS_SIZE_V3 - OBJSET_PHYS_SIZE_V2 -
 	    sizeof (dnode_phys_t)];
 } objset_phys_t;
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 typedef int (*dmu_objset_upgrade_cb_t)(objset_t *);
 
@@ -125,7 +133,9 @@ struct objset {
 	zfs_logbias_op_t os_logbias;
 	zfs_cache_type_t os_primary_cache;
 	zfs_cache_type_t os_secondary_cache;
+	zfs_prefetch_type_t os_prefetch;
 	zfs_sync_type_t os_sync;
+	zfs_direct_t os_direct;
 	zfs_redundant_metadata_type_t os_redundant_metadata;
 	uint64_t os_recordsize;
 	/*
@@ -142,7 +152,7 @@ struct objset {
 	 * The largest zpl file block allowed in special class.
 	 * cached here instead of zfsvfs for easier access.
 	 */
-	int os_zpl_special_smallblock;
+	uint64_t os_zpl_special_smallblock;
 
 	/*
 	 * Pointer is constant; the blkptr it points to is protected by
@@ -200,24 +210,20 @@ struct objset {
 #define	DMU_GROUPUSED_DNODE(os)	((os)->os_groupused_dnode.dnh_dnode)
 #define	DMU_PROJECTUSED_DNODE(os) ((os)->os_projectused_dnode.dnh_dnode)
 
-#define	DMU_OS_IS_L2CACHEABLE(os)				\
-	((os)->os_secondary_cache == ZFS_CACHE_ALL ||		\
-	(os)->os_secondary_cache == ZFS_CACHE_METADATA)
-
 /* called from zpl */
-int dmu_objset_hold(const char *name, void *tag, objset_t **osp);
-int dmu_objset_hold_flags(const char *name, boolean_t decrypt, void *tag,
+int dmu_objset_hold(const char *name, const void *tag, objset_t **osp);
+int dmu_objset_hold_flags(const char *name, boolean_t decrypt, const void *tag,
     objset_t **osp);
 int dmu_objset_own(const char *name, dmu_objset_type_t type,
-    boolean_t readonly, boolean_t decrypt, void *tag, objset_t **osp);
+    boolean_t readonly, boolean_t decrypt, const void *tag, objset_t **osp);
 int dmu_objset_own_obj(struct dsl_pool *dp, uint64_t obj,
     dmu_objset_type_t type, boolean_t readonly, boolean_t decrypt,
-    void *tag, objset_t **osp);
+    const void *tag, objset_t **osp);
 void dmu_objset_refresh_ownership(struct dsl_dataset *ds,
-    struct dsl_dataset **newds, boolean_t decrypt, void *tag);
-void dmu_objset_rele(objset_t *os, void *tag);
-void dmu_objset_rele_flags(objset_t *os, boolean_t decrypt, void *tag);
-void dmu_objset_disown(objset_t *os, boolean_t decrypt, void *tag);
+    struct dsl_dataset **newds, boolean_t decrypt, const void *tag);
+void dmu_objset_rele(objset_t *os, const void *tag);
+void dmu_objset_rele_flags(objset_t *os, boolean_t decrypt, const void *tag);
+void dmu_objset_disown(objset_t *os, boolean_t decrypt, const void *tag);
 int dmu_objset_from_ds(struct dsl_dataset *ds, objset_t **osp);
 
 void dmu_objset_stats(objset_t *os, nvlist_t *nv);

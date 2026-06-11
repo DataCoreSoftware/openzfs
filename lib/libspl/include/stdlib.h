@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -7,7 +8,7 @@
  * with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -29,6 +30,14 @@
 #ifndef _LIBSPL_STDLIB_H
 #define	_LIBSPL_STDLIB_H
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 extern const char *getexecname(void);
+
+#ifdef  __cplusplus
+}
+#endif
 
 #endif

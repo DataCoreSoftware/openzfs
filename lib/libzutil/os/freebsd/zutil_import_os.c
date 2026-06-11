@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -61,7 +62,6 @@
 #include <fcntl.h>
 
 #include <sys/efi_partition.h>
-#include <thread_pool.h>
 #include <libgeom.h>
 
 #include <sys/vdev_impl.h>
@@ -243,7 +243,31 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 }
 
 int
-zfs_dev_flush(int fd __unused)
+zfs_dev_flush(int fd)
 {
+	(void) fd;
 	return (0);
+}
+
+void
+update_vdev_config_dev_sysfs_path(nvlist_t *nv, const char *path,
+    const char *key)
+{
+	(void) nv;
+	(void) path;
+	(void) key;
+}
+
+void
+update_vdevs_config_dev_sysfs_path(nvlist_t *config)
+{
+	(void) config;
+}
+
+int
+zpool_disk_wait(const char *path)
+{
+
+	(void) path;
+	return (ENOTSUP);
 }

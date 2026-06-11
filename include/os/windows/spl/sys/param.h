@@ -31,4 +31,16 @@
 
 #define	MAXUID				UINT32_MAX
 
+#define	PAGESHIFT	PAGE_SHIFT
+
+/*
+ * hz is the timer frequency (ticks/sec). On Windows we use 119 to match
+ * the lbolt approximation: gethrtime() >> 23 gives ~119 ticks/sec.
+ * Defined here (rather than condvar.h) so it is visible to all kernel
+ * modules that include sys/param.h without needing sys/condvar.h.
+ */
+#ifndef hz
+#define	hz	119
+#endif
+
 #endif /* SPL_PARAM_H */

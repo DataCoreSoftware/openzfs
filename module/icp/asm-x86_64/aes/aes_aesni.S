@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: OpenSSL-standalone
 /*
  * ====================================================================
  * Written by Intel Corporation for the OpenSSL project to add support
@@ -154,26 +155,26 @@
 
 #include <sys/types.h>
 
-/* ARGSUSED */
 void
 aes_encrypt_intel(const uint32_t rk[], int Nr, const uint32_t pt[4],
     uint32_t ct[4]) {
+	(void) rk, (void) Nr, (void) pt, (void) ct;
 }
-/* ARGSUSED */
 void
 aes_decrypt_intel(const uint32_t rk[], int Nr, const uint32_t ct[4],
     uint32_t pt[4]) {
+	(void) rk, (void) Nr, (void) ct, (void) pt;
 }
-/* ARGSUSED */
 int
 rijndael_key_setup_enc_intel(uint32_t rk[], const uint32_t cipherKey[],
     uint64_t keyBits) {
+	(void) rk, (void) cipherKey, (void) keyBits;
 	return (0);
 }
-/* ARGSUSED */
 int
 rijndael_key_setup_dec_intel(uint32_t rk[], const uint32_t cipherKey[],
    uint64_t keyBits) {
+	(void) rk, (void) cipherKey, (void) keyBits;
 	return (0);
 }
 
@@ -208,7 +209,7 @@ _key_expansion_256a_local:
 	pxor	%xmm1, %xmm0
 	movups	%xmm0, (%rcx)
 	add	$0x10, %rcx
-	ret
+	RET
 	nop
 SET_SIZE(_key_expansion_128)
 SET_SIZE(_key_expansion_256a)
@@ -236,7 +237,7 @@ _key_expansion_192a_local:
 	shufps	$0b01001110, %xmm2, %xmm1
 	movups	%xmm1, 0x10(%rcx)
 	add	$0x20, %rcx
-	ret
+	RET
 SET_SIZE(_key_expansion_192a)
 
 
@@ -257,7 +258,7 @@ _key_expansion_192b_local:
 
 	movups	%xmm0, (%rcx)
 	add	$0x10, %rcx
-	ret
+	RET
 SET_SIZE(_key_expansion_192b)
 
 
@@ -271,7 +272,7 @@ _key_expansion_256b_local:
 	pxor	%xmm1, %xmm2
 	movups	%xmm2, (%rcx)
 	add	$0x10, %rcx
-	ret
+	RET
 SET_SIZE(_key_expansion_256b)
 
 
@@ -376,9 +377,9 @@ rijndael_key_setup_enc_intel_local:
 	mov	$14, %rax			// return # rounds = 14
 #endif
 	FRAME_END
-	ret
+	RET
 
-.align 4
+.balign 4
 .Lenc_key192:
 	cmp	$192, %KEYSIZE32
 	jnz	.Lenc_key128
@@ -413,9 +414,9 @@ rijndael_key_setup_enc_intel_local:
 	mov	$12, %rax			// return # rounds = 12
 #endif
 	FRAME_END
-	ret
+	RET
 
-.align 4
+.balign 4
 .Lenc_key128:
 	cmp $128, %KEYSIZE32
 	jnz .Lenc_key_invalid_key_bits
@@ -453,13 +454,13 @@ rijndael_key_setup_enc_intel_local:
 	mov	$10, %rax			// return # rounds = 10
 #endif
 	FRAME_END
-	ret
+	RET
 
 .Lenc_key_invalid_param:
 #ifdef	OPENSSL_INTERFACE
 	mov	$-1, %rax	// user key or AES key pointer is NULL
 	FRAME_END
-	ret
+	RET
 #else
 	/* FALLTHROUGH */
 #endif	/* OPENSSL_INTERFACE */
@@ -471,7 +472,7 @@ rijndael_key_setup_enc_intel_local:
 	xor	%rax, %rax	// a key pointer is NULL or invalid keysize
 #endif	/* OPENSSL_INTERFACE */
 	FRAME_END
-	ret
+	RET
 	SET_SIZE(rijndael_key_setup_enc_intel)
 
 
@@ -522,7 +523,7 @@ FRAME_BEGIN
 	add	%AESKEY, %ROUNDS64
 	mov	%ROUNDS64, %ENDAESKEY
 
-.align 4
+.balign 4
 .Ldec_key_reorder_loop:
 	movups	(%AESKEY), %xmm0
 	movups	(%ROUNDS64), %xmm1
@@ -533,7 +534,7 @@ FRAME_BEGIN
 	cmp	%AESKEY, %ROUNDS64
 	ja	.Ldec_key_reorder_loop
 
-.align 4
+.balign 4
 .Ldec_key_inv_loop:
 	movups	(%rcx), %xmm0
 	// Convert an encryption round key to a form usable for decryption
@@ -548,7 +549,7 @@ FRAME_BEGIN
 	// OpenSolaris: rax = # rounds (10, 12, or 14) or 0 for error
 	// OpenSSL: rax = 0 for OK, or non-zero for error
 	FRAME_END
-	ret
+	RET
 	SET_SIZE(rijndael_key_setup_dec_intel)
 
 
@@ -622,7 +623,7 @@ ENTRY_NP(aes_encrypt_intel)
 	movups	-0x50(%KEYP), %KEY
 	aesenc	%KEY, %STATE
 
-.align 4
+.balign 4
 .Lenc192:
 	// AES 192 and 256
 	movups	-0x40(%KEYP), %KEY
@@ -630,7 +631,7 @@ ENTRY_NP(aes_encrypt_intel)
 	movups	-0x30(%KEYP), %KEY
 	aesenc	%KEY, %STATE
 
-.align 4
+.balign 4
 .Lenc128:
 	// AES 128, 192, and 256
 	movups	-0x20(%KEYP), %KEY
@@ -655,7 +656,7 @@ ENTRY_NP(aes_encrypt_intel)
 	aesenclast	 %KEY, %STATE		// last round
 	movups	%STATE, (%OUTP)			// output
 
-	ret
+	RET
 	SET_SIZE(aes_encrypt_intel)
 
 
@@ -705,7 +706,7 @@ ENTRY_NP(aes_decrypt_intel)
 	movups	-0x50(%KEYP), %KEY
 	aesdec	%KEY, %STATE
 
-.align 4
+.balign 4
 .Ldec192:
 	// AES 192 and 256
 	movups	-0x40(%KEYP), %KEY
@@ -713,7 +714,7 @@ ENTRY_NP(aes_decrypt_intel)
 	movups	-0x30(%KEYP), %KEY
 	aesdec	%KEY, %STATE
 
-.align 4
+.balign 4
 .Ldec128:
 	// AES 128, 192, and 256
 	movups	-0x20(%KEYP), %KEY
@@ -738,7 +739,7 @@ ENTRY_NP(aes_decrypt_intel)
 	aesdeclast	%KEY, %STATE		// last round
 	movups	%STATE, (%OUTP)			// output
 
-	ret
+	RET
 	SET_SIZE(aes_decrypt_intel)
 
 #endif	/* lint || __lint */

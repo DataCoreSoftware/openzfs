@@ -10,6 +10,14 @@ find_package(WDK REQUIRED)
 
 option(BUILD_SHARED_LIBS "Build Shared Libraries" OFF)
 
+if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "AMD64")
+	set(OPENSSL_CRYPTO_LIBRARY "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MTd/libcrypto_static.lib")
+	set(OPENSSL_SSL_LIBRARY "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MTd/libssl_static.lib")
+elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
+	set(OPENSSL_CRYPTO_LIBRARY "C:/Program Files/OpenSSL-Win64-ARM/lib/VC/arm64/MTd/libcrypto_static.lib")
+	set(OPENSSL_SSL_LIBRARY "C:/Program Files/OpenSSL-Win64-ARM/lib/VC/arm64/MTd/libssl_static.lib")
+endif()
+
 set(OPENSSL_USE_STATIC_LIBS TRUE)
 set(OPENSSL_MSVC_STATIC_RT TRUE)
 find_package(OpenSSL REQUIRED)
@@ -21,27 +29,32 @@ find_package(OpenSSL REQUIRED)
 #get_filename_component(rootPath "${OPENSSL_CRYPTO_LIBRARY}" DIRECTORY)
 #message(STATUS "OpenSSL root: " ${rootPath})
 
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-	find_library(ISAL isa-l_crypto_static HINTS "${CMAKE_SOURCE_DIR}/lib/ISA-L/Debug" REQUIRED)
-elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-	find_library(ISAL isa-l_crypto_static HINTS "${CMAKE_SOURCE_DIR}/lib/ISA-L/Release" REQUIRED)
-endif()
 
 # Attempt to simulate scripts/make-gitrev.h and zfs_gitrev.h
 include(GetGitRevisionDescription)
+# Take this out, or all cherry-picks do full recompile.
+# get_git_head_revision(GIT_REFSPEC GIT_HASH)
 git_describe_working_tree(GIT_GITREV)
-configure_file("${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h.in" "${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h" @ONLY)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h.win" "${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h" @ONLY)
 #
 
 function(use_clang)
 # It seems "-include file" is "/FI file" on Windows
-add_compile_options(/FI ${CMAKE_SOURCE_DIR}/include/os/windows/zfs/zfs_config.h)
+add_compile_options(/FI
+	${CMAKE_SOURCE_DIR}/include/os/windows/zfs/zfs_config.h
+)
 set(CMAKE_C_COMPILER clang-cl.exe PARENT_SCOPE)
 set(CMAKE_CXX_COMPILER clang-cl.exe PARENT_SCOPE)
-if(CMAKE_SIZEOF_VOID_P EQUAL 4)
-	add_compile_options(-m32)
+
+if (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x86")
+		add_compile_options(-m32)
+elseif (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
+		add_definitions(-D_LP64 -D__LP64__)
+		add_compile_options(-m64)
+elseif (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64") # all except wdk_add_library
+		add_compile_options(-target aarch64-pc-windows-msvc)
 else()
-	add_compile_options(-m64)
+	message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
 add_compile_options(
@@ -53,38 +66,57 @@ add_compile_options(
 	-Wno-microsoft-enum-forward-reference
 	-Wno-visibility
 	-Wno-microsoft-anon-tag
-	-Wno-ignored-attributes
+	# -Wno-ignored-attributes
 	-Wno-unused-command-line-argument
 	-Wno-unused-local-typedef
 	-Wno-int-to-void-pointer-cast
 	# ZFS related
-	-Wno-misleading-indentation
-	-Wno-dangling-else
 	-Wno-missing-field-initializers
 	#-fms-extensions
 	-Wno-unused-function
 	-Wno-unused-label
+	#Visual Studio 2022 update 2022114 started breaking builds with errors
+	-Wno-int-conversion
+	-Wunknown-pragmas
 )
+
+add_compile_options(/Zi /Od /Oy- /Zo /Ob0)
+add_link_options(/DEBUG:FULL /INCREMENTAL /OPT:NOREF /OPT:NOICF)
+
 endfunction()
 
-if(CMAKE_SIZEOF_VOID_P EQUAL 4)
-    add_definitions(-D__x86_32__ -D__i386 -D__i386__ -D_LP32 -DWIN32)
-elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    add_definitions(-D__x86_64__ -D_LP64 -D__LP64__ -D__x86_64 -D_AMD64_ -D_WIN64 -DAMD64 -DWIN64)
+string(CONCAT WDK_LINK_FLAGS
+	"/DEBUG "
+)
+if (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x86")
+		list(APPEND WDK_COMPILE_DEFINITIONS	_KERNEL __KERNEL__ _LP32 __LP32__)
+		list(APPEND WDK_COMPILE_FLAGS
+			/Z7
+			-m32
+		)
+elseif (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
+		list(APPEND WDK_COMPILE_DEFINITIONS	_KERNEL __KERNEL__ _LP64 __LP64__)
+		list(APPEND WDK_COMPILE_FLAGS
+			/Z7
+			-m64
+		)
+elseif (CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64") # all except wdk_add_library
+		list(APPEND WDK_COMPILE_DEFINITIONS	_KERNEL __KERNEL__ ARM64 _ARM64_ __aarch64__ _M_ARM64 _LP64 __LP64__)
+		list(APPEND WDK_COMPILE_FLAGS
+			/Z7
+			--target=arm64-windows-msvc
+		)
 else()
-    message(FATAL_ERROR "Unsupported architecture")
+	message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_definitions(-DDBG -DZFS_DEBUG)
-    SET(CMAKE_INSTALL_BINDIR "Debug")
-else()
-    SET(CMAKE_INSTALL_BINDIR "Release")
 endif()
 
 # Avoid dependency add_compile_definitions vcruntime140.dll
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MT")
-set(CMAKE_C_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd")
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /MTd")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MT")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd")
 

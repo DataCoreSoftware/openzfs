@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -60,7 +61,7 @@ typedef struct bpobj {
 	kmutex_t	bpo_lock;
 	objset_t	*bpo_os;
 	uint64_t	bpo_object;
-	int		bpo_epb;
+	uint32_t	bpo_epb;
 	uint8_t		bpo_havecomp;
 	uint8_t		bpo_havesubobj;
 	uint8_t		bpo_havefreed;
@@ -87,6 +88,7 @@ int livelist_bpobj_iterate_from_nofree(bpobj_t *bpo, bpobj_itor_t func,
     void *arg, int64_t start);
 
 void bpobj_enqueue_subobj(bpobj_t *bpo, uint64_t subobj, dmu_tx_t *tx);
+void bpobj_prefetch_subobj(bpobj_t *bpo, uint64_t subobj);
 void bpobj_enqueue(bpobj_t *bpo, const blkptr_t *bp, boolean_t bp_freed,
     dmu_tx_t *tx);
 

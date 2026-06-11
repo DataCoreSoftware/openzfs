@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -108,20 +109,9 @@
 #include <sys/cmn_err.h>
 #include <sys/mod.h>
 
-/*
- * Small arrays to translate between balance (or diff) values and child indices.
- *
- * Code that deals with binary tree data structures will randomly use
- * left and right children when examining a tree.  C "if()" statements
- * which evaluate randomly suffer from very poor hardware branch prediction.
- * In this code we avoid some of the branch mispredictions by using the
- * following translation arrays. They replace random branches with an
- * additional memory reference. Since the translation arrays are both very
- * small the data should remain efficiently in cache.
- */
-static const int  avl_child2balance[2]	= {-1, 1};
-static const int  avl_balance2child[]	= {0, 0, 1};
-
+#ifndef _KERNEL
+#include <string.h>
+#endif
 
 /*
  * Walk from one node to the previous valued node (ie. an infix walk
@@ -235,7 +225,7 @@ avl_nearest(avl_tree_t *tree, avl_index_t where, int direction)
 	size_t off = tree->avl_offset;
 
 	if (node == NULL) {
-		ASSERT(tree->avl_root == NULL);
+		ASSERT0P(tree->avl_root);
 		return (NULL);
 	}
 	data = AVL_NODE2DATA(node, off);
@@ -278,8 +268,7 @@ avl_find(avl_tree_t *tree, const void *value, avl_index_t *where)
 #endif
 			return (AVL_NODE2DATA(node, off));
 		}
-		child = avl_balance2child[1 + diff];
-
+		child = (diff > 0);
 	}
 
 	if (where != NULL)
@@ -319,7 +308,6 @@ avl_rotation(avl_tree_t *tree, avl_node_t *node, int balance)
 	int which_child = AVL_XCHILD(node);
 	int child_bal = AVL_XBALANCE(child);
 
-	/* BEGIN CSTYLED */
 	/*
 	 * case 1 : node is overly left heavy, the left child is balanced or
 	 * also left heavy. This requires the following rotation.
@@ -345,7 +333,6 @@ avl_rotation(avl_tree_t *tree, avl_node_t *node, int balance)
 	 * we detect this situation by noting that child's balance is not
 	 * right_heavy.
 	 */
-	/* END CSTYLED */
 	if (child_bal != right_heavy) {
 
 		/*
@@ -388,7 +375,6 @@ avl_rotation(avl_tree_t *tree, avl_node_t *node, int balance)
 		return (child_bal == 0);
 	}
 
-	/* BEGIN CSTYLED */
 	/*
 	 * case 2 : When node is left heavy, but child is right heavy we use
 	 * a different rotation.
@@ -420,7 +406,6 @@ avl_rotation(avl_tree_t *tree, avl_node_t *node, int balance)
 	 *	 if gchild was right_heavy, then child is now left heavy
 	 *		else it is balanced
 	 */
-	/* END CSTYLED */
 	gchild = child->avl_child[right];
 	gleft = gchild->avl_child[left];
 	gright = gchild->avl_child[right];
@@ -493,7 +478,7 @@ avl_insert(avl_tree_t *tree, void *new_data, avl_index_t where)
 	size_t off = tree->avl_offset;
 
 #ifdef _LP64
-	ASSERT(((uintptr_t)new_data & 0x7) == 0);
+	ASSERT0(((uintptr_t)new_data & 0x7));
 #endif
 
 	node = AVL_DATA2NODE(new_data, off);
@@ -510,10 +495,10 @@ avl_insert(avl_tree_t *tree, void *new_data, avl_index_t where)
 	AVL_SETBALANCE(node, 0);
 	AVL_SETPARENT(node, parent);
 	if (parent != NULL) {
-		ASSERT(parent->avl_child[which_child] == NULL);
+		ASSERT0P(parent->avl_child[which_child]);
 		parent->avl_child[which_child] = node;
 	} else {
-		ASSERT(tree->avl_root == NULL);
+		ASSERT0P(tree->avl_root);
 		tree->avl_root = node;
 	}
 	/*
@@ -531,7 +516,7 @@ avl_insert(avl_tree_t *tree, void *new_data, avl_index_t where)
 		 * Compute the new balance
 		 */
 		old_balance = AVL_XBALANCE(node);
-		new_balance = old_balance + avl_child2balance[which_child];
+		new_balance = old_balance + (which_child ? 1 : -1);
 
 		/*
 		 * If we introduced equal balance, then we are done immediately
@@ -623,7 +608,7 @@ avl_insert_here(
 		ASSERT(diff > 0 ? child == 1 : child == 0);
 #endif
 	}
-	ASSERT(node->avl_child[child] == NULL);
+	ASSERT0P(node->avl_child[child]);
 
 	avl_insert(tree, new_data, AVL_MKINDEX(node, child));
 }
@@ -697,7 +682,7 @@ avl_remove(avl_tree_t *tree, void *data)
 		 * choose node to swap from whichever side is taller
 		 */
 		old_balance = AVL_XBALANCE(delete);
-		left = avl_balance2child[old_balance + 1];
+		left = (old_balance > 0);
 		right = 1 - left;
 
 		/*
@@ -715,7 +700,7 @@ avl_remove(avl_tree_t *tree, void *data)
 		 */
 		tmp = *node;
 
-		*node = *delete;
+		memcpy(node, delete, sizeof (*node));
 		if (node->avl_child[left] == node)
 			node->avl_child[left] = &tmp;
 
@@ -781,7 +766,7 @@ avl_remove(avl_tree_t *tree, void *data)
 		 */
 		node = parent;
 		old_balance = AVL_XBALANCE(node);
-		new_balance = old_balance - avl_child2balance[which_child];
+		new_balance = old_balance - (which_child ? 1 : -1);
 		parent = AVL_XPARENT(node);
 		which_child = AVL_XCHILD(node);
 
@@ -875,7 +860,6 @@ avl_swap(avl_tree_t *tree1, avl_tree_t *tree2)
 
 	ASSERT3P(tree1->avl_compar, ==, tree2->avl_compar);
 	ASSERT3U(tree1->avl_offset, ==, tree2->avl_offset);
-	ASSERT3U(tree1->avl_size, ==, tree2->avl_size);
 
 	temp_node = tree1->avl_root;
 	temp_numnodes = tree1->avl_numnodes;
@@ -897,26 +881,24 @@ avl_create(avl_tree_t *tree, int (*compar) (const void *, const void *),
 	ASSERT(size > 0);
 	ASSERT(size >= offset + sizeof (avl_node_t));
 #ifdef _LP64
-	ASSERT((offset & 0x7) == 0);
+	ASSERT0((offset & 0x7));
 #endif
 
 	tree->avl_compar = compar;
 	tree->avl_root = NULL;
 	tree->avl_numnodes = 0;
-	tree->avl_size = size;
 	tree->avl_offset = offset;
 }
 
 /*
  * Delete a tree.
  */
-/* ARGSUSED */
 void
 avl_destroy(avl_tree_t *tree)
 {
 	ASSERT(tree);
-	ASSERT(tree->avl_numnodes == 0);
-	ASSERT(tree->avl_root == NULL);
+	ASSERT0(tree->avl_numnodes);
+	ASSERT0P(tree->avl_root);
 }
 
 
@@ -1050,28 +1032,6 @@ done:
 
 	return (AVL_NODE2DATA(node, off));
 }
-
-#if defined(_KERNEL)
-
-static int __init
-avl_init(void)
-{
-	return (0);
-}
-
-static void __exit
-avl_fini(void)
-{
-}
-
-module_init(avl_init);
-module_exit(avl_fini);
-#endif
-
-ZFS_MODULE_DESCRIPTION("Generic AVL tree implementation");
-ZFS_MODULE_AUTHOR(ZFS_META_AUTHOR);
-ZFS_MODULE_LICENSE(ZFS_META_LICENSE);
-ZFS_MODULE_VERSION(ZFS_META_VERSION "-" ZFS_META_RELEASE);
 
 EXPORT_SYMBOL(avl_create);
 EXPORT_SYMBOL(avl_find);

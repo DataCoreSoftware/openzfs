@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -29,6 +30,10 @@
 #include <modes/modes.h>
 #include <aes/aes_impl.h>
 
+#ifdef _WIN32
+extern uint32_t atomic_swap_32(volatile uint32_t *, uint32_t);
+#endif
+
 /*
  * Initialize AES encryption and decryption key schedules.
  *
@@ -47,7 +52,7 @@ aes_init_keysched(const uint8_t *cipherKey, uint_t keyBits, void *keysched)
 	union {
 		uint64_t	ka64[4];
 		uint32_t	ka32[8];
-		} keyarr;
+	} keyarr;
 
 	switch (keyBits) {
 	case 128:
@@ -81,7 +86,7 @@ aes_init_keysched(const uint8_t *cipherKey, uint_t keyBits, void *keysched)
 				keyarr.ka64[i] = *((uint64_t *)&cipherKey[j]);
 			}
 		} else {
-			bcopy(cipherKey, keyarr.ka32, keysize);
+			memcpy(keyarr.ka32, cipherKey, keysize);
 		}
 	} else {
 		/* byte swap */
@@ -132,7 +137,7 @@ aes_encrypt_block(const void *ks, const uint8_t *pt, uint8_t *ct)
 			buffer[2] = htonl(*(uint32_t *)(void *)&pt[8]);
 			buffer[3] = htonl(*(uint32_t *)(void *)&pt[12]);
 		} else
-			bcopy(pt, &buffer, AES_BLOCK_LEN);
+			memcpy(&buffer, pt, AES_BLOCK_LEN);
 
 		ops->encrypt(&ksch->encr_ks.ks32[0], ksch->nr, buffer, buffer);
 
@@ -143,7 +148,7 @@ aes_encrypt_block(const void *ks, const uint8_t *pt, uint8_t *ct)
 			*(uint32_t *)(void *)&ct[8] = htonl(buffer[2]);
 			*(uint32_t *)(void *)&ct[12] = htonl(buffer[3]);
 		} else
-			bcopy(&buffer, ct, AES_BLOCK_LEN);
+			memcpy(ct, &buffer, AES_BLOCK_LEN);
 	}
 	return (CRYPTO_SUCCESS);
 }
@@ -179,7 +184,7 @@ aes_decrypt_block(const void *ks, const uint8_t *ct, uint8_t *pt)
 			buffer[2] = htonl(*(uint32_t *)(void *)&ct[8]);
 			buffer[3] = htonl(*(uint32_t *)(void *)&ct[12]);
 		} else
-			bcopy(ct, &buffer, AES_BLOCK_LEN);
+			memcpy(&buffer, ct, AES_BLOCK_LEN);
 
 		ops->decrypt(&ksch->decr_ks.ks32[0], ksch->nr, buffer, buffer);
 
@@ -190,7 +195,7 @@ aes_decrypt_block(const void *ks, const uint8_t *ct, uint8_t *pt)
 			*(uint32_t *)(void *)&pt[8] = htonl(buffer[2]);
 			*(uint32_t *)(void *)&pt[12] = htonl(buffer[3]);
 		} else
-			bcopy(&buffer, pt, AES_BLOCK_LEN);
+			memcpy(pt, &buffer, AES_BLOCK_LEN);
 	}
 	return (CRYPTO_SUCCESS);
 }
@@ -206,13 +211,12 @@ aes_decrypt_block(const void *ks, const uint8_t *ct, uint8_t *pt)
  * size		Size of key schedule allocated, in bytes
  * kmflag	Flag passed to kmem_alloc(9F); ignored in userland.
  */
-/* ARGSUSED */
 void *
 aes_alloc_keysched(size_t *size, int kmflag)
 {
 	aes_key_t *keysched;
 
-	keysched = (aes_key_t *)kmem_alloc(sizeof (aes_key_t), kmflag);
+	keysched = kmem_alloc(sizeof (aes_key_t), kmflag);
 	if (keysched != NULL) {
 		*size = sizeof (aes_key_t);
 		return (keysched);
@@ -226,7 +230,7 @@ static aes_impl_ops_t aes_fastest_impl = {
 };
 
 /* All compiled in implementations */
-const aes_impl_ops_t *aes_all_impl[] = {
+static const aes_impl_ops_t *aes_all_impl[] = {
 	&aes_generic_impl,
 #if defined(__x86_64)
 #ifndef _WIN32 // No assembler until linking is figured out
@@ -340,7 +344,7 @@ aes_impl_init(void)
 }
 
 static const struct {
-	char *name;
+	const char *name;
 	uint32_t sel;
 } aes_impl_opts[] = {
 		{ "cycle",	IMPL_CYCLE },
@@ -407,7 +411,8 @@ aes_impl_set(const char *val)
 	return (err);
 }
 
-#if defined(_KERNEL) && defined(__linux__)
+#if defined(_KERNEL)
+#if defined(__linux__) || defined(_WIN32)
 
 static int
 icp_aes_impl_set(const char *val, zfs_kernel_param_t *kp)
@@ -422,24 +427,49 @@ icp_aes_impl_get(char *buffer, zfs_kernel_param_t *kp)
 	char *fmt;
 	const uint32_t impl = AES_IMPL_READ(icp_aes_impl);
 
-	ASSERT(aes_impl_initialized);
-
 	/* list mandatory options */
 	for (i = 0; i < ARRAY_SIZE(aes_impl_opts); i++) {
 		fmt = (impl == aes_impl_opts[i].sel) ? "[%s] " : "%s ";
-		cnt += sprintf(buffer + cnt, fmt, aes_impl_opts[i].name);
+		cnt += kmem_scnprintf(buffer + cnt, PAGE_SIZE - cnt, fmt,
+		    aes_impl_opts[i].name);
 	}
 
 	/* list all supported implementations */
 	for (i = 0; i < aes_supp_impl_cnt; i++) {
 		fmt = (i == impl) ? "[%s] " : "%s ";
-		cnt += sprintf(buffer + cnt, fmt, aes_supp_impl[i]->name);
+		cnt += kmem_scnprintf(buffer + cnt, PAGE_SIZE - cnt, fmt,
+		    aes_supp_impl[i]->name);
 	}
 
 	return (cnt);
 }
+#endif /* Linux || Windows */
+
+#ifdef _WIN32
+int
+win32_icp_aes_impl_set(ZFS_MODULE_PARAM_ARGS)
+{
+	static unsigned char str[1024] = "";
+
+	*type = ZT_TYPE_STRING;
+
+	if (set == B_FALSE) {
+		if (aes_impl_initialized)
+			icp_aes_impl_get((char *)str, NULL);
+		*ptr = str;
+		*len = strlen((const char *)str);
+		return (0);
+	}
+
+	ASSERT3P(ptr, !=, NULL);
+
+	aes_impl_set(*ptr);
+
+	return (0);
+}
+#endif /* WIN32 */
 
 module_param_call(icp_aes_impl, icp_aes_impl_set, icp_aes_impl_get,
     NULL, 0644);
 MODULE_PARM_DESC(icp_aes_impl, "Select aes implementation.");
-#endif
+#endif /* KERNEL */

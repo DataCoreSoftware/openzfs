@@ -36,6 +36,10 @@
 #include <sys/taskq.h>
 #include <sys/systeminfo.h>
 #include <sys/sunddi.h>
+#include <sys/mod.h>
+#include <sys/random.h>
+#include <sys/processor.h>
+#include <zfs_gitrev.h>
 
 #define	DEBUG 1  // for backtrace debugging info
 
@@ -46,26 +50,34 @@ unsigned int boot_ncpus = 0;
 uint64_t  total_memory = 0;
 uint64_t  real_total_memory = 0;
 
-volatile unsigned int vm_page_free_wanted = 0;
-volatile unsigned int vm_page_free_min = 512;
-volatile unsigned int vm_page_free_count = 5000;
-volatile unsigned int vm_page_speculative_count = 5500;
-
 uint64_t spl_GetPhysMem(void);
 uint64_t spl_GetZfsTotalMemory(PUNICODE_STRING RegistryPath);
-uint64_t spl_getZfsPreallocSize(PUNICODE_STRING RegistryPath);
 
 #include <sys/types.h>
 #include <Trace.h>
 
 // Size in bytes of the memory allocated in seg_kmem
 extern uint64_t	segkmem_total_mem_allocated;
-extern int zfs_prealloc_percent;
 #define	MAXHOSTNAMELEN 64
 extern char hostname[MAXHOSTNAMELEN];
 
+#define	ZFS_MIN_MEMORY_LIMIT	2ULL * 1024ULL * 1024ULL * 1024ULL
+
+/*
+ * Windows internal tunables, we use the RAW method when
+ * we want more control over "name" and "variable" used.
+ * First argument is the "subfolder" wanted in the Registry,
+ * and most will most likely be in "root".
+ */
 uint32_t spl_hostid = 0;
-#define	    ZFS_MIN_MEMORY_LIMIT	1536ULL * 1024ULL * 1024ULL
+
+extern uchar_t zfs_vdev_protection_filter[ZFS_MODULE_STRMAX];
+ZFS_MODULE_RAW(, zfs_vdev_protection_filter, zfs_vdev_protection_filter,
+    STRING, ZMOD_RW, ZT_FLAG_STATIC, "vdev_protection_filter");
+
+static uchar_t zfs_version[] = ZFS_META_GITREV;
+ZFS_MODULE_RAW(, zfs_version, zfs_version, STRING, ZMOD_RD,
+    ZT_FLAG_STATIC | ZT_FLAG_WRITEONLY, "OpenZFS Windows Driver Version");
 
 #if defined(__clang__)
 /*
@@ -75,7 +87,7 @@ uint32_t spl_hostid = 0;
 uint64_t
 __readcr8(void)
 {
-	return (read_cr8_msvc());
+	return (0ULL);
 }
 
 unsigned long
@@ -249,12 +261,12 @@ ddi_copyin(const void *from, void *to, size_t len, int flags)
 	    len == 0)
 		return (0);
 
-	/* Fake ioctl() issued by kernel, so we just need to bcopy */
+	/* Fake ioctl() issued by kernel, so we just need to memcpy */
 	if (flags & FKIOCTL) {
 		if (flags & FCOPYSTR)
 			strlcpy(to, from, len);
 		else
-			bcopy(from, to, len);
+			memcpy(to, from, len);
 		return (0);
 	}
 
@@ -302,7 +314,7 @@ ddi_copyin(const void *from, void *to, size_t len, int flags)
 		if (flags & FCOPYSTR)
 			strlcpy(to, buffer, len);
 		else
-			bcopy(buffer, to, len);
+			memcpy(to, buffer, len);
 	}
 
 	TraceEvent(TRACE_NOISY, "SPL: copyin return %d (%d bytes)\n",
@@ -330,7 +342,7 @@ ddi_copyout(const void *from, void *to, size_t len, int flags)
 
 	/* Fake ioctl() issued by kernel, 'from' is a kernel address */
 	if (flags & FKIOCTL) {
-		bcopy(from, to, len);
+		memcpy(to, from, len);
 		return (0);
 	}
 
@@ -365,7 +377,7 @@ ddi_copyout(const void *from, void *to, size_t len, int flags)
 		goto out;
 	} else {
 		// Success, copy over the data.
-		bcopy(from, buffer, len);
+		memcpy(buffer, from, len);
 	}
 	// dprintf("SPL: copyout return %d (%d bytes)\n", error, len);
 out:
@@ -499,7 +511,7 @@ spl_start(PUNICODE_STRING RegistryPath)
 	// Set 2GB as code above doesnt work
 	if (real_total_memory) {
 		zfs_total_memory_limit = spl_GetZfsTotalMemory(RegistryPath);
-		if (zfs_total_memory_limit >= ZFS_MIN_MEMORY_LIMIT &&
+		if (zfs_total_memory_limit > ZFS_MIN_MEMORY_LIMIT &&
 		    zfs_total_memory_limit < real_total_memory)
 			total_memory = zfs_total_memory_limit;
 		else
@@ -514,12 +526,6 @@ spl_start(PUNICODE_STRING RegistryPath)
 	    zfs_total_memory_limit, total_memory);
 	physmem = total_memory / PAGE_SIZE;
 
-	// We need to set these to some non-zero values
-	// so we don't think there is permanent memory
-	// pressure.
-	vm_page_free_count = (unsigned int)(physmem / 2ULL);
-	vm_page_speculative_count = vm_page_free_count;
-
 	/*
 	 * For some reason, (CTLFLAG_KERN is not set) looking up hostname
 	 * returns 1. So we set it to uuid just to give it *something*.
@@ -530,16 +536,14 @@ spl_start(PUNICODE_STRING RegistryPath)
 	spl_mutex_subsystem_init();
 	spl_kmem_init(total_memory);
 
-	// lets get the registry value now, because the zfs loads the registry little later
-	int reg_val = spl_getZfsPreallocSize(RegistryPath);
-	if (reg_val != 0)
-	    zfs_prealloc_percent = reg_val;
-
+	spl_vfs_init();
 	spl_vnode_init();
 	spl_kmem_thread_init();
 	spl_kmem_mp_init();
 
 	kstat_init();
+
+	spl_processor_init();
 
 	IOLog("SPL: Loaded module v%s-%s%s, "
 	    "(ncpu %d, memsize %llu, pages %llu)\n",
@@ -555,6 +559,7 @@ spl_stop(void)
 {
 	spl_kmem_thread_fini();
 	spl_vnode_fini();
+	spl_vfs_fini();
 	spl_taskq_fini();
 	spl_rwlock_fini();
 	spl_tsd_fini();
@@ -727,7 +732,7 @@ spl_GetZfsTotalMemory(PUNICODE_STRING RegistryPath)
 		// Convert name to straight ascii so we compare with kstat
 		ULONG outlen = 0;
 		char keyname[KSTAT_STRLEN + 1] = { 0 };
-		status = RtlUnicodeToUTF8N(keyname, KSTAT_STRLEN, &outlen,
+		status = RtlUnicodeToUTF8N(keyname, KSTAT_STRLEN - 1, &outlen,
 		    regBuffer->Name, regBuffer->NameLength);
 
 		// Conversion failed? move along..
@@ -763,90 +768,29 @@ spl_GetZfsTotalMemory(PUNICODE_STRING RegistryPath)
 	return (newvalue);
 }
 
-uint64_t
-spl_getZfsPreallocSize(PUNICODE_STRING RegistryPath)
+static int
+param_hostid(ZFS_MODULE_PARAM_ARGS)
 {
-	OBJECT_ATTRIBUTES		ObjectAttributes;
-	HANDLE				h;
-	NTSTATUS			status;
-	uint64_t			newvalue = 0;
+	uint32_t val;
 
-	InitializeObjectAttributes(&ObjectAttributes,
-	    RegistryPath,
-	    OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
-	    NULL,
-	    NULL);
+	*type = ZT_TYPE_UINT;
 
-	status = ZwOpenKey(&h, // KeyHandle
-	    KEY_ALL_ACCESS, // DesiredAccess
-	    &ObjectAttributes); // ObjectAttributes
+	if (set == B_FALSE) {
 
-	if (!NT_SUCCESS(status)) {
-		dprintf("%s: Unable to open Registry %wZ: 0x%x. "
-		    "Going with defaults.\n", __func__, RegistryPath, status);
+		if (spl_hostid == 0)
+			random_get_bytes(&spl_hostid, sizeof (spl_hostid));
+
+		*ptr = &spl_hostid;
+		*len = sizeof (spl_hostid);
 		return (0);
 	}
 
-	ULONG index = 0;
-	ULONG length = 0;
-	PKEY_VALUE_FULL_INFORMATION    regBuffer = NULL;
+	val = *(uint32_t *)(*ptr);
 
-	for (index = 0; status != STATUS_NO_MORE_ENTRIES; index++) {
-		// Get the buffer size necessary
-		status = ZwEnumerateValueKey(h, index, KeyValueFullInformation,
-		    NULL, 0, &length);
+	spl_hostid = val;
 
-		if ((status != STATUS_BUFFER_TOO_SMALL) &&
-		    (status != STATUS_BUFFER_OVERFLOW))
-			break; // Something is wrong - or we finished
-
-		// Allocate space to hold
-		regBuffer = (PKEY_VALUE_FULL_INFORMATION)ExAllocatePoolWithTag(
-		    NonPagedPoolNx, length, 'zfsr');
-
-		if (regBuffer == NULL)
-			break;
-
-		status = ZwEnumerateValueKey(h, index, KeyValueFullInformation,
-		    regBuffer, length, &length);
-		if (!NT_SUCCESS(status)) {
-			break;
-		}
-		// Convert name to straight ascii so we compare with kstat
-		ULONG outlen = 0;
-		char keyname[KSTAT_STRLEN + 1] = { 0 };
-		status = RtlUnicodeToUTF8N(keyname, KSTAT_STRLEN, &outlen,
-		    regBuffer->Name, regBuffer->NameLength);
-
-		// Conversion failed? move along..
-		if (status != STATUS_SUCCESS && status
-		    != STATUS_SOME_NOT_MAPPED)
-			break;
-
-		// Output string is only null terminated if input is,
-		// so do so now.
-		keyname[outlen] = 0;
-		if (strcasecmp("zfs_prealloc_percent", keyname) == 0) {
-			if (regBuffer->Type != REG_DWORD ||
-			    regBuffer->DataLength != sizeof (uint32_t)) {
-				dprintf("%s: registry '%s' did not match. "
-				    "Type needs to be REG_QWORD. (8 bytes)\n",
-				    __func__, keyname);
-			} else {
-				newvalue = *(uint32_t *)((uint8_t *)regBuffer
-				    + regBuffer->DataOffset);
-				dprintf("%s: zfs_prealloc_percent is set to:"
-				    " %llu\n", __func__, newvalue);
-			}
-			break;
-		}
-		ExFreePool(regBuffer);
-		regBuffer = NULL;
-	}
-
-	if (regBuffer)
-		ExFreePool(regBuffer);
-
-	ZwClose(h);
-	return (newvalue);
+	return (0);
 }
+
+ZFS_MODULE_PARAM_CALL(, spl_, hostid, param_hostid,
+    param_get_uint, ZMOD_RW, "OpenZFS hostid");

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -49,7 +50,7 @@ struct udev_monitor *g_mon;
 #define	DEV_BYID_PATH	"/dev/disk/by-id/"
 
 /* 64MB is minimum usable disk for ZFS */
-#define	MINIMUM_SECTORS		131072
+#define	MINIMUM_SECTORS		131072ULL
 
 
 /*
@@ -60,7 +61,7 @@ struct udev_monitor *g_mon;
 static void
 zed_udev_event(const char *class, const char *subclass, nvlist_t *nvl)
 {
-	char *strval;
+	const char *strval;
 	uint64_t numval;
 
 	zed_log_msg(LOG_INFO, "zed_disk_event:");
@@ -72,10 +73,14 @@ zed_udev_event(const char *class, const char *subclass, nvlist_t *nvl)
 		zed_log_msg(LOG_INFO, "\t%s: %s", DEV_PATH, strval);
 	if (nvlist_lookup_string(nvl, DEV_IDENTIFIER, &strval) == 0)
 		zed_log_msg(LOG_INFO, "\t%s: %s", DEV_IDENTIFIER, strval);
+	if (nvlist_lookup_boolean(nvl, DEV_IS_PART) == B_TRUE)
+		zed_log_msg(LOG_INFO, "\t%s: B_TRUE", DEV_IS_PART);
 	if (nvlist_lookup_string(nvl, DEV_PHYS_PATH, &strval) == 0)
 		zed_log_msg(LOG_INFO, "\t%s: %s", DEV_PHYS_PATH, strval);
 	if (nvlist_lookup_uint64(nvl, DEV_SIZE, &numval) == 0)
 		zed_log_msg(LOG_INFO, "\t%s: %llu", DEV_SIZE, numval);
+	if (nvlist_lookup_uint64(nvl, DEV_PARENT_SIZE, &numval) == 0)
+		zed_log_msg(LOG_INFO, "\t%s: %llu", DEV_PARENT_SIZE, numval);
 	if (nvlist_lookup_uint64(nvl, ZFS_EV_POOL_GUID, &numval) == 0)
 		zed_log_msg(LOG_INFO, "\t%s: %llu", ZFS_EV_POOL_GUID, numval);
 	if (nvlist_lookup_uint64(nvl, ZFS_EV_VDEV_GUID, &numval) == 0)
@@ -128,6 +133,21 @@ dev_event_nvlist(struct udev_device *dev)
 
 		numval *= strtoull(value, NULL, 10);
 		(void) nvlist_add_uint64(nvl, DEV_SIZE, numval);
+
+		/*
+		 * If the device has a parent, then get the parent block
+		 * device's size as well.  For example, /dev/sda1's parent
+		 * is /dev/sda.
+		 */
+		struct udev_device *parent_dev = udev_device_get_parent(dev);
+		if (parent_dev != NULL &&
+		    (value = udev_device_get_sysattr_value(parent_dev, "size"))
+		    != NULL) {
+			uint64_t numval = DEV_BSIZE;
+
+			numval *= strtoull(value, NULL, 10);
+			(void) nvlist_add_uint64(nvl, DEV_PARENT_SIZE, numval);
+		}
 	}
 
 	/*
@@ -160,14 +180,15 @@ static void *
 zed_udev_monitor(void *arg)
 {
 	struct udev_monitor *mon = arg;
-	char *tmp, *tmp2;
+	const char *tmp;
+	char *tmp2;
 
 	zed_log_msg(LOG_INFO, "Waiting for new udev disk events...");
 
 	while (1) {
 		struct udev_device *dev;
 		const char *action, *type, *part, *sectors;
-		const char *bus, *uuid;
+		const char *bus, *uuid, *devpath;
 		const char *class, *subclass;
 		nvlist_t *nvl;
 		boolean_t is_zfs = B_FALSE;
@@ -206,6 +227,12 @@ zed_udev_monitor(void *arg)
 		 * if this is a disk and it is partitioned, then the
 		 * zfs label will reside in a DEVTYPE=partition and
 		 * we can skip passing this event
+		 *
+		 * Special case: Blank disks are sometimes reported with
+		 * an erroneous 'atari' partition, and should not be
+		 * excluded from being used as an autoreplace disk:
+		 *
+		 * https://github.com/openzfs/zfs/issues/13497
 		 */
 		type = udev_device_get_property_value(dev, "DEVTYPE");
 		part = udev_device_get_property_value(dev,
@@ -213,9 +240,23 @@ zed_udev_monitor(void *arg)
 		if (type != NULL && type[0] != '\0' &&
 		    strcmp(type, "disk") == 0 &&
 		    part != NULL && part[0] != '\0') {
-			/* skip and wait for partition event */
-			udev_device_unref(dev);
-			continue;
+			const char *devname =
+			    udev_device_get_property_value(dev, "DEVNAME");
+
+			if (strcmp(part, "atari") == 0) {
+				zed_log_msg(LOG_INFO,
+				    "%s: %s is reporting an atari partition, "
+				    "but we're going to assume it's a false "
+				    "positive and still use it (issue #13497)",
+				    __func__, devname);
+			} else {
+				zed_log_msg(LOG_INFO,
+				    "%s: skip %s since it has a %s partition "
+				    "already", __func__, devname, part);
+				/* skip and wait for partition event */
+				udev_device_unref(dev);
+				continue;
+			}
 		}
 
 		/*
@@ -227,6 +268,11 @@ zed_udev_monitor(void *arg)
 			sectors = udev_device_get_sysattr_value(dev, "size");
 		if (sectors != NULL &&
 		    strtoull(sectors, NULL, 10) < MINIMUM_SECTORS) {
+			zed_log_msg(LOG_INFO,
+			    "%s: %s sectors %s < %llu (minimum)",
+			    __func__,
+			    udev_device_get_property_value(dev, "DEVNAME"),
+			    sectors, MINIMUM_SECTORS);
 			udev_device_unref(dev);
 			continue;
 		}
@@ -236,10 +282,19 @@ zed_udev_monitor(void *arg)
 		 * device id string is required in the message schema
 		 * for matching with vdevs. Preflight here for expected
 		 * udev information.
+		 *
+		 * Special case:
+		 * NVMe devices don't have ID_BUS set (at least on RHEL 7-8),
+		 * but they are valid for autoreplace.  Add a special case for
+		 * them by searching for "/nvme/" in the udev DEVPATH:
+		 *
+		 * DEVPATH=/devices/pci0000:00/0000:00:1e.0/nvme/nvme2/nvme2n1
 		 */
 		bus = udev_device_get_property_value(dev, "ID_BUS");
 		uuid = udev_device_get_property_value(dev, "DM_UUID");
-		if (!is_zfs && (bus == NULL && uuid == NULL)) {
+		devpath = udev_device_get_devpath(dev);
+		if (!is_zfs && (bus == NULL && uuid == NULL &&
+		    strstr(devpath, "/nvme/") == NULL)) {
 			zed_log_msg(LOG_INFO, "zed_udev_monitor: %s no devid "
 			    "source", udev_device_get_devnode(dev));
 			udev_device_unref(dev);
@@ -284,7 +339,7 @@ zed_udev_monitor(void *arg)
 		if (strcmp(class, EC_DEV_STATUS) == 0 &&
 		    udev_device_get_property_value(dev, "DM_UUID") &&
 		    udev_device_get_property_value(dev, "MPATH_SBIN_PATH")) {
-			tmp = (char *)udev_device_get_devnode(dev);
+			tmp = udev_device_get_devnode(dev);
 			tmp2 = zfs_get_underlying_path(tmp);
 			if (tmp && tmp2 && (strcmp(tmp, tmp2) != 0)) {
 				/*
@@ -301,8 +356,7 @@ zed_udev_monitor(void *arg)
 				class = EC_DEV_ADD;
 				subclass = ESC_DISK;
 			} else {
-				tmp = (char *)
-				    udev_device_get_property_value(dev,
+				tmp = udev_device_get_property_value(dev,
 				    "DM_NR_VALID_PATHS");
 				/* treat as a multipath remove */
 				if (tmp != NULL && strcmp(tmp, "0") == 0) {
@@ -350,7 +404,7 @@ zed_udev_monitor(void *arg)
 }
 
 int
-zed_disk_event_init()
+zed_disk_event_init(void)
 {
 	int fd, fflags;
 
@@ -386,7 +440,7 @@ zed_disk_event_init()
 }
 
 void
-zed_disk_event_fini()
+zed_disk_event_fini(void)
 {
 	/* cancel monitor thread at recvmsg() */
 	(void) pthread_cancel(g_mon_tid);
@@ -404,13 +458,13 @@ zed_disk_event_fini()
 #include "zed_disk_event.h"
 
 int
-zed_disk_event_init()
+zed_disk_event_init(void)
 {
 	return (0);
 }
 
 void
-zed_disk_event_fini()
+zed_disk_event_fini(void)
 {
 }
 

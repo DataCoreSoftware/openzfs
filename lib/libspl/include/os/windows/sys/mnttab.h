@@ -24,7 +24,11 @@
 #define	_SYS_MNTTAB_H
 
 #include <stdio.h>
+#ifndef MNTTAB_NO_DIRENT_H
 #include <dirent.h>
+#else
+typedef void *DIR;
+#endif
 #include <mntent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -83,5 +87,6 @@ extern void statfs2mnttab(struct statfs *sfs, struct mnttab *mp);
 #endif
 
 extern int fstatat64(int, const char *, struct _stat64 *, int);
+extern int getextmntent(const char *, struct extmnttab *, struct stat64 *);
 
 #endif

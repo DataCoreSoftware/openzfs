@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*-
  * Copyright (c) 2014 Andrew Turner
  * Copyright (c) 2014-2015 The FreeBSD Foundation
@@ -35,7 +36,7 @@
 #define	ENTRY(sym) \
 	.text; \
 	.globl	sym; \
-	.align	2; \
+	.balign	2; \
 	.type	sym,#function; \
 sym:
 

@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 
 #
 # This file and its contents are supplied under the terms of the
@@ -23,6 +24,9 @@ echo " Tailing last $lines lines of zfs_dbgmsg log"
 echo "================================================================="
 
 sudo tail -n $lines /proc/spl/kstat/zfs/dbgmsg
+
+# reset dbgmsg
+sudo sh -c "echo > /proc/spl/kstat/zfs/dbgmsg"
 
 echo "================================================================="
 echo " End of zfs_dbgmsg log"

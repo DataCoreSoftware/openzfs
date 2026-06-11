@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -57,6 +58,13 @@ typedef int (blkptr_cb_t)(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
  * to read the logical data.
  */
 #define	TRAVERSE_NO_DECRYPT		(1<<5)
+
+/*
+ * Always use logical birth time for birth time comparisons.  This is useful
+ * for operations that care about user data changes rather than physical
+ * block rewrites (e.g., incremental replication).
+ */
+#define	TRAVERSE_LOGICAL		(1<<6)
 
 /* Special traverse error return value to indicate skipping of children */
 #define	TRAVERSE_VISIT_NO_CHILDREN	-1

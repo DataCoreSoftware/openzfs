@@ -1,3 +1,4 @@
+.\" SPDX-License-Identifier: CDDL-1.0
 .\"
 .\" CDDL HEADER START
 .\"
@@ -6,7 +7,7 @@
 .\" You may not use this file except in compliance with the License.
 .\"
 .\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or http://www.opensolaris.org/os/licensing.
+.\" or https://opensource.org/licenses/CDDL-1.0.
 .\" See the License for the specific language governing permissions
 .\" and limitations under the License.
 .\"
@@ -20,7 +21,7 @@
 .\"
 .\" Copyright (c) 2017 by Lawrence Livermore National Security, LLC.
 .\"
-.Dd May 26, 2021
+.Dd July 11, 2022
 .Dt ZGENHOSTID 8
 .Os
 .
@@ -80,7 +81,7 @@ be an 8-digit-long hexadecimal number, optionally prefixed by
 .Dl # Nm Qq $ Ns Pq Nm hostid
 .It Record a custom hostid Po Ar 0xdeadbeef Pc in Pa /etc/hostid
 .Dl # Nm Ar deadbeef
-.It Record a custom hostid Po Ar 0x01234567 Pc in Pa /tmp/hostid No and ovewrite the file if it exists
+.It Record a custom hostid Po Ar 0x01234567 Pc in Pa /tmp/hostid No and overwrite the file if it exists
 .Dl # Nm Fl f o Ar /tmp/hostid 0x01234567
 .El
 .

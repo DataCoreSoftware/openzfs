@@ -10,7 +10,7 @@ um_add_executable(zdb
 target_compile_definitions(zdb PRIVATE ZFS_DEBUG)
 target_link_libraries(zdb PRIVATE
 	libnvpair
-	libuutil
+	libzdb
 	libzfs
 	libzfs_core
 	libzpool

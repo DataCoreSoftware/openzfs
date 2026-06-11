@@ -197,7 +197,7 @@ typedef struct kmem_buftag_lite {
  * the other layers of the kmem cache if need be.
  *
  * It's not even a problem if the old cpu gets DR'ed out during the context
- * switch.  The cpu-remove DR operation bzero()s the cpu_t, but doesn't free
+ * switch.  The cpu-remove DR operation memset(0)s the cpu_t, but doesn't free
  * it.  So the cpu_t's cpu_cache_offset would read as 0, causing us to use
  * cpu 0's per-cpu cache.
  *
@@ -305,9 +305,9 @@ typedef struct kmem_cpu_cache {
  */
 typedef struct kmem_maglist {
 	kmem_magazine_t	*ml_list;	/* magazine list */
-	long		ml_total;	/* number of magazines */
-	long		ml_min;		/* min since last update */
-	long		ml_reaplimit;	/* max reapable magazines */
+	uint64_t	ml_total;	/* number of magazines */
+	uint64_t	ml_min;		/* min since last update */
+	uint64_t	ml_reaplimit;	/* max reapable magazines */
 	uint64_t	ml_alloc;	/* allocations from this list */
 } kmem_maglist_t;
 
@@ -372,6 +372,7 @@ struct kmem_cache {
 	uint64_t cache_bufmax;		/* max buffers ever */
 	uint64_t cache_bufslab;		/* buffers free in slab layer */
 	uint64_t cache_reap;		/* cache reaps */
+	kmutex_t cache_reap_lock;	/* one reap at a time */
 	uint64_t cache_rescale;		/* hash table rescales */
 	uint64_t cache_lookup_depth;	/* hash lookup depth */
 	uint64_t cache_depot_contention; /* mutex contention count */
@@ -393,7 +394,7 @@ struct kmem_cache {
 	int		(*cache_constructor)(void *, void *, int);
 	void		(*cache_destructor)(void *, void *);
 	void		(*cache_reclaim)(void *);
-	kmem_cbrc_t	(*cache_move)(void *, void *, uint32_t, void *);
+	kmem_cbrc_t	(*cache_move)(void *, void *, size_t, void *);
 	void		*cache_private;	/* opaque arg to callbacks */
 	vmem_t		*cache_arena;	/* vmem source for slabs */
 	int		cache_cflags;	/* cache creation flags */
@@ -463,12 +464,12 @@ typedef struct kmem_cpu_log_header {
 typedef struct kmem_log_header {
 	kmutex_t	lh_lock;
 	char		*lh_base;
-	int		*lh_free;
-	uint32_t	lh_chunksize;
-	int		lh_nchunks;
-	int		lh_head;
-	int		lh_tail;
-	int		lh_hits;
+	uint32_t	*lh_free;
+	size_t		lh_chunksize;
+	uint32_t	lh_nchunks;
+	uint32_t	lh_head;
+	uint32_t	lh_tail;
+	uint32_t	lh_hits;
 	kmem_cpu_log_header_t lh_cpu[1];	/* ncpus actually allocated */
 } kmem_log_header_t;
 

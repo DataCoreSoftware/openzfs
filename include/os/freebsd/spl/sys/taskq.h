@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -30,9 +31,9 @@
 
 #include <sys/types.h>
 #include <sys/proc.h>
+#include <sys/queue.h>
 #include <sys/taskqueue.h>
 #include <sys/thread.h>
-#include <sys/ck.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -49,16 +50,16 @@ typedef uintptr_t taskqid_t;
 typedef void (task_func_t)(void *);
 
 typedef struct taskq_ent {
-	struct task	 tqent_task;
-	struct timeout_task tqent_timeout_task;
+	union {
+		struct task	 tqent_task;
+		struct timeout_task tqent_timeout_task;
+	};
 	task_func_t	*tqent_func;
 	void		*tqent_arg;
-	taskqid_t tqent_id;
-	CK_LIST_ENTRY(taskq_ent) tqent_hash;
-	uint8_t tqent_type;
-	uint8_t tqent_registered;
-	uint8_t tqent_cancelled;
-	volatile uint32_t tqent_rc;
+	taskqid_t	 tqent_id;
+	LIST_ENTRY(taskq_ent) tqent_hash;
+	uint_t		 tqent_type;
+	volatile uint_t	 tqent_rc;
 } taskq_ent_t;
 
 /*
@@ -82,7 +83,6 @@ typedef struct taskq_ent {
 
 #define	TASKQID_INVALID		((taskqid_t)0)
 
-#define	taskq_init_ent(x)
 extern taskq_t *system_taskq;
 /* Global dynamic task queue for long delay */
 extern taskq_t *system_delay_taskq;
@@ -93,6 +93,7 @@ extern taskqid_t taskq_dispatch_delay(taskq_t *, task_func_t, void *,
 extern void taskq_dispatch_ent(taskq_t *, task_func_t, void *, uint_t,
     taskq_ent_t *);
 extern int taskq_empty_ent(taskq_ent_t *);
+extern void taskq_init_ent(taskq_ent_t *);
 taskq_t	*taskq_create(const char *, int, pri_t, int, int, uint_t);
 taskq_t	*taskq_create_synced(const char *, int, pri_t, int, int, uint_t,
     kthread_t ***);
@@ -106,7 +107,7 @@ extern void taskq_destroy(taskq_t *);
 extern void taskq_wait_id(taskq_t *, taskqid_t);
 extern void taskq_wait_outstanding(taskq_t *, taskqid_t);
 extern void taskq_wait(taskq_t *);
-extern int taskq_cancel_id(taskq_t *, taskqid_t);
+extern int taskq_cancel_id(taskq_t *, taskqid_t, boolean_t);
 extern int taskq_member(taskq_t *, kthread_t *);
 extern taskq_t *taskq_of_curthread(void);
 void	taskq_suspend(taskq_t *);
@@ -120,6 +121,7 @@ void	taskq_resume(taskq_t *);
 #endif /* _KERNEL */
 
 #ifdef _STANDALONE
+typedef void taskq_t;
 typedef int taskq_ent_t;
 #define	taskq_init_ent(x)
 #endif /* _STANDALONE */

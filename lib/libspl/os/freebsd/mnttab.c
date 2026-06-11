@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2006 Pawel Jakub Dawidek <pjd@FreeBSD.org>
  * All rights reserved.
@@ -29,9 +30,6 @@
  * functions.
  */
 
-#include <sys/cdefs.h>
-__FBSDID("$FreeBSD$");
-
 #include <sys/param.h>
 #include <sys/mount.h>
 #include <sys/mntent.h>
@@ -39,6 +37,7 @@ __FBSDID("$FreeBSD$");
 
 #include <ctype.h>
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,14 +65,14 @@ mntopt(char **p)
 }
 
 char *
-hasmntopt(struct mnttab *mnt, char *opt)
+hasmntopt(struct mnttab *mnt, const char *opt)
 {
 	char tmpopts[MNT_LINE_MAX];
 	char *f, *opts = tmpopts;
 
 	if (mnt->mnt_mntopts == NULL)
 		return (NULL);
-	(void) strcpy(opts, mnt->mnt_mntopts);
+	(void) strlcpy(opts, mnt->mnt_mntopts, MNT_LINE_MAX);
 	f = mntopt(&opts);
 	for (; *f; f = mntopt(&opts)) {
 		if (strncmp(opt, f, strlen(opt)) == 0)
@@ -91,16 +90,28 @@ optadd(char *mntopts, size_t size, const char *opt)
 	strlcat(mntopts, opt, size);
 }
 
+static __thread char gfstypename[MFSNAMELEN];
+static __thread char gmntfromname[MNAMELEN];
+static __thread char gmntonname[MNAMELEN];
+static __thread char gmntopts[MNTMAXSTR];
+
 void
 statfs2mnttab(struct statfs *sfs, struct mnttab *mp)
 {
-	static char mntopts[MNTMAXSTR];
 	long flags;
 
-	mntopts[0] = '\0';
+	strlcpy(gfstypename, sfs->f_fstypename, sizeof (gfstypename));
+	mp->mnt_fstype = gfstypename;
+
+	strlcpy(gmntfromname, sfs->f_mntfromname, sizeof (gmntfromname));
+	mp->mnt_special = gmntfromname;
+
+	strlcpy(gmntonname, sfs->f_mntonname, sizeof (gmntonname));
+	mp->mnt_mountp = gmntonname;
 
 	flags = sfs->f_flags;
-#define	OPTADD(opt)	optadd(mntopts, sizeof (mntopts), (opt))
+	gmntopts[0] = '\0';
+#define	OPTADD(opt)	optadd(gmntopts, sizeof (gmntopts), (opt))
 	if (flags & MNT_RDONLY)
 		OPTADD(MNTOPT_RO);
 	else
@@ -121,12 +132,10 @@ statfs2mnttab(struct statfs *sfs, struct mnttab *mp)
 	else
 		OPTADD(MNTOPT_EXEC);
 #undef	OPTADD
-	mp->mnt_special = strdup(sfs->f_mntfromname);
-	mp->mnt_mountp = strdup(sfs->f_mntonname);
-	mp->mnt_fstype = strdup(sfs->f_fstypename);
-	mp->mnt_mntopts = strdup(mntopts);
+	mp->mnt_mntopts = gmntopts;
 }
 
+static pthread_rwlock_t gsfs_lock = PTHREAD_RWLOCK_INITIALIZER;
 static struct statfs *gsfs = NULL;
 static int allfs = 0;
 
@@ -135,6 +144,8 @@ statfs_init(void)
 {
 	struct statfs *sfs;
 	int error;
+
+	(void) pthread_rwlock_wrlock(&gsfs_lock);
 
 	if (gsfs != NULL) {
 		free(gsfs);
@@ -153,6 +164,7 @@ statfs_init(void)
 	sfs = realloc(gsfs, allfs * sizeof (gsfs[0]));
 	if (sfs != NULL)
 		gsfs = sfs;
+	(void) pthread_rwlock_unlock(&gsfs_lock);
 	return (0);
 fail:
 	error = errno;
@@ -160,18 +172,20 @@ fail:
 		free(gsfs);
 	gsfs = NULL;
 	allfs = 0;
+	(void) pthread_rwlock_unlock(&gsfs_lock);
 	return (error);
 }
 
 int
 getmntany(FILE *fd __unused, struct mnttab *mgetp, struct mnttab *mrefp)
 {
-	//	struct statfs *sfs;
 	int i, error;
 
 	error = statfs_init();
 	if (error != 0)
 		return (error);
+
+	(void) pthread_rwlock_rdlock(&gsfs_lock);
 
 	for (i = 0; i < allfs; i++) {
 		if (mrefp->mnt_special != NULL &&
@@ -187,15 +201,16 @@ getmntany(FILE *fd __unused, struct mnttab *mgetp, struct mnttab *mrefp)
 			continue;
 		}
 		statfs2mnttab(&gsfs[i], mgetp);
+		(void) pthread_rwlock_unlock(&gsfs_lock);
 		return (0);
 	}
+	(void) pthread_rwlock_unlock(&gsfs_lock);
 	return (-1);
 }
 
 int
 getmntent(FILE *fp, struct mnttab *mp)
 {
-	//	struct statfs *sfs;
 	int error, nfs;
 
 	nfs = (int)lseek(fileno(fp), 0, SEEK_CUR);
@@ -207,9 +222,13 @@ getmntent(FILE *fp, struct mnttab *mp)
 		if (error != 0)
 			return (error);
 	}
-	if (nfs >= allfs)
+	(void) pthread_rwlock_rdlock(&gsfs_lock);
+	if (nfs >= allfs) {
+		(void) pthread_rwlock_unlock(&gsfs_lock);
 		return (-1);
+	}
 	statfs2mnttab(&gsfs[nfs], mp);
+	(void) pthread_rwlock_unlock(&gsfs_lock);
 	if (lseek(fileno(fp), 1, SEEK_CUR) == -1)
 		return (errno);
 	return (0);

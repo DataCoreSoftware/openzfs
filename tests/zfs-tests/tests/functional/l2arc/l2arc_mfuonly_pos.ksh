@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -39,6 +40,8 @@
 
 verify_runnable "global"
 
+command -v fio > /dev/null || log_unsupported "fio missing"
+
 log_assert "l2arc_mfuonly does not cache MRU buffers."
 
 function cleanup
@@ -70,7 +73,7 @@ export FILE_SIZE=$(( floor($fill_mb / $NUMJOBS) ))M
 
 log_must truncate -s ${cache_sz}M $VDEV_CACHE
 
-typeset log_blk_start=$(get_arcstat l2_log_blk_writes)
+typeset log_blk_start=$(kstat arcstats.l2_log_blk_writes)
 
 log_must zpool create -f $TESTPOOL $VDEV cache $VDEV_CACHE
 
@@ -78,7 +81,7 @@ log_must fio $FIO_SCRIPTS/mkfiles.fio
 log_must fio $FIO_SCRIPTS/random_reads.fio
 
 log_must zpool export $TESTPOOL
-log_must zpool import -d $VDIR $TESTPOOL
+log_must zpool import -N -d $VDIR $TESTPOOL
 
 # Regardless of l2arc_noprefetch, some MFU buffers might be evicted
 # from ARC, accessed later on as prefetches and transition to MRU as
@@ -87,7 +90,7 @@ log_must zpool import -d $VDIR $TESTPOOL
 # will not be 0 (mentioned also in zfs.4)
 # For the purposes of this test we mitigate this by disabling (predictive)
 # ZFS prefetches with zfs_prefetch_disable=1.
-log_must test $(get_arcstat l2_mru_asize) -eq 0
+log_must test $(kstat arcstats.l2_mru_asize) -eq 0
 
 log_must zpool destroy -f $TESTPOOL
 

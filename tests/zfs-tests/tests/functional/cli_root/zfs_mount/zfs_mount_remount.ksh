@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -48,7 +49,7 @@ function cleanup
 {
 	log_must_busy zpool export $TESTPOOL
 	log_must zpool import $TESTPOOL
-	snapexists $TESTSNAP && log_must zfs destroy $TESTSNAP
+	snapexists $TESTSNAP && destroy_dataset $TESTSNAP
 	[[ -d $MNTPSNAP ]] && log_must rmdir $MNTPSNAP
 	return 0
 }
@@ -155,7 +156,7 @@ CRYPT_MNTPFS="$(get_prop mountpoint $TESTFS/crypt)"
 log_must touch $CRYPT_MNTPFS/file.dat
 log_must mount $RO $TESTFS/crypt $CRYPT_MNTPFS
 log_must umount -f $CRYPT_MNTPFS
-zpool sync $TESTPOOL
+sync_pool $TESTPOOL
 
 # 6. Re-import the pool readonly
 log_must zpool export $TESTPOOL

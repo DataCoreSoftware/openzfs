@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -41,7 +42,7 @@
 # 1. Create a pool
 # 2. Create a zvol volume
 # 3. Use zvol as swap space
-# 4. Create a file under /var/tmp
+# 4. Create a file under /var/tmp (TEST_BASE_DIR)
 #
 
 verify_runnable "global"
@@ -63,11 +64,11 @@ voldev=${ZVOL_DEVDIR}/$TESTPOOL/$TESTVOL
 log_note "Add zvol volume as swap space"
 log_must swap_setup $voldev
 
-log_note "Create a file under /var/tmp"
+log_note "Create a file under $TEST_BASE_DIR"
 log_must file_write -o create -f $TEMPFILE \
     -b $BLOCKSZ -c $NUM_WRITES -d $DATA
 
-[[ ! -f $TEMPFILE ]] && log_fail "Unable to create file under /var/tmp"
+[[ ! -f $TEMPFILE ]] && log_fail "Unable to create file under $TEST_BASE_DIR"
 
 filesize=`ls -l $TEMPFILE | awk '{print $5}'`
 tf_size=$(( BLOCKSZ * NUM_WRITES ))

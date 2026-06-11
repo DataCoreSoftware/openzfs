@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -37,5 +38,9 @@
 
 /* Print a timestamp in either Unix or standard format. */
 void print_timestamp(uint_t);
+/* Return timestamp in either Unix or standard format in provided buffer */
+void get_timestamp(uint_t, char *, int);
+/* convert time_t to standard format */
+void format_timestamp(time_t, char *, int);
 
 #endif /* _STATCOMMON_H */

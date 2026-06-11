@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -30,7 +31,7 @@ verify_runnable "both"
 
 function cleanup
 {
-	local ds
+	typeset ds
 
 	for ds in "$fs" "$vol"; do
 		datasetexists "$ds" && destroy_dataset "$ds"

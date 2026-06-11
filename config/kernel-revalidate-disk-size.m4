@@ -1,3 +1,4 @@
+dnl # SPDX-License-Identifier: CDDL-1.0
 dnl #
 dnl # 5.11 API change
 dnl # revalidate_disk_size() has been removed entirely.
@@ -8,14 +9,14 @@ dnl #
 AC_DEFUN([ZFS_AC_KERNEL_SRC_REVALIDATE_DISK], [
 
 	ZFS_LINUX_TEST_SRC([revalidate_disk_size], [
-		#include <linux/genhd.h>
+		#include <linux/blkdev.h>
 	], [
 		struct gendisk *disk = NULL;
 		(void) revalidate_disk_size(disk, false);
 	])
 
 	ZFS_LINUX_TEST_SRC([revalidate_disk], [
-		#include <linux/genhd.h>
+		#include <linux/blkdev.h>
 	], [
 		struct gendisk *disk = NULL;
 		(void) revalidate_disk(disk);

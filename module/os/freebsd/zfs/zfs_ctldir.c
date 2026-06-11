@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -204,6 +205,10 @@ sfs_vgetx(struct mount *mp, int flags, uint64_t parent_id, uint64_t id,
 		return (error);
 	}
 
+#if __FreeBSD_version >= 1400077
+	vn_set_state(vp, VSTATE_CONSTRUCTED);
+#endif
+
 	*vpp = vp;
 	return (0);
 }
@@ -352,7 +357,7 @@ zfsctl_create(zfsvfs_t *zfsvfs)
 	vnode_t *rvp;
 	uint64_t crtime[2];
 
-	ASSERT3P(zfsvfs->z_ctldir, ==, NULL);
+	ASSERT0P(zfsvfs->z_ctldir);
 
 	snapdir = sfs_alloc_node(sizeof (*snapdir), "snapshot", ZFSCTL_INO_ROOT,
 	    ZFSCTL_INO_SNAPDIR);
@@ -456,10 +461,10 @@ zfsctl_common_open(struct vop_open_args *ap)
 /*
  * Common close routine.  Nothing to do here.
  */
-/* ARGSUSED */
 static int
 zfsctl_common_close(struct vop_close_args *ap)
 {
+	(void) ap;
 	return (0);
 }
 
@@ -489,14 +494,14 @@ zfsctl_common_getattr(vnode_t *vp, vattr_t *vap)
 
 	vap->va_uid = 0;
 	vap->va_gid = 0;
-	vap->va_rdev = 0;
+	vap->va_rdev = NODEV;
 	/*
 	 * We are a purely virtual object, so we have no
 	 * blocksize or allocated blocks.
 	 */
 	vap->va_blksize = 0;
 	vap->va_nblocks = 0;
-	vap->va_seq = 0;
+	vap->va_gen = 0;
 	vn_fsid(vp, vap);
 	vap->va_mode = zfsctl_ctldir_mode;
 	vap->va_type = VDIR;
@@ -669,23 +674,36 @@ zfsctl_root_readdir(struct vop_readdir_args *ap)
 	zfs_uio_t uio;
 	int *eofp = ap->a_eofflag;
 	off_t dots_offset;
+	ssize_t orig_resid;
 	int error;
 
 	zfs_uio_init(&uio, ap->a_uio);
 
 	ASSERT3S(vp->v_type, ==, VDIR);
 
+	/*
+	 * FIXME: this routine only ever emits 3 entries and does not tolerate
+	 * being called with a buffer too small to handle all of them.
+	 *
+	 * The check below facilitates the idiom of repeating calls until the
+	 * count to return is 0.
+	 */
+	if (zfs_uio_offset(&uio) == 3 * sizeof (entry)) {
+		if (eofp != NULL)
+			*eofp = 1;
+		return (0);
+	}
+
+	orig_resid = zfs_uio_resid(&uio);
 	error = sfs_readdir_common(zfsvfs->z_root, ZFSCTL_INO_ROOT, ap, &uio,
 	    &dots_offset);
-	if (error != 0) {
-		if (error == ENAMETOOLONG) /* ran out of destination space */
-			error = 0;
-		return (error);
-	}
+	if (error != 0)
+		goto err;
 	if (zfs_uio_offset(&uio) != dots_offset)
 		return (SET_ERROR(EINVAL));
 
-	CTASSERT(sizeof (node->snapdir->sn_name) <= sizeof (entry.d_name));
+	_Static_assert(sizeof (node->snapdir->sn_name) <= sizeof (entry.d_name),
+	    "node->snapdir->sn_name too big for entry.d_name");
 	entry.d_fileno = node->snapdir->sn_id;
 	entry.d_type = DT_DIR;
 	strcpy(entry.d_name, node->snapdir->sn_name);
@@ -693,8 +711,11 @@ zfsctl_root_readdir(struct vop_readdir_args *ap)
 	entry.d_reclen = sizeof (entry);
 	error = vfs_read_dirent(ap, &entry, zfs_uio_offset(&uio));
 	if (error != 0) {
-		if (error == ENAMETOOLONG)
-			error = 0;
+err:
+		if (error == ENAMETOOLONG) {
+			error = orig_resid == zfs_uio_resid(&uio) ?
+			    EINVAL : 0;
+		}
 		return (SET_ERROR(error));
 	}
 	if (eofp != NULL)
@@ -717,10 +738,10 @@ zfsctl_root_vptocnp(struct vop_vptocnp_args *ap)
 	if (error != 0)
 		return (SET_ERROR(error));
 
-	VOP_UNLOCK1(dvp);
+	VOP_UNLOCK(dvp);
 	*ap->a_vpp = dvp;
 	*ap->a_buflen -= sizeof (dotzfs_name);
-	bcopy(dotzfs_name, ap->a_buf + *ap->a_buflen, sizeof (dotzfs_name));
+	memcpy(ap->a_buf + *ap->a_buflen, dotzfs_name, sizeof (dotzfs_name));
 	return (0);
 }
 
@@ -743,8 +764,7 @@ zfsctl_common_pathconf(struct vop_pathconf_args *ap)
 		return (0);
 
 	case _PC_MIN_HOLE_SIZE:
-		*ap->a_retval = (int)SPA_MINBLOCKSIZE;
-		return (0);
+		return (EINVAL);
 
 	case _PC_ACL_EXTENDED:
 		*ap->a_retval = 0;
@@ -798,9 +818,8 @@ zfsctl_common_getacl(struct vop_getacl_args *ap)
 
 static struct vop_vector zfsctl_ops_root = {
 	.vop_default =	&default_vnodeops,
-#if __FreeBSD_version >= 1300121
 	.vop_fplookup_vexec = VOP_EAGAIN,
-#endif
+	.vop_fplookup_symlink = VOP_EAGAIN,
 	.vop_open =	zfsctl_common_open,
 	.vop_close =	zfsctl_common_close,
 	.vop_ioctl =	VOP_EINVAL,
@@ -815,6 +834,9 @@ static struct vop_vector zfsctl_ops_root = {
 	.vop_vptocnp =	zfsctl_root_vptocnp,
 	.vop_pathconf =	zfsctl_common_pathconf,
 	.vop_getacl =	zfsctl_common_getacl,
+#if __FreeBSD_version >= 1400043
+	.vop_add_writecount =	vop_stdadd_writecount_nomsync,
+#endif
 };
 VFS_VOP_VECTOR_REGISTER(zfsctl_ops_root);
 
@@ -973,12 +995,13 @@ zfsctl_snapdir_lookup(struct vop_lookup_args *ap)
 		 */
 		VI_LOCK(*vpp);
 		if (((*vpp)->v_iflag & VI_MOUNT) == 0) {
+			VI_UNLOCK(*vpp);
 			/*
 			 * Upgrade to exclusive lock in order to:
 			 * - avoid race conditions
 			 * - satisfy the contract of mount_snapshot()
 			 */
-			err = VOP_LOCK(*vpp, LK_TRYUPGRADE | LK_INTERLOCK);
+			err = VOP_LOCK(*vpp, LK_TRYUPGRADE);
 			if (err == 0)
 				break;
 		} else {
@@ -1003,7 +1026,8 @@ zfsctl_snapdir_lookup(struct vop_lookup_args *ap)
 	    "%s/" ZFS_CTLDIR_NAME "/snapshot/%s",
 	    dvp->v_vfsp->mnt_stat.f_mntonname, name);
 
-	err = mount_snapshot(curthread, vpp, "zfs", mountpoint, fullname, 0);
+	err = mount_snapshot(curthread, vpp, "zfs", mountpoint, fullname, 0,
+	    dvp->v_vfsp);
 	kmem_free(mountpoint, mountpoint_len);
 	if (err == 0) {
 		/*
@@ -1035,21 +1059,26 @@ zfsctl_snapdir_readdir(struct vop_readdir_args *ap)
 	zfs_uio_t uio;
 	int *eofp = ap->a_eofflag;
 	off_t dots_offset;
+	ssize_t orig_resid;
 	int error;
 
 	zfs_uio_init(&uio, ap->a_uio);
+	orig_resid = zfs_uio_resid(&uio);
 
 	ASSERT3S(vp->v_type, ==, VDIR);
 
 	error = sfs_readdir_common(ZFSCTL_INO_ROOT, ZFSCTL_INO_SNAPDIR, ap,
 	    &uio, &dots_offset);
 	if (error != 0) {
-		if (error == ENAMETOOLONG) /* ran out of destination space */
-			error = 0;
+		if (error == ENAMETOOLONG) { /* ran out of destination space */
+			error = orig_resid == zfs_uio_resid(&uio) ?
+			    EINVAL : 0;
+		}
 		return (error);
 	}
 
-	ZFS_ENTER(zfsvfs);
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);
 	for (;;) {
 		uint64_t cookie;
 		uint64_t id;
@@ -1062,11 +1091,15 @@ zfsctl_snapdir_readdir(struct vop_readdir_args *ap)
 		dsl_pool_config_exit(dmu_objset_pool(zfsvfs->z_os), FTAG);
 		if (error != 0) {
 			if (error == ENOENT) {
-				if (eofp != NULL)
-					*eofp = 1;
-				error = 0;
+				if (orig_resid == zfs_uio_resid(&uio)) {
+					error = EINVAL;
+				} else {
+					error = 0;
+					if (eofp != NULL)
+						*eofp = 1;
+				}
 			}
-			ZFS_EXIT(zfsvfs);
+			zfs_exit(zfsvfs, FTAG);
 			return (error);
 		}
 
@@ -1077,14 +1110,16 @@ zfsctl_snapdir_readdir(struct vop_readdir_args *ap)
 		entry.d_reclen = sizeof (entry);
 		error = vfs_read_dirent(ap, &entry, zfs_uio_offset(&uio));
 		if (error != 0) {
-			if (error == ENAMETOOLONG)
-				error = 0;
-			ZFS_EXIT(zfsvfs);
+			if (error == ENAMETOOLONG) {
+				error = orig_resid == zfs_uio_resid(&uio) ?
+				    EINVAL : 0;
+			}
+			zfs_exit(zfsvfs, FTAG);
 			return (SET_ERROR(error));
 		}
 		zfs_uio_setoffset(&uio, cookie + dots_offset);
 	}
-	/* NOTREACHED */
+	__builtin_unreachable();
 }
 
 static int
@@ -1097,7 +1132,8 @@ zfsctl_snapdir_getattr(struct vop_getattr_args *ap)
 	uint64_t snap_count;
 	int err;
 
-	ZFS_ENTER(zfsvfs);
+	if ((err = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (err);
 	ds = dmu_objset_ds(zfsvfs->z_os);
 	zfsctl_common_getattr(vp, vap);
 	vap->va_ctime = dmu_objset_snap_cmtime(zfsvfs->z_os);
@@ -1107,22 +1143,21 @@ zfsctl_snapdir_getattr(struct vop_getattr_args *ap)
 		err = zap_count(dmu_objset_pool(ds->ds_objset)->dp_meta_objset,
 		    dsl_dataset_phys(ds)->ds_snapnames_zapobj, &snap_count);
 		if (err != 0) {
-			ZFS_EXIT(zfsvfs);
+			zfs_exit(zfsvfs, FTAG);
 			return (err);
 		}
 		vap->va_nlink += snap_count;
 	}
 	vap->va_size = vap->va_nlink;
 
-	ZFS_EXIT(zfsvfs);
+	zfs_exit(zfsvfs, FTAG);
 	return (0);
 }
 
 static struct vop_vector zfsctl_ops_snapdir = {
 	.vop_default =	&default_vnodeops,
-#if __FreeBSD_version >= 1300121
 	.vop_fplookup_vexec = VOP_EAGAIN,
-#endif
+	.vop_fplookup_symlink = VOP_EAGAIN,
 	.vop_open =	zfsctl_common_open,
 	.vop_close =	zfsctl_common_close,
 	.vop_getattr =	zfsctl_snapdir_getattr,
@@ -1134,6 +1169,9 @@ static struct vop_vector zfsctl_ops_snapdir = {
 	.vop_print =	zfsctl_common_print,
 	.vop_pathconf =	zfsctl_common_pathconf,
 	.vop_getacl =	zfsctl_common_getacl,
+#if __FreeBSD_version >= 1400043
+	.vop_add_writecount =	vop_stdadd_writecount_nomsync,
+#endif
 };
 VFS_VOP_VECTOR_REGISTER(zfsctl_ops_snapdir);
 
@@ -1143,7 +1181,7 @@ zfsctl_snapshot_inactive(struct vop_inactive_args *ap)
 {
 	vnode_t *vp = ap->a_vp;
 
-	VERIFY3S(vrecycle(vp), ==, 1);
+	vrecycle(vp);
 	return (0);
 }
 
@@ -1194,27 +1232,19 @@ zfsctl_snapshot_vptocnp(struct vop_vptocnp_args *ap)
 	 * before we can lock the vnode again.
 	 */
 	locked = VOP_ISLOCKED(vp);
-#if __FreeBSD_version >= 1300045
 	enum vgetstate vs = vget_prep(vp);
-#else
-	vhold(vp);
-#endif
 	vput(vp);
 
 	/* Look up .zfs/snapshot, our parent. */
 	error = zfsctl_snapdir_vnode(vp->v_mount, NULL, LK_SHARED, &dvp);
 	if (error == 0) {
-		VOP_UNLOCK1(dvp);
+		VOP_UNLOCK(dvp);
 		*ap->a_vpp = dvp;
 		*ap->a_buflen -= len;
-		bcopy(node->sn_name, ap->a_buf + *ap->a_buflen, len);
+		memcpy(ap->a_buf + *ap->a_buflen, node->sn_name, len);
 	}
 	vfs_unbusy(mp);
-#if __FreeBSD_version >= 1300045
 	vget_finish(vp, locked | LK_RETRY, vs);
-#else
-	vget(vp, locked | LK_VNHELD | LK_RETRY, curthread);
-#endif
 	return (error);
 }
 
@@ -1224,13 +1254,12 @@ zfsctl_snapshot_vptocnp(struct vop_vptocnp_args *ap)
  */
 static struct vop_vector zfsctl_ops_snapshot = {
 	.vop_default =		NULL, /* ensure very restricted access */
-#if __FreeBSD_version >= 1300121
 	.vop_fplookup_vexec =	VOP_EAGAIN,
-#endif
+	.vop_fplookup_symlink = VOP_EAGAIN,
+	.vop_open =		zfsctl_common_open,
+	.vop_close =		zfsctl_common_close,
 	.vop_inactive =		zfsctl_snapshot_inactive,
-#if __FreeBSD_version >= 1300045
-	.vop_need_inactive = vop_stdneed_inactive,
-#endif
+	.vop_need_inactive =	vop_stdneed_inactive,
 	.vop_reclaim =		zfsctl_snapshot_reclaim,
 	.vop_vptocnp =		zfsctl_snapshot_vptocnp,
 	.vop_lock1 =		vop_stdlock,
@@ -1238,6 +1267,9 @@ static struct vop_vector zfsctl_ops_snapshot = {
 	.vop_islocked =		vop_stdislocked,
 	.vop_advlockpurge =	vop_stdadvlockpurge, /* called by vgone */
 	.vop_print =		zfsctl_common_print,
+#if __FreeBSD_version >= 1400043
+	.vop_add_writecount =	vop_stdadd_writecount_nomsync,
+#endif
 };
 VFS_VOP_VECTOR_REGISTER(zfsctl_ops_snapshot);
 
@@ -1348,7 +1380,7 @@ zfsctl_snapshot_unmount(const char *snapname, int flags __unused)
 
 	int err = getzfsvfs(snapname, &zfsvfs);
 	if (err != 0) {
-		ASSERT3P(zfsvfs, ==, NULL);
+		ASSERT0P(zfsvfs);
 		return (0);
 	}
 	vfsp = zfsvfs->z_vfs;

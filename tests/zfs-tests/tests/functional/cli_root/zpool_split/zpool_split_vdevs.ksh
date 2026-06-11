@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -33,7 +34,7 @@ function cleanup
 {
 	destroy_pool $TESTPOOL
 	destroy_pool $TESTPOOL2
-	rm -f $FILEDEV_PREFIX*
+	rm -fd $FILEDEV_PREFIX* $altroot
 }
 
 #
@@ -122,7 +123,7 @@ typeset altroot="$TESTDIR/altroot-$TESTPOOL2"
 for config in "${goodconfs[@]}"
 do
 	create_config="${config%% *}"
-	add_config="$(awk '{$1= "";print $0}' <<< $config)"
+	add_config="$(awk '{$1=""; print $0}' <<< $config)"
 	log_must zpool create $TESTPOOL $(pool_config $create_config)
 	for vdev in $add_config; do
 		log_must zpool add -f $TESTPOOL $(pool_config $vdev)
@@ -137,7 +138,7 @@ done
 for config in "${badconfs[@]}"
 do
 	create_config="${config%% *}"
-	add_config="$(awk '{$1= "";print $0}' <<< $config)"
+	add_config="$(awk '{$1=""; print $0}' <<< $config)"
 	log_must zpool create $TESTPOOL $(pool_config $create_config)
 	for vdev in $add_config; do
 		log_must zpool add -f $TESTPOOL $(pool_config $vdev)

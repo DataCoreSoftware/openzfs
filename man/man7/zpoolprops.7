@@ -1,3 +1,4 @@
+.\" SPDX-License-Identifier: CDDL-1.0
 .\"
 .\" CDDL HEADER START
 .\"
@@ -6,7 +7,7 @@
 .\" You may not use this file except in compliance with the License.
 .\"
 .\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or http://www.opensolaris.org/os/licensing.
+.\" or https://opensource.org/licenses/CDDL-1.0.
 .\" See the License for the specific language governing permissions
 .\" and limitations under the License.
 .\"
@@ -26,8 +27,9 @@
 .\" Copyright 2017 Nexenta Systems, Inc.
 .\" Copyright (c) 2017 Open-E, Inc. All Rights Reserved.
 .\" Copyright (c) 2021, Colm Buckley <colm@tuatha.org>
+.\" Copyright (c) 2023, Klara Inc.
 .\"
-.Dd May 27, 2021
+.Dd December 4, 2024
 .Dt ZPOOLPROPS 7
 .Os
 .
@@ -40,19 +42,44 @@ Each pool has several properties associated with it.
 Some properties are read-only statistics while others are configurable and
 change the behavior of the pool.
 .Pp
+User properties have no effect on ZFS behavior.
+Use them to annotate pools in a way that is meaningful in your environment.
+For more information about user properties, see the
+.Sx User Properties
+section.
+.Pp
 The following are read-only properties:
 .Bl -tag -width "unsupported@guid"
-.It Cm allocated
+.It Sy allocated
 Amount of storage used within the pool.
 See
 .Sy fragmentation
 and
 .Sy free
 for more information.
+.It Sy bcloneratio
+The ratio of the total amount of storage that would be required to store all
+the cloned blocks without cloning to the actual storage used.
+The
+.Sy bcloneratio
+property is calculated as:
+.Pp
+.Sy ( ( bclonesaved + bcloneused ) * 100 ) / bcloneused
+.It Sy bclonesaved
+The amount of additional storage that would be required if block cloning
+was not used.
+.It Sy bcloneused
+The amount of storage used by cloned blocks.
 .It Sy capacity
 Percentage of pool space used.
 This property can also be referred to by its shortened column name,
 .Sy cap .
+.It Sy dedupcached
+Total size of the deduplication table currently loaded into the ARC.
+See
+.Xr zpool-prefetch 8 .
+.It Sy dedup_table_size
+Total on-disk size of the deduplication table.
 .It Sy expandsize
 Amount of uninitialized space within the pool or device that can be used to
 increase the total capacity of the pool.
@@ -82,11 +109,13 @@ By contrast, the
 property describes how much new data can be written to ZFS filesystems/volumes.
 The zpool
 .Sy free
-property is not generally useful for this purpose, and can be substantially more than the zfs
+property is not generally useful for this purpose, and can be substantially more
+than the zfs
 .Sy available
 space.
 This discrepancy is due to several factors, including raidz parity;
-zfs reservation, quota, refreservation, and refquota properties; and space set aside by
+zfs reservation, quota, refreservation, and refquota properties; and space set
+aside by
 .Sy spa_slop_shift
 (see
 .Xr zfs 4
@@ -101,12 +130,29 @@ Over time
 will decrease while
 .Sy free
 increases.
+.It Sy guid
+A unique identifier for the pool.
 .It Sy health
 The current health of the pool.
 Health can be one of
 .Sy ONLINE , DEGRADED , FAULTED , OFFLINE, REMOVED , UNAVAIL .
-.It Sy guid
-A unique identifier for the pool.
+.It Sy last_scrubbed_txg
+Indicates the transaction group (TXG) up to which the most recent scrub
+operation has checked and repaired the dataset.
+This provides insight into the data integrity status of their pool at
+a specific point in time.
+.Xr zpool-scrub 8
+can utilize this property to scan only data that has changed since the last
+scrub completed, when given the
+.Fl C
+flag.
+This property is not updated when performing an error scrub with the
+.Fl e
+flag.
+.It Sy leaked
+Space not released while
+.Sy freeing
+due to corruption, now permanently leaked into the pool.
 .It Sy load_guid
 A unique identifier for the pool.
 Unlike the
@@ -173,7 +219,7 @@ changed with the
 .Nm zpool Cm set
 command:
 .Bl -tag -width Ds
-.It Sy ashift Ns = Ns Sy ashift
+.It Sy ashift Ns = Ns Ar ashift
 Pool sector size exponent, to the power of
 .Sy 2
 (internally referred to as
@@ -184,7 +230,7 @@ layer and a ZFS internal exception list.
 I/O operations will be aligned to the specified size boundaries.
 Additionally, the minimum (disk)
 write size will be set to the specified size, so this represents a
-space vs. performance trade-off.
+space/performance trade-off.
 For optimal performance, the pool sector size should be greater than
 or equal to the sector size of the underlying disks.
 The typical case for setting this property is when
@@ -268,7 +314,8 @@ using the
 command.
 .It Sy bootfs Ns = Ns Sy (unset) Ns | Ns Ar pool Ns Op / Ns Ar dataset
 Identifies the default bootable dataset for the root pool.
-This property is expected to be set mainly by the installation and upgrade programs.
+This property is expected to be set mainly by the installation and upgrade
+programs.
 Not all Linux distribution boot processes use the bootfs property.
 .It Sy cachefile Ns = Ns Ar path Ns | Ns Sy none
 Controls the location of where the pool configuration is cached.
@@ -304,7 +351,7 @@ Specifies that the pool maintain compatibility with specific feature sets.
 When set to
 .Sy off
 (or unset) compatibility is disabled (all features may be enabled); when set to
-.Sy legacy Ns
+.Sy legacy
 no features may be enabled.
 When set to a comma-separated list of filenames
 (each filename may either be an absolute path, or relative to
@@ -321,6 +368,27 @@ See
 and
 .Xr zpool-upgrade 8
 for more information on the operation of compatibility feature sets.
+.It Sy dedup_table_quota Ns = Ns Ar number Ns | Ns Sy none Ns | Ns Sy auto
+This property sets a limit on the on-disk size of the pool's dedup table.
+Entries will not be added to the dedup table once this size is reached;
+if a dedup table already exists, and is larger than this size, they
+will not be removed as part of setting this property.
+Existing entries will still have their reference counts updated.
+.Pp
+The actual size limit of the table may be above or below the quota,
+depending on the actual on-disk size of the entries (which may be
+approximated for purposes of calculating the quota).
+That is, setting a quota size of 1M may result in the maximum size being
+slightly below, or slightly above, that value.
+Set to
+.Sy 'none'
+to disable.
+In automatic mode, which is the default, the size of a dedicated dedup vdev
+is used as the quota limit.
+.Pp
+The
+.Sy dedup_table_quota
+property works for both legacy and fast dedup tables.
 .It Sy dedupditto Ns = Ns Ar number
 This property is deprecated and no longer has any effect.
 .It Sy delegation Ns = Ns Sy on Ns | Ns Sy off
@@ -337,7 +405,8 @@ The behavior of such an event is determined as follows:
 .Bl -tag -width "continue"
 .It Sy wait
 Blocks all I/O access until the device connectivity is recovered and the errors
-are cleared.
+are cleared with
+.Nm zpool Cm clear .
 This is the default behavior.
 .It Sy continue
 Returns
@@ -410,3 +479,49 @@ backwards compatibility.
 Once feature flags are enabled on a pool this property will no longer have a
 value.
 .El
+.
+.Ss User Properties
+In addition to the standard native properties, ZFS supports arbitrary user
+properties.
+User properties have no effect on ZFS behavior, but applications or
+administrators can use them to annotate pools.
+.Pp
+User property names must contain a colon
+.Pq Qq Sy \&:
+character to distinguish them from native properties.
+They may contain lowercase letters, numbers, and the following punctuation
+characters: colon
+.Pq Qq Sy \&: ,
+dash
+.Pq Qq Sy - ,
+period
+.Pq Qq Sy \&. ,
+and underscore
+.Pq Qq Sy _ .
+The expected convention is that the property name is divided into two portions
+such as
+.Ar module : Ns Ar property ,
+but this namespace is not enforced by ZFS.
+User property names can be at most 255 characters, and cannot begin with a dash
+.Pq Qq Sy - .
+.Pp
+When making programmatic use of user properties, it is strongly suggested to use
+a reversed DNS domain name for the
+.Ar module
+component of property names to reduce the chance that two
+independently-developed packages use the same property name for different
+purposes.
+.Pp
+The values of user properties are arbitrary strings and
+are never validated.
+All of the commands that operate on properties
+.Po Nm zpool Cm list ,
+.Nm zpool Cm get ,
+.Nm zpool Cm set ,
+and so forth
+.Pc
+can be used to manipulate both native properties and user properties.
+Use
+.Nm zpool Cm set Ar name Ns =
+to clear a user property.
+Property values are limited to 8192 bytes.

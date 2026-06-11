@@ -24,6 +24,7 @@
  * Copyright (c) 2012, 2018 by Delphix. All rights reserved.
  * Copyright 2015 RackTop Systems.
  * Copyright (c) 2016, Intel Corporation.
+ * Portions Copyright 2022 Andrew Innes <andrew.c12@gmail.com>
  */
 
 /*
@@ -63,14 +64,12 @@
 #include <sys/fs/zfs.h>
 #include <sys/vdev_impl.h>
 
-#include <thread_pool.h>
 #include <libzutil.h>
 #include <libnvpair.h>
 
 #include <sys/efi_partition.h>
 
 #include "zutil_import.h"
-#include "os/windows/Trace.h"
 
 #ifdef HAVE_LIBUDEV
 #include <libudev.h>
@@ -123,158 +122,6 @@ zfs_dev_flush(int fd)
 	return (0);
 }
 
-void
-zpool_open_funcXX(void *arg)
-{
-	rdsk_node_t *rn = arg;
-	libpc_handle_t *hdl = rn->rn_hdl;
-	struct stat64 statbuf;
-	nvlist_t *config;
-	char *bname, *dupname;
-	uint64_t vdev_guid = 0;
-	int error;
-	int num_labels = 0;
-	int fd;
-
-	/*
-	 * Skip devices with well known prefixes there can be side effects
-	 * when opening devices which need to be avoided.
-	 *
-	 * hpet     - High Precision Event Timer
-	 * watchdog - Watchdog must be closed in a special way.
-	 */
-	dupname = zutil_strdup(hdl, rn->rn_name);
-	bname = basename(dupname);
-	error = ((strcmp(bname, "hpet") == 0) || is_watchdog_dev(bname));
-	free(dupname);
-	if (error)
-		return;
-
-	/*
-	 * Ignore failed stats.  We only want regular files and block devices.
-	 */
-	if (stat64(rn->rn_name, &statbuf) != 0 ||
-	    (!S_ISREG(statbuf.st_mode) && !S_ISBLK(statbuf.st_mode)))
-		return;
-
-	fd = open(rn->rn_name, O_RDONLY);
-	if ((fd < 0) && (errno == EINVAL))
-		fd = open(rn->rn_name, O_RDONLY);
-	if ((fd < 0) && (errno == EACCES))
-		hdl->lpc_open_access_error = B_TRUE;
-	if (fd < 0)
-		return;
-
-	/*
-	 * This file is too small to hold a zpool
-	 */
-	if (S_ISREG(statbuf.st_mode) && statbuf.st_size < SPA_MINDEVSIZE) {
-		(void) close(fd);
-		return;
-	}
-
-	error = zpool_read_label(fd, &config, &num_labels);
-	if (error != 0) {
-		(void) close(fd);
-		return;
-	}
-
-	if (num_labels == 0) {
-		(void) close(fd);
-		nvlist_free(config);
-		return;
-	}
-
-	/*
-	 * Check that the vdev is for the expected guid.  Additional entries
-	 * are speculatively added based on the paths stored in the labels.
-	 * Entries with valid paths but incorrect guids must be removed.
-	 */
-	error = nvlist_lookup_uint64(config, ZPOOL_CONFIG_GUID, &vdev_guid);
-	if (error || (rn->rn_vdev_guid && rn->rn_vdev_guid != vdev_guid)) {
-		(void) close(fd);
-		nvlist_free(config);
-		return;
-	}
-
-	(void) close(fd);
-
-	rn->rn_config = config;
-	rn->rn_num_labels = num_labels;
-
-	/*
-	 * Add additional entries for paths described by this label.
-	 */
-	if (rn->rn_labelpaths) {
-		char *path = NULL;
-		char *devid = NULL;
-		char *env = NULL;
-		rdsk_node_t *slice;
-		avl_index_t where;
-		int timeout;
-		int error;
-
-		if (label_paths(rn->rn_hdl, rn->rn_config, &path, &devid))
-			return;
-
-		env = getenv("ZPOOL_IMPORT_UDEV_TIMEOUT_MS");
-		if ((env == NULL) || sscanf(env, "%d", &timeout) != 1 ||
-		    timeout < 0) {
-			timeout = DISK_LABEL_WAIT;
-		}
-
-		/*
-		 * Allow devlinks to stabilize so all paths are available.
-		 */
-		zpool_label_disk_wait(rn->rn_name, timeout);
-
-		if (path != NULL) {
-			slice = zutil_alloc(hdl, sizeof (rdsk_node_t));
-			slice->rn_name = zutil_strdup(hdl, path);
-			slice->rn_vdev_guid = vdev_guid;
-			slice->rn_avl = rn->rn_avl;
-			slice->rn_hdl = hdl;
-			slice->rn_order = IMPORT_ORDER_PREFERRED_1;
-			slice->rn_labelpaths = B_FALSE;
-			pthread_mutex_lock(rn->rn_lock);
-			if (avl_find(rn->rn_avl, slice, &where)) {
-			pthread_mutex_unlock(rn->rn_lock);
-				free(slice->rn_name);
-				free(slice);
-			} else {
-				avl_insert(rn->rn_avl, slice, where);
-				pthread_mutex_unlock(rn->rn_lock);
-				zpool_open_func(slice);
-			}
-		}
-
-		if (devid != NULL) {
-			slice = zutil_alloc(hdl, sizeof (rdsk_node_t));
-			error = asprintf(&slice->rn_name, "%s%s",
-			    DEV_BYID_PATH, devid);
-			if (error == -1) {
-				free(slice);
-				return;
-			}
-
-			slice->rn_vdev_guid = vdev_guid;
-			slice->rn_avl = rn->rn_avl;
-			slice->rn_hdl = hdl;
-			slice->rn_order = IMPORT_ORDER_PREFERRED_2;
-			slice->rn_labelpaths = B_FALSE;
-			pthread_mutex_lock(rn->rn_lock);
-			if (avl_find(rn->rn_avl, slice, &where)) {
-				pthread_mutex_unlock(rn->rn_lock);
-				free(slice->rn_name);
-				free(slice);
-			} else {
-				avl_insert(rn->rn_avl, slice, where);
-				pthread_mutex_unlock(rn->rn_lock);
-				zpool_open_func(slice);
-			}
-		}
-	}
-}
 /*
  * Return the offset of the given label.
  */
@@ -290,8 +137,6 @@ static int
 zpool_read_label_win(HANDLE h, off_t offset, uint64_t len,
     nvlist_t **config, int *num_labels)
 {
-	DWORD threadID = GetCurrentThreadId();
-	TraceEvent(TRACE_INFO," zpool_read_label_win function started ThreadID:%lu", threadID);
 	int l, count = 0;
 	vdev_label_t *label;
 	nvlist_t *expected_config = NULL;
@@ -302,12 +147,11 @@ zpool_read_label_win(HANDLE h, off_t offset, uint64_t len,
 	*config = NULL;
 
 	drivesize = len;
+
 	size = P2ALIGN_TYPED(drivesize, sizeof (vdev_label_t), uint64_t);
 
-	if ((label = malloc(sizeof(vdev_label_t))) == NULL) {
-	    TraceEvent(TRACE_INFO,"zpool_read_label_win func return.malloc() failed ThreadID:%lu", threadID);
-	    return (-1);
-	}
+	if ((label = malloc(sizeof (vdev_label_t))) == NULL)
+		return (-1);
 
 	for (l = 0; l < VDEV_LABELS; l++) {
 		uint64_t state, guid, txg;
@@ -356,12 +200,14 @@ zpool_read_label_win(HANDLE h, off_t offset, uint64_t len,
 
 	free(label);
 	*config = expected_config;
-	TraceEvent(TRACE_INFO,"zpool_read_label_win func return.ThreadID:%lu", threadID);
+
 	return (0);
 }
 
 /*
- * Somethings do not like mixing slashes with backslashes
+ * Somethings do not like mixing slashes with backslashes. So
+ * let's try using slashes with user facing output, zpool status etc.
+ * but internally we use backslashes in vdev_physpath
  */
 static void
 zfs_backslashes(char *s)
@@ -371,6 +217,13 @@ zfs_backslashes(char *s)
 		*r = '\\';
 }
 
+static void
+zfs_slashes(char *s)
+{
+	char *r;
+	while ((r = strchr(s, '\\')) != NULL)
+		*r = '/';
+}
 
 void
 zpool_open_func(void *arg)
@@ -383,13 +236,11 @@ zpool_open_func(void *arg)
 	uint64_t vdev_guid = 0;
 	int error;
 	int num_labels = 0;
-	HANDLE fd;
+	HANDLE h;
 	uint64_t offset = 0;
 	uint64_t len = 0;
 	uint64_t drive_len;
 
-	DWORD threadID = GetCurrentThreadId();
-	TraceEvent(TRACE_INFO, "zpool_open_func_win started ThreadID:%lu", threadID);
 	// Check if this filename is encoded with "#start#len#name"
 	if (rn->rn_name[0] == '#') {
 		char *end = NULL;
@@ -398,30 +249,21 @@ zpool_open_func(void *arg)
 		while (end && *end == '#') end++;
 		len = strtoull(end, &end, 10);
 		while (end && *end == '#') end++;
-
-		TraceEvent(TRACE_INFO,"calling createfile for rn->rn_name:%s ThreadID:%lu", rn->rn_name, threadID);
-		fd = CreateFile(end,
+		h = CreateFile(end,
 		    GENERIC_READ,
 		    FILE_SHARE_READ /* | FILE_SHARE_WRITE */,
 		    NULL,
 		    OPEN_EXISTING,
 		    FILE_ATTRIBUTE_NORMAL /* | FILE_FLAG_OVERLAPPED */,
 		    NULL);
-		if (fd == INVALID_HANDLE_VALUE) {
+		if (h == INVALID_HANDLE_VALUE) {
 			int error = GetLastError();
-			TraceEvent(TRACE_INFO,"zpool_open_func func return.CreateFile failed with error %lu.rn->rn_name:%s ThreadID:%lu", error, rn->rn_name, threadID);
 			return;
 		}
 		LARGE_INTEGER place;
 		place.QuadPart = offset;
 		// If it fails, we cant read label
-		TraceEvent(TRACE_INFO,"Call SetFilePointerEx: offset:%lld,rn->rn_name:%s ThreadID:%lu", place.QuadPart, rn->rn_name, threadID);
-		BOOL retval = SetFilePointerEx(fd, place, NULL, FILE_BEGIN);
-
-		if (retval)
-		    TraceEvent(TRACE_INFO,"SetFilePointerEx:success. rn->rn_name:%s ThreadID:%lu", rn->rn_name, threadID);
-		else
-		    TraceEvent(TRACE_INFO,"SetFilePointerEx:failed with error.%lu rn->rn_name:%s ThreadID:%lu", GetLastError(), rn->rn_name, threadID);
+		SetFilePointerEx(h, place, NULL, FILE_BEGIN);
 		drive_len = len;
 
 	} else {
@@ -430,33 +272,27 @@ zpool_open_func(void *arg)
 		// snprintf(fullpath, sizeof (fullpath), "%s%s",
 		// 	"", rn->rn_name);
 		zfs_backslashes(rn->rn_name);
-		TraceEvent(TRACE_INFO,"calling createfile() rn->rn_name :%s ThreadID:%lu", rn->rn_name, threadID);
-		fd = CreateFile(rn->rn_name,
+		h = CreateFile(rn->rn_name,
 		    GENERIC_READ,
 		    FILE_SHARE_READ /* | FILE_SHARE_WRITE */,
 		    NULL,
 		    OPEN_EXISTING,
 		    FILE_ATTRIBUTE_NORMAL /* | FILE_FLAG_OVERLAPPED */,
 		    NULL);
-		if (fd == INVALID_HANDLE_VALUE) {
+		if (h == INVALID_HANDLE_VALUE) {
 			int error = GetLastError();
-			TraceEvent(TRACE_INFO,"func return.CreateFile() failed with error %lu.FullPath:%s ThreadID:%lu", error, rn->rn_name, threadID);
 			return;
 		}
 
-		TraceEvent(TRACE_INFO,"Get GetFileDriveSize().FullPath:%s ThreadID:%lu", rn->rn_name, threadID);
-		drive_len = GetFileDriveSize(fd);
+		drive_len = GetFileDriveSize(h);
 	}
 
-	TraceEvent(TRACE_INFO,"GetFileType() ThreadID:%lu", threadID);
-	DWORD type = GetFileType(fd);
+	DWORD type = GetFileType(h);
 
-	TraceEvent(TRACE_INFO,"GetDriveType(),filetype=%d ThreadID:%lu", type, threadID);
 	/* this file is too small to hold a zpool */
 	if (type == FILE_TYPE_DISK &&
 	    drive_len < SPA_MINDEVSIZE) {
-		CloseHandle(fd);
-		TraceEvent(TRACE_INFO,"zpool_open_func function returning");
+		CloseHandle(h);
 		return;
 	}
 // else if (type != FILE_TYPE_DISK) {
@@ -464,26 +300,21 @@ zpool_open_func(void *arg)
 		 * Try to read the disk label first so we don't have to
 		 * open a bunch of minor nodes that can't have a zpool.
 		 */
-//		check_slices(rn->rn_avl, HTOI(fd), rn->rn_name);
+//		check_slices(rn->rn_avl, HTOI(h), rn->rn_name);
 //	}
 
-	if ((zpool_read_label_win(fd, offset, drive_len, &config,
+	if ((zpool_read_label_win(h, offset, drive_len, &config,
 	    &num_labels)) != 0) {
-		CloseHandle(fd);
-		(void) no_memory(rn->rn_hdl);
-		TraceEvent(TRACE_INFO, "func return.zpool_read_label_win failed. ThreadID:%lu", threadID);
+		CloseHandle(h);
+		(void) fprintf(stderr, "internal error: out of memory\n");
 		return;
 	}
 
-	TraceEvent(TRACE_INFO,"num_labels %d ThreadID:%lu", num_labels, threadID);
 	if (num_labels == 0) {
-		CloseHandle(fd);
-		TraceEvent(TRACE_INFO,"Freeing nvlist. num_labels=0 ThreadID:%lu", threadID);
+		CloseHandle(h);
 		nvlist_free(config);
-		TraceEvent(TRACE_INFO,"func return.num_labels=0 ThreadID:%lu", threadID);
 		return;
 	}
-
 
 	/*
 	 * Check that the vdev is for the expected guid.  Additional entries
@@ -492,17 +323,16 @@ zpool_open_func(void *arg)
 	 */
 	error = nvlist_lookup_uint64(config, ZPOOL_CONFIG_GUID, &vdev_guid);
 	if (error || (rn->rn_vdev_guid && rn->rn_vdev_guid != vdev_guid)) {
-		(void) close(fd);
+		CloseHandle(h);
 		nvlist_free(config);
 		return;
 	}
 
-	CloseHandle(fd);
+	CloseHandle(h);
 
 	rn->rn_config = config;
 	rn->rn_num_labels = num_labels;
 
-	TraceEvent(TRACE_INFO, "rn->rn_labelpaths %d", rn->rn_labelpaths);
 	/*
 	 * Add additional entries for paths described by this label.
 	 */
@@ -531,7 +361,8 @@ zpool_open_func(void *arg)
 
 		if (path != NULL) {
 			slice = zutil_alloc(hdl, sizeof (rdsk_node_t));
-			slice->rn_name = zutil_strdup(hdl, path);
+			// slice->rn_name = zutil_strdup(hdl, path);
+			slice->rn_name = zutil_strdup(hdl, rn->rn_name);
 			slice->rn_vdev_guid = vdev_guid;
 			slice->rn_avl = rn->rn_avl;
 			slice->rn_hdl = hdl;
@@ -585,109 +416,6 @@ zpool_default_search_paths(size_t *count)
 	return ((const char * const *)zpool_default_import_path);
 }
 
-int
-zpool_find_import_blkidXXX(libpc_handle_t *hdl, pthread_mutex_t *lock,
-    avl_tree_t **slice_cache)
-{
-	int i, dirs;
-	struct dirent *dp;
-	char path[MAXPATHLEN];
-	char *end, **dir;
-	size_t pathleft;
-	avl_index_t where;
-	rdsk_node_t *slice;
-	int error = 0;
-
-	dir = zpool_default_import_path;
-	dirs = DEFAULT_IMPORT_PATH_SIZE;
-
-	/*
-	 * Go through and read the label configuration information from every
-	 * possible device, organizing the information according to pool GUID
-	 * and toplevel GUID.
-	 */
-	*slice_cache = zutil_alloc(hdl, sizeof (avl_tree_t));
-	avl_create(*slice_cache, slice_cache_compare,
-	    sizeof (rdsk_node_t), offsetof(rdsk_node_t, rn_node));
-
-	for (i = 0; i < dirs; i++) {
-		char rdsk[MAXPATHLEN];
-		int dfd;
-		DIR *dirp;
-
-#ifndef DEBUG
-		/*
-		 * We skip imports in /dev/ in release builds, due to the
-		 * danger of cache/log devices and drive renumbering.
-		 * We have it in zpool_default_import_path to allow
-		 * zfs_resolve_shortname() to still work, ie
-		 * "zpool create disk3" to resolve to /dev/disk3.
-		 */
-		if (strncmp("/dev", dir[i], 4) == 0)
-			continue;
-#endif
-
-		/* use realpath to normalize the path */
-		if (realpath(dir[i], path) == 0) {
-
-			/* it is safe to skip missing search paths */
-			if (errno == ENOENT)
-				continue;
-
-			return (EPERM);
-		}
-		end = &path[strlen(path)];
-		*end++ = '/';
-		*end = 0;
-		pathleft = &path[sizeof (path)] - end;
-
-		(void) strlcpy(rdsk, path, sizeof (rdsk));
-
-		if ((dfd = open(rdsk, O_RDONLY)) < 0 ||
-		    (dirp = fdopendir(dfd)) == NULL) {
-			if (dfd >= 0)
-				(void) close(dfd);
-			return (ENOENT);
-		}
-
-		while ((dp = readdir(dirp)) != NULL) {
-			const char *name = dp->d_name;
-			if (name[0] == '.' &&
-			    (name[1] == 0 || (name[1] == '.' && name[2] == 0)))
-				continue;
-
-			slice = zutil_alloc(hdl, sizeof (rdsk_node_t));
-
-			error = asprintf(&slice->rn_name, "%s%s",
-			    path, name);
-			if (error == -1) {
-				free(slice);
-				return (ENOMEM);
-			}
-
-			slice->rn_vdev_guid = 0;
-			slice->rn_lock = lock;
-			slice->rn_avl = *slice_cache;
-			slice->rn_hdl = hdl;
-			slice->rn_labelpaths = B_FALSE;
-			slice->rn_order = IMPORT_ORDER_SCAN_OFFSET + i;
-
-			pthread_mutex_lock(lock);
-			if (avl_find(*slice_cache, slice, &where)) {
-				free(slice->rn_name);
-				free(slice);
-			} else {
-				avl_insert(*slice_cache, slice, where);
-			}
-			pthread_mutex_unlock(lock);
-		}
-
-		(void) closedir(dirp);
-	}
-
-	return (0);
-}
-
 /*
  * Call Windows API to get list of physical disks, and iterate through them
  * finding partitions.
@@ -696,7 +424,6 @@ int
 zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
     avl_tree_t **slice_cache)
 {
-	TraceEvent(TRACE_INFO,"zpool_find_import_blkid function started");
 	int i, dirs;
 	struct dirent *dp;
 	char path[MAXPATHLEN];
@@ -743,7 +470,7 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 	ZeroMemory(&deviceInterfaceData, sizeof (SP_DEVICE_INTERFACE_DATA));
 	deviceInterfaceData.cbSize = sizeof (SP_DEVICE_INTERFACE_DATA);
 	deviceIndex = 0;
-	TraceEvent(TRACE_INFO, "Before enumerating the devices");
+
 	while (SetupDiEnumDeviceInterfaces(diskClassDevices,
 	    NULL,
 	    &diskClassDeviceInterfaceGuid,
@@ -809,8 +536,7 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 		fflush(stderr);
 		snprintf(rdsk, MAXPATHLEN, "\\\\.\\PHYSICALDRIVE%d",
 		    diskNumber.DeviceNumber);
-		TraceEvent(TRACE_INFO,"path '%s' and '\\\\?\\PhysicalDrive%d' rdsk %s :", deviceInterfaceDetailData->DevicePath,
-		    diskNumber.DeviceNumber, rdsk);
+
 		// CloseHandle(disk);
 
 #if 0
@@ -833,7 +559,6 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 			    partitions->PartitionCount);
 			fflush(stderr);
 
-			TraceEvent(TRACE_INFO," Partion count :%d", partitions->PartitionCount);
 			for (int i = 0; i < partitions->PartitionCount; i++) {
 				int add = 0;
 		switch (partitions->PartitionEntry[i].PartitionStyle) {
@@ -845,24 +570,17 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 			    StartingOffset.QuadPart,
 			    partitions->PartitionEntry[i].
 			    PartitionLength.QuadPart);
-			TraceEvent(TRACE_INFO,"mbr %d: type %x off 0x%llx len 0x%llx", i,
-			    partitions->PartitionEntry[i].Mbr.PartitionType,
-			    partitions->PartitionEntry[i].StartingOffset.QuadPart,
-			    partitions->PartitionEntry[i].PartitionLength.QuadPart);
 			fflush(stderr);
 			add = 1;
 			break;
 		case PARTITION_STYLE_GPT:
 			fprintf(stderr,
-			    "    gpt %d: type %x off 0x%llx len 0x%llx\n", i,
+			    "    gpt %d: type %llx off 0x%llx len 0x%llx\n", i,
 			    partitions->PartitionEntry[i].Gpt.PartitionType,
 			    partitions->PartitionEntry[i].
 			    StartingOffset.QuadPart,
 			    partitions->PartitionEntry[i].PartitionLength.
 			    QuadPart);
-			TraceEvent(TRACE_INFO,"gpt %d: off 0x%llx len 0x%llx", i,
-			    partitions->PartitionEntry[i].StartingOffset.QuadPart,
-			    partitions->PartitionEntry[i].PartitionLength.QuadPart);
 			fflush(stderr);
 			add = 1;
 			break;
@@ -871,11 +589,14 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 		if (add &&
 		    partitions->PartitionEntry[i].PartitionLength.
 		    QuadPart > SPA_MINDEVSIZE) {
+
 			slice = zutil_alloc(hdl, sizeof (rdsk_node_t));
 
 			error = asprintf(&slice->rn_name,
 			    "\\\\?\\Harddisk%uPartition%u",
-			    diskNumber.DeviceNumber, i);
+			    diskNumber.DeviceNumber,
+			    partitions->PartitionEntry[i].PartitionNumber);
+
 			if (error == -1) {
 				free(slice);
 				continue;
@@ -885,8 +606,8 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 			slice->rn_lock = lock;
 			slice->rn_avl = *slice_cache;
 			slice->rn_hdl = hdl;
-			slice->rn_labelpaths = B_FALSE;
-			slice->rn_order = IMPORT_ORDER_PREFERRED_2;
+			slice->rn_labelpaths = B_TRUE;
+			slice->rn_order = IMPORT_ORDER_PREFERRED_1;
 
 			pthread_mutex_lock(lock);
 			if (avl_find(*slice_cache, slice, &where)) {
@@ -902,7 +623,6 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 			// it would be possible that the
 			// disk itself contains a pool, so let's check that
 			if (partitions->PartitionCount == 0) {
-
 				slice = zutil_alloc(hdl, sizeof (rdsk_node_t));
 
 				uint64_t size = GetFileDriveSize(disk);
@@ -911,7 +631,7 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 				    "#%llu#%llu#%s",
 				    0ULL, size,
 				    deviceInterfaceDetailData->DevicePath);
-				TraceEvent(TRACE_INFO,"diskname::::%s errorcode:%d", slice->rn_name, error);
+
 				if (error == -1) {
 					free(slice);
 					continue;
@@ -921,7 +641,7 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 				slice->rn_lock = lock;
 				slice->rn_avl = *slice_cache;
 				slice->rn_hdl = hdl;
-				slice->rn_labelpaths = B_FALSE;
+				slice->rn_labelpaths = B_TRUE;
 				slice->rn_order =
 				    IMPORT_ORDER_SCAN_OFFSET + deviceIndex;
 
@@ -938,7 +658,6 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 			free(partitions);
 		} else {
 			fprintf(stderr, "read partitions ng\n");
-			TraceEvent(TRACE_INFO,"read partitions ng");
 			fflush(stderr);
 		}
 
@@ -1026,7 +745,7 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 				slice->rn_hdl = hdl;
 				slice->rn_labelpaths = B_TRUE;
 				slice->rn_order =
-				    IMPORT_ORDER_SCAN_OFFSET + i;
+				    IMPORT_ORDER_DEFAULT;
 
 				pthread_mutex_lock(lock);
 				if (avl_find(*slice_cache, slice, &where)) {
@@ -1042,26 +761,15 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 			fprintf(stderr,
 			    "backup %d, efi_nparts %u, and primarynum %u\r\n",
 			    backup, vtoc->efi_nparts, primary_num_partitions);
-			if (backup && vtoc && vtoc->efi_nparts == 9) {
+
+			if (backup && vtoc && vtoc->efi_nparts == 9 &&
+			    primary_num_partitions == 128) {
 				fprintf(stderr,
 				    "Windows corrupted Primary EFI/GPT "
 				    "label detected\r\n");
-				TraceEvent(TRACE_INFO, "Windows corrupted Primary EFI/GPT label detected\r\n");
 				fflush(stderr);
 				// vtoc->efi_nparts = 128;
 				// efi_write(disk, vtoc);
-				 CloseHandle(disk);
-				 int status = restore_primary_gpt_from_backup(vtoc, deviceInterfaceDetailData->DevicePath);
-				 if (status < 0)
-				 {
-				     fprintf(stderr,"Reconstruction of corrupted Primary EFI/GPT label FAILED\r\n");
-				     TraceEvent(TRACE_INFO, "Reconstruction of corrupted Primary EFI/GPT label FAILED\r\n");
-				 }
-				 else
-				 {
-				     fprintf(stderr, "Reconstruction of corrupted Primary EFI/GPT label SUCCESSFUL\r\n");
-				     TraceEvent(TRACE_INFO, "Reconstruction of corrupted Primary EFI/GPT label SUCCESSFUL\r\n");
-				 }
 			}
 
 			efi_free(vtoc);
@@ -1075,97 +783,15 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 			    "Unable to open disk, are we Administrator? "
 			    "GetLastError() is 0x%x\n",
 			    GetLastError());
-			TraceEvent(TRACE_INFO,"Unable to open disk, are we Administrator ? "
-			    "GetLastError() is 0x%x\n",
-			    GetLastError());
 			fflush(stderr);
 		}
 
 #endif
 	} // while SetupDiEnumDeviceInterfaces
 
-#if 0
-	/* Now lets iterate the partitions (volumes) */
-	HANDLE vol;
-	vol = FindFirstVolume(rdsk, sizeof (rdsk));
-	while (vol != INVALID_HANDLE_VALUE) {
-
-		// If it ends with a \, we need to eat it.
-		char *r;
-		r = &rdsk[strlen(rdsk) - 1];
-		if (*r == '\\' || *r == '/')
-			*r = 0;
-
-		fprintf(stderr, "Processing volume '%s'\n", rdsk);
-		fflush(stderr);
-
-		slice = zutil_alloc(hdl, sizeof (rdsk_node_t));
-
-		slice->rn_name = zutil_strdup(hdl, rdsk);
-		slice->rn_vdev_guid = 0;
-		slice->rn_lock = lock;
-		slice->rn_avl = *slice_cache;
-		slice->rn_hdl = hdl;
-		slice->rn_labelpaths = B_FALSE;
-		slice->rn_order = IMPORT_ORDER_SCAN_OFFSET + i;
-
-		pthread_mutex_lock(lock);
-		if (avl_find(*slice_cache, slice, &where)) {
-			free(slice->rn_name);
-			free(slice);
-		} else {
-			avl_insert(*slice_cache, slice, where);
-		}
-		pthread_mutex_unlock(lock);
-
-
-		if (!FindNextVolume(vol, rdsk, sizeof (rdsk))) {
-			FindVolumeClose(vol);
-			vol = INVALID_HANDLE_VALUE;
-		}
-	}
-#endif
 	return (0);
 }
 
-static int
-restore_primary_gpt_from_backup(
-    struct dk_gpt* vtoc,
-    const char* path)
-{
-	vtoc->efi_nparts = EFI_NUMPAR;
-	int fd, error;
-
-	fprintf(stderr, "%s: trying to offline disk path\r\n", __func__);
-	TraceEvent(TRACE_INFO, "trying to offline disk path\r\n");
-	OfflineDisk(path);
-
-	if ((fd = open(path, O_RDWR | O_DIRECT)) < 0) {
-	    fprintf(stderr, "%s: Failed to open disk path [%s]\r\n", __func__, path);
-	    TraceEvent(TRACE_INFO, "Failed to open disk path %s\r\n", path);
-	    return -1;
-	}
-	fprintf(stderr, "%s: disk open successful [%s]\r\n", __func__, path);
-	repair_vtoc(fd, vtoc);
-
-	int rval = efi_write(fd, vtoc);
-	(void)fsync(fd);
-	fprintf(stderr, "%s:rewritting the partition completed, status= %d\r\n",__func__, rval);
-	TraceEvent(TRACE_INFO, "rewritting the partition completed, status= %d\r\n", rval);
-	dump_label(fd);
-
-	fprintf(stderr, "%s: trying to online disk\r\n", __func__);
-	TraceEvent(TRACE_INFO, "trying to online disk\r\n");
-	rval = OnlineDisk(path);
-	if (FAILED(rval))
-	{
-	    fprintf(stderr, "%s: failed %d (0x%x)\r\n", __func__, rval, rval);
-	    TraceEvent(TRACE_INFO, "Online disk failed = %d\r\n", rval);
-	}
-	    
-	(void)close(fd);
-	return 0;
-}
 
 /*
  * Linux persistent device strings for vdev labels
@@ -1178,18 +804,29 @@ typedef struct vdev_dev_strs {
 	char	vds_devphys[128];
 } vdev_dev_strs_t;
 
-/* ARGSUSED */
+
 int
 zfs_device_get_devid(struct udev_device *dev, char *bufptr, size_t buflen)
 {
 	return (ENODATA);
 }
 
-/* ARGSUSED */
+
 int
 zfs_device_get_physical(struct udev_device *dev, char *bufptr, size_t buflen)
 {
 	return (ENODATA);
+}
+
+/*
+ * Encode the persistent devices strings
+ * used for the vdev disk label
+ */
+static int
+encode_device_strings(const char *path, vdev_dev_strs_t *ds,
+    boolean_t wholedisk)
+{
+	return (ENOENT);
 }
 
 /* Given a "#1234#1234#/path/part" - find the path part only */
@@ -1223,14 +860,8 @@ get_device_number(char *device_path, STORAGE_DEVICE_NUMBER *device_number)
 	HANDLE hDevice = INVALID_HANDLE_VALUE;
 	DWORD returned = 0;
 
-	hDevice = CreateFile(device_path,
-	    GENERIC_READ,
-	    FILE_SHARE_READ /* | FILE_SHARE_WRITE */,
-	    NULL,
-	    OPEN_EXISTING,
-	    FILE_ATTRIBUTE_NORMAL /* | FILE_FLAG_OVERLAPPED */,
-	    NULL);
-	if (hDevice == INVALID_HANDLE_VALUE) {
+	hDevice = open(device_path, O_RDONLY);
+	if (hDevice < 0) {
 		// fprintf(stderr, "invalid handle value\n"); fflush(stderr);
 		return (GetLastError());
 	}
@@ -1240,7 +871,8 @@ get_device_number(char *device_path, STORAGE_DEVICE_NUMBER *device_number)
 	    (LPVOID)device_number, (DWORD)sizeof (*device_number),
 	    (LPDWORD)&returned, (LPOVERLAPPED)NULL);
 
-	CloseHandle(hDevice);
+	// CloseHandle(hDevice);
+	close(hDevice);
 
 	if (!ret) {
 		// fprintf(stderr, "DeviceIoControl returned error\n");
@@ -1273,7 +905,7 @@ get_device_number(char *device_path, STORAGE_DEVICE_NUMBER *device_number)
  *	vdev_enc_sysfs_path: '/sys/class/enclosure/11:0:1:0/SLOT 4'
  */
 void
-update_vdev_config_dev_strs(nvlist_t *nv)
+update_vdev_config_dev_strsXXXX(nvlist_t *nv)
 {
 	vdev_dev_strs_t vds;
 	char *env, *type, *path, *devid;
@@ -1297,7 +929,7 @@ update_vdev_config_dev_strs(nvlist_t *nv)
 	    FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
 	if (h != INVALID_HANDLE_VALUE) {
 		struct dk_gpt *vtoc;
-		if ((efi_alloc_and_read(h, &vtoc)) == 0) {
+		if ((efi_alloc_and_read(HTOI(h), &vtoc)) == 0) {
 		// Slice 1 should be ZFS
 		fprintf(stderr,
 		    "this code assumes ZFS is on partition 1\n");
@@ -1331,22 +963,244 @@ update_vdev_config_dev_strs(nvlist_t *nv)
 		fflush(stderr);
 		fprintf(stderr, "setting physpath here '%s'\r\n", path);
 		fflush(stderr);
-		TraceEvent(TRACE_INFO, "setting path here '%s'\r\n", vdev_path);
+		nvlist_remove_all(nv, ZPOOL_CONFIG_PHYS_PATH);
 		if (nvlist_add_string(nv, ZPOOL_CONFIG_PHYS_PATH, path) != 0)
 			return;
-		// This call frees the original path.
+		if (nvlist_add_string(nv, ZPOOL_CONFIG_VDEV_ENC_SYSFS_PATH,
+		    strdup(path)) != 0)
+			return;
+		// This call frees the original "path", can't access after now
+		nvlist_remove_all(nv, ZPOOL_CONFIG_PATH);
 		if (nvlist_add_string(nv, ZPOOL_CONFIG_PATH, vdev_path) != 0)
 			return;
-	} else {
-		fprintf(stderr, "not setting physpath \r\n", path);
-		fflush(stderr);
 
-//		if (nvlist_add_string(nv, ZPOOL_CONFIG_PATH, path) != 0)
-//			return;
+	} else {
+		// Not a disk, filepool. Fix path.
+		char *vdev_path;
+
+		if (path[0] != '/') {
+			asprintf(&vdev_path, "\\??\\%s", path);
+			zfs_backslashes(vdev_path);
+			if (nvlist_add_string(nv, ZPOOL_CONFIG_PHYS_PATH,
+			    vdev_path) != 0)
+				return;
+
+			asprintf(&vdev_path, "//./%s", path);
+			zfs_slashes(vdev_path);
+			fprintf(stderr, "correcting path: '%s' \r\n",
+			    vdev_path);
+			fflush(stderr);
+			if (nvlist_add_string(nv, ZPOOL_CONFIG_PATH,
+			    vdev_path) != 0)
+				return;
+
+		}
 	}
 
 	free(devid);
 
+}
+
+/*
+ * Update a leaf vdev's persistent device strings
+ *
+ * - only applies for a dedicated leaf vdev (aka whole disk)
+ * - updated during pool create|add|attach|import
+ * - used for matching device matching during auto-{online,expand,replace}
+ * - stored in a leaf disk config label (i.e. alongside 'path' NVP)
+ * - these strings are currently not used in kernel (i.e. for vdev_disk_open)
+ *
+ * single device node example:
+ *      devid:          'scsi-MG03SCA300_350000494a8cb3d67-part1'
+ *      phys_path:      'pci-0000:04:00.0-sas-0x50000394a8cb3d67-lun-0'
+ *
+ * multipath device node example:
+ *      devid:          'dm-uuid-mpath-35000c5006304de3f'
+ *
+ * We also store the enclosure sysfs path for turning on enclosure LEDs
+ * (if applicable):
+ *      vdev_enc_sysfs_path: '/sys/class/enclosure/11:0:1:0/SLOT 4'
+ */
+void
+update_vdev_config_dev_strs(nvlist_t *nv)
+{
+	/*
+	 * First Windows work
+	 */
+	vdev_dev_strs_t vds;
+	char *env, *type, *path, *devid;
+	uint64_t wholedisk = 0;
+	int ret;
+	// Build a pretty vdev_path here
+	char *end = NULL;
+	STORAGE_DEVICE_NUMBER deviceNumber;
+	char udevpath[MAXPATHLEN];
+
+	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &path) != 0)
+		return;
+	nvlist_lookup_uint64(nv, ZPOOL_CONFIG_WHOLE_DISK, &wholedisk);
+
+	fprintf(stderr, "working on dev '%s'\n", path); fflush(stderr);
+
+	devid = strdup(path);
+
+	HANDLE h;
+
+	// If path already has #int#int/path, dont need to look it up again
+	if (path[0] != '#') {
+		h = open(path, O_RDONLY);
+
+		if (h >= 0) {
+			struct dk_gpt *vtoc;
+			if ((efi_alloc_and_read(HTOI(h), &vtoc)) == 0) {
+				// Slice 1 should be ZFS
+				fprintf(stderr,
+				"this code assumes ZFS is on partition 1\n");
+				fflush(stderr);
+				snprintf(udevpath, MAXPATHLEN, "#%llu#%llu#%s",
+				    vtoc->efi_parts[0].p_start * (uint64_t)
+				    vtoc->efi_lbasize,
+				    vtoc->efi_parts[0].p_size * (uint64_t)
+				    vtoc->efi_lbasize,
+				    path);
+				efi_free(vtoc);
+				path = udevpath;
+			}
+			close(h);
+		}
+	}
+
+	remove_partition_offset_hack(devid, &end);
+
+	// If it is a device, clean that up - otherwise it is a filename pool
+	ret = get_device_number(end, &deviceNumber);
+	if (ret == 0) {
+		char *vdev_path;
+
+		if (path[0] == '#') {
+			/*
+			 * Already offset-encoded (#offset#len#devpath).
+			 * Use a human-readable path; the encoded path goes
+			 * into physpath so the kernel uses the right offset.
+			 */
+			if (wholedisk)
+				asprintf(&vdev_path, "/dev/physicaldrive%lu",
+				    deviceNumber.DeviceNumber);
+			else
+				asprintf(&vdev_path,
+				    "/dev/Harddisk%luPartition%lu",
+				    deviceNumber.DeviceNumber,
+				    deviceNumber.PartitionNumber);
+		} else if (deviceNumber.PartitionNumber > 0) {
+			/*
+			 * Partition device (\\?\HarddiskXPartitionY).
+			 * Store with forward slashes; the kernel converts
+			 * //?/ back to \??\ and opens it directly.
+			 * No physpath offset hack needed.
+			 */
+			vdev_path = strdup(end);
+			zfs_slashes(vdev_path);
+		} else {
+			if (wholedisk)
+				asprintf(&vdev_path, "/dev/physicaldrive%lu",
+				    deviceNumber.DeviceNumber);
+			else
+				asprintf(&vdev_path,
+				    "/dev/Harddisk%luPartition%lu",
+				    deviceNumber.DeviceNumber,
+				    deviceNumber.PartitionNumber);
+		}
+
+		fprintf(stderr, "setting path here '%s'\r\n", vdev_path);
+		fflush(stderr);
+		fprintf(stderr, "setting physpath here '%s'\r\n", path);
+		fflush(stderr);
+		nvlist_remove_all(nv, ZPOOL_CONFIG_PHYS_PATH);
+		if (nvlist_add_string(nv, ZPOOL_CONFIG_PHYS_PATH, path) != 0)
+			return;
+		// This call frees the original "path", can't access after now
+		nvlist_remove_all(nv, ZPOOL_CONFIG_PATH);
+		if (nvlist_add_string(nv, ZPOOL_CONFIG_PATH, vdev_path) != 0)
+			return;
+
+	} else {
+		// Not a disk, filepool. Fix path.
+		char *vdev_path;
+
+		if (path[0] != '/') {
+			asprintf(&vdev_path, "\\??\\%s", path);
+			zfs_backslashes(vdev_path);
+			if (nvlist_add_string(nv, ZPOOL_CONFIG_PHYS_PATH, \
+			    vdev_path) != 0)
+			return;
+
+		asprintf(&vdev_path, "//./%s", path);
+		zfs_slashes(vdev_path);
+		fprintf(stderr, "correcting path: '%s' \r\n", vdev_path);
+		fflush(stderr);
+		if (nvlist_add_string(nv, ZPOOL_CONFIG_PATH, vdev_path) != 0)
+			return;
+
+		}
+	}
+
+	free(devid);
+
+
+
+	/*
+	 * For the benefit of legacy ZFS implementations, allow
+	 * for opting out of devid strings in the vdev label.
+	 *
+	 * example use:
+	 *      env ZFS_VDEV_DEVID_OPT_OUT=YES zpool import dozer
+	 *
+	 * explanation:
+	 * Older ZFS on Linux implementations had issues when attempting to
+	 * display pool config VDEV names if a "devid" NVP value is present
+	 * in the pool's config.
+	 *
+	 *
+	 * For example, a pool that originated on illumos platform would
+	 * have a devid value in the config and "zpool status" would fail
+	 * when listing the config.
+	 *
+	 * A pool can be stripped of any "devid" values on import or
+	 * prevented from adding them on zpool create|add by setting
+	 * ZFS_VDEV_DEVID_OPT_OUT.
+	 */
+	env = getenv("ZFS_VDEV_DEVID_OPT_OUT");
+	if (env && (strtoul(env, NULL, 0) > 0 ||
+	    !strncasecmp(env, "YES", 3) || !strncasecmp(env, "ON", 2))) {
+		(void) nvlist_remove_all(nv, ZPOOL_CONFIG_DEVID);
+		(void) nvlist_remove_all(nv, ZPOOL_CONFIG_PHYS_PATH);
+		return;
+	}
+
+	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_TYPE, &type) != 0 ||
+	    strcmp(type, VDEV_TYPE_DISK) != 0) {
+		return;
+	}
+	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &path) != 0)
+		return;
+	(void) nvlist_lookup_uint64(nv, ZPOOL_CONFIG_WHOLE_DISK, &wholedisk);
+
+	/*
+	 * Update device string values in the config nvlist.
+	 */
+	if (encode_device_strings(path, &vds, (boolean_t)wholedisk) == 0) {
+		(void) nvlist_add_string(nv, ZPOOL_CONFIG_DEVID, vds.vds_devid);
+		if (vds.vds_devphys[0] != '\0') {
+			(void) nvlist_add_string(nv, ZPOOL_CONFIG_PHYS_PATH,
+			    vds.vds_devphys);
+		}
+
+	} else {
+		/* Clear out any stale entries. */
+		(void) nvlist_remove_all(nv, ZPOOL_CONFIG_DEVID);
+		// (void)nvlist_remove_all(nv, ZPOOL_CONFIG_PHYS_PATH);
+		(void) nvlist_remove_all(nv, ZPOOL_CONFIG_VDEV_ENC_SYSFS_PATH);
+	}
 }
 
 /*
@@ -1371,4 +1225,26 @@ zfs_resolve_shortname_os(const char *name, char *path, size_t len)
 		return (0);
 	}
 	return (ENOENT);
+}
+
+void
+update_vdev_config_dev_sysfs_path(nvlist_t *nv, const char *path,
+    const char *key)
+{
+	(void) nv;
+	(void) path;
+	(void) key;
+}
+
+void
+update_vdevs_config_dev_sysfs_path(nvlist_t *config)
+{
+	(void) config;
+}
+
+int
+zpool_disk_wait(const char *path)
+{
+	(void) path;
+	return (ENOTSUP);
 }

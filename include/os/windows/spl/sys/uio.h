@@ -26,7 +26,6 @@
  *
  * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
  * Copyright (c) 2015, Joyent, Inc.  All rights reserved.
- * Copyright 2017 Jorgen Lundman <lundman@lundman.net>
  */
 
 /*	Copyright (c) 1984, 1986, 1987, 1988, 1989 AT&T	*/
@@ -56,6 +55,13 @@ extern "C" {
 #include <sys/types.h>
 
 /*
+ * uio_extflg: extended flags
+ */
+#define	UIO_DIRECT		(1ULL << 0)	/* Direct I/O request */
+#define	UIO_SKIP_CHANGETIME	(1ULL << 1)
+#define	UIO_SKIP_WRITETIME	(1ULL << 2)
+
+/*
  * I/O parameter information.  A uio structure describes the I/O which
  * is to be performed by an operation.  Typically the data movement will
  * be performed by a routine such as uiomove(), which updates the uio
@@ -76,36 +82,37 @@ typedef enum zfs_uio_rw { UIO_READ, UIO_WRITE } zfs_uio_rw_t;
 /*
  * Segment flag values.
  */
-typedef enum zfs_uio_seg { UIO_USERSPACE, UIO_SYSSPACE, UIO_USERISPACE } zfs_uio_seg_t;
+typedef enum zfs_uio_seg { UIO_USERSPACE, UIO_SYSSPACE, UIO_USERISPACE }
+    zfs_uio_seg_t;
 
+/*
+ * This structure is used when doing Direct I/O.
+ */
+typedef void vm_page_t;
+typedef struct {
+	vm_page_t	*pages;
+	int		npages;
+} zfs_uio_dio_t;
 
 typedef struct zfs_uio {
 	const struct iovec	*uio_iov;
 	int		uio_iovcnt;
+	int		uio_index;
 	off_t		uio_loffset;
+	off_t		uio_soffset;
 	zfs_uio_seg_t	uio_segflg;
 	boolean_t	uio_fault_disable;
 	uint16_t	uio_fmode;
 	uint16_t	uio_extflg;
 	ssize_t		uio_resid;
 	size_t		uio_skip;
+	zfs_uio_dio_t	uio_dio;
 } zfs_uio_t;
 
 static inline zfs_uio_seg_t
 zfs_uio_segflg(zfs_uio_t *uio)
 {
 	return (uio->uio_segflg);
-}
-
-static inline int
-zfs_uio_isuserspace(zfs_uio_t *uio)
-{
-	ASSERT(uio != NULL);
-
-	if (uio->uio_segflg == UIO_USERSPACE) {
-		return (1);
-	}
-	return (0);
 }
 
 static inline int
@@ -120,16 +127,52 @@ zfs_uio_offset(zfs_uio_t *uio)
 	return (uio->uio_loffset);
 }
 
+static inline off_t
+zfs_uio_soffset(zfs_uio_t *uio)
+{
+	return (uio->uio_soffset);
+}
+
 static inline size_t
 zfs_uio_resid(zfs_uio_t *uio)
 {
 	return (uio->uio_resid);
 }
 
+static inline int
+zfs_uio_skip(zfs_uio_t *uio)
+{
+	return (uio->uio_skip);
+}
+
+static inline int /* lundman extension */
+zfs_uio_index(zfs_uio_t *uio)
+{
+	return (uio->uio_index);
+}
+
 static inline void
 zfs_uio_setoffset(zfs_uio_t *uio, off_t off)
 {
 	uio->uio_loffset = off;
+}
+
+static inline void
+zfs_uio_setsoffset(zfs_uio_t *uio, off_t off)
+{
+	uio->uio_soffset = off;
+}
+
+static inline void
+zfs_uio_setskip(zfs_uio_t *uio, int skip)
+{
+	uio->uio_skip = skip;
+}
+
+static inline void /* lundman extension */
+zfs_uio_setindex(zfs_uio_t *uio, int index)
+{
+	uio->uio_index = index;
 }
 
 static inline void
@@ -160,18 +203,21 @@ zfs_uio_iovec_init(zfs_uio_t *uio, const struct iovec *iov,
 	uio->uio_iov = iov;
 	uio->uio_iovcnt = nr_segs;
 	uio->uio_loffset = offset;
+	uio->uio_soffset = offset;
 	uio->uio_segflg = seg;
 	uio->uio_fmode = 0;
 	uio->uio_extflg = 0;
+	uio->uio_index = 0;
 	uio->uio_resid = resid;
 	uio->uio_skip = skip;
 }
 
 extern int zfs_uio_prefaultpages(ssize_t, zfs_uio_t *);
-#define zfs_uio_fault_disable(uio, set)
-#define zfs_uio_fault_move(p, n, rw, u) zfs_uiomove((p), (n), (rw), (u))
+#define	zfs_uio_fault_disable(uio, set)
+#define	zfs_uio_fault_move(p, n, rw, u) zfs_uiomove((p), (n), (rw), (u))
 
-
+extern ssize_t readv(int, const struct iovec *, int);
+extern ssize_t writev(int fd, struct iovec *iov, unsigned iov_cnt);
 
 #ifdef	__cplusplus
 }

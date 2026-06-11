@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -46,7 +47,7 @@ log_must_program $TESTPOOL - <<-EOF
 EOF
 
 log_must mkdir $dir
-sync
+sync_all_pools
 
 log_must_program $TESTPOOL - <<-EOF
 	ans, setpoint = zfs.get_prop("$fs", "written@$TESTSNAP")

@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -27,7 +28,7 @@ fs=$TESTPOOL/$TESTFS/testchild
 
 function cleanup
 {
-	datasetexists $fs && log_must zfs destroy -R $fs
+	datasetexists $fs && destroy_dataset $fs -R
 }
 
 log_onexit cleanup
@@ -41,8 +42,7 @@ log_must zfs create $fs
 output_lines=$(log_must zfs program $TESTPOOL \
     $ZCP_ROOT/lua_core/tst.return_large.zcp | wc -l)
 
-[[ $output_lines -lt 5000 ]] &&
-    log_fail "Expected return of full list but only got $output_lines lines"
+log_must [ $output_lines -ge 5000 ]
 
 #
 # Make sure we fail if the return is over the memory limit

@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -55,12 +56,12 @@ for poolprop in "${poolprops[@]}"; do
 		# 2. Verify the pool is created with the specified temporary name
 		log_must poolexists $TEMPPOOL
 		log_mustnot poolexists $TESTPOOL
-		propname="$(awk -F= '{print $1}' <<< $fsprop)"
-		propval="$(awk -F= '{print $2}' <<< $fsprop)"
+		IFS='=' read -r propname propval <<<"$fsprop"
 		log_must test "$(get_prop $propname $TEMPPOOL)" == "$propval"
-		propname="$(awk -F= '{print $1}' <<< $poolprop)"
-		propval="$(awk -F= '{print $2}' <<< $poolprop)"
+		IFS='=' read -r propname propval <<<"$poolprop"
 		log_must test "$(get_pool_prop $propname $TEMPPOOL)" == "$propval"
+		# 3. Verify the `zpool create` command is logged to the pool history
+		log_must eval "zpool history $TEMPPOOL | grep -q 'zpool create -t'"
 		# Cleanup
 		destroy_pool $TEMPPOOL
 	done

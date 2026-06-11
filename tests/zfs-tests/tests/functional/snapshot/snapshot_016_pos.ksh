@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -47,19 +48,12 @@ verify_runnable "both"
 
 function cleanup
 {
-	datasetexists $SNAPFS && \
-		log_must zfs destroy -Rf $SNAPFS
-	datasetexists $TESTPOOL/$TESTFS@snap_a && \
-		log_must zfs destroy -Rf $TESTPOOL/$TESTFS@snap_a
-	datasetexists $TESTPOOL/$TESTFS@snap_b && \
-		log_must zfs destroy -Rf $TESTPOOL/$TESTFS@snap_b
-	datasetexists $TESTPOOL/$TESTCLONE@snap_a && \
-		log_must zfs destroy -Rf $TESTPOOL/$TESTCLONE@snap_a
-
-	datasetexists $TESTPOOL/$TESTCLONE && \
-		log_must zfs destroy $TESTPOOL/$TESTCLONE
-	datasetexists $TESTPOOL/$TESTFS && \
-		log_must zfs destroy $TESTPOOL/$TESTFS
+	datasetexists $SNAPFS && destroy_dataset $SNAPFS -Rf
+	datasetexists $TESTPOOL/$TESTFS@snap_a && destroy_dataset $TESTPOOL/$TESTFS@snap_a -Rf
+	datasetexists $TESTPOOL/$TESTFS@snap_b && destroy_dataset $TESTPOOL/$TESTFS@snap_b -Rf
+	datasetexists $TESTPOOL/$TESTCLONE@snap_a && destroy_dataset $TESTPOOL/$TESTCLONE@snap_a -Rf
+	datasetexists $TESTPOOL/$TESTCLONE && destroy_dataset $TESTPOOL/$TESTCLONE
+	datasetexists $TESTPOOL/$TESTFS && destroy_dataset $TESTPOOL/$TESTFS
 
 	log_must zfs create $TESTPOOL/$TESTFS
 	log_must zfs set mountpoint=$TESTDIR $TESTPOOL/$TESTFS

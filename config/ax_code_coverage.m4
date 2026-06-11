@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
 # ===========================================================================
 #     https://www.gnu.org/software/autoconf-archive/ax_code_coverage.html
 # ===========================================================================
@@ -224,6 +225,7 @@ CODE_COVERAGE_GENHTML_OPTIONS ?= $(CODE_COVERAGE_GENHTML_OPTIONS_DEFAULT)
 # Ignore tmp and tests themselves
 CODE_COVERAGE_IGNORE_PATTERN ?= "/tmp/*" "*/tests/*"
 CODE_COVERAGE_IGNORE_PATTERN += "*/module/zstd/lib/*"
+CODE_COVERAGE_IGNORE_PATTERN += "*/module/zfs/lz4.c"
 
 GITIGNOREFILES ?=
 GITIGNOREFILES += $(CODE_COVERAGE_OUTPUT_FILE) $(CODE_COVERAGE_OUTPUT_DIRECTORY)

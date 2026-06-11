@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -20,9 +21,10 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012, 2020 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2024 by Delphix. All rights reserved.
  * Copyright 2016 RackTop Systems.
  * Copyright (c) 2017, Intel Corporation.
+ * Copyright (c) 2024-2025, Klara, Inc.
  */
 
 #ifndef	_SYS_ZFS_IOCTL_H
@@ -57,6 +59,7 @@ extern "C" {
  */
 #define	ZFS_SNAPDIR_HIDDEN		0
 #define	ZFS_SNAPDIR_VISIBLE		1
+#define	ZFS_SNAPDIR_DISABLED		2
 
 /*
  * Property values for snapdev
@@ -71,9 +74,35 @@ extern "C" {
 #define	ZFS_ACLTYPE_NFSV4		2
 
 /*
+ * The drr_versioninfo field of the dmu_replay_record has the
+ * following layout:
+ *
+ *	64	56	48	40	32	24	16	8	0
+ *	+-------+-------+-------+-------+-------+-------+-------+-------+
+ *	|reserve|		  feature-flags			    |C|S|
+ *	+-------+-------+-------+-------+-------+-------+-------+-------+
+ *
+ * The low order two bits indicate the header type: SUBSTREAM (0x1)
+ * or COMPOUNDSTREAM (0x2).  Using two bits for this is historical:
+ * this field used to be a version number, where the two version types
+ * were 1 and 2.  Using two bits for this allows earlier versions of
+ * the code to be able to recognize send streams that don't use any
+ * of the features indicated by feature flags.
+ *
+ * The top 8 bits are reserved for future expansion. At time of writing there
+ * are no plans for these. If you want to use them, please reach out to the
+ * OpenZFS community, e.g., on GitHub or Slack.
+ */
+
+/*
  * Field manipulation macros for the drr_versioninfo field of the
  * send stream header.
  */
+#define	DMU_GET_STREAM_HDRTYPE(vi)	BF64_GET((vi), 0, 2)
+#define	DMU_SET_STREAM_HDRTYPE(vi, x)	BF64_SET((vi), 0, 2, x)
+
+#define	DMU_GET_FEATUREFLAGS(vi)	BF64_GET((vi), 2, 56)
+#define	DMU_SET_FEATUREFLAGS(vi, x)	BF64_SET((vi), 2, 56, x)
 
 /*
  * Header types for zfs send streams.
@@ -83,16 +112,9 @@ typedef enum drr_headertype {
 	DMU_COMPOUNDSTREAM = 0x2
 } drr_headertype_t;
 
-#define	DMU_GET_STREAM_HDRTYPE(vi)	BF64_GET((vi), 0, 2)
-#define	DMU_SET_STREAM_HDRTYPE(vi, x)	BF64_SET((vi), 0, 2, x)
-
-#define	DMU_GET_FEATUREFLAGS(vi)	BF64_GET((vi), 2, 30)
-#define	DMU_SET_FEATUREFLAGS(vi, x)	BF64_SET((vi), 2, 30, x)
-
 /*
  * Feature flags for zfs send streams (flags in drr_versioninfo)
  */
-
 #define	DMU_BACKUP_FEATURE_DEDUP		(1 << 0)
 #define	DMU_BACKUP_FEATURE_DEDUPPROPS		(1 << 1)
 #define	DMU_BACKUP_FEATURE_SA_SPILL		(1 << 2)
@@ -124,6 +146,8 @@ typedef enum drr_headertype {
  * default use of "zfs send" won't encounter the bug mentioned above.
  */
 #define	DMU_BACKUP_FEATURE_SWITCH_TO_LARGE_BLOCKS (1 << 27)
+#define	DMU_BACKUP_FEATURE_LONGNAME		(1 << 28)
+#define	DMU_BACKUP_FEATURE_LARGE_MICROZAP	(1 << 29)
 
 /*
  * Mask of all supported backup features
@@ -134,7 +158,8 @@ typedef enum drr_headertype {
     DMU_BACKUP_FEATURE_COMPRESSED | DMU_BACKUP_FEATURE_LARGE_DNODE | \
     DMU_BACKUP_FEATURE_RAW | DMU_BACKUP_FEATURE_HOLDS | \
     DMU_BACKUP_FEATURE_REDACTED | DMU_BACKUP_FEATURE_SWITCH_TO_LARGE_BLOCKS | \
-    DMU_BACKUP_FEATURE_ZSTD)
+    DMU_BACKUP_FEATURE_ZSTD | DMU_BACKUP_FEATURE_LONGNAME | \
+    DMU_BACKUP_FEATURE_LARGE_MICROZAP)
 
 /* Are all features in the given flag word currently supported? */
 #define	DMU_STREAM_SUPPORTED(x)	(!((x) & ~DMU_BACKUP_FEATURE_MASK))
@@ -142,23 +167,6 @@ typedef enum drr_headertype {
 typedef enum dmu_send_resume_token_version {
 	ZFS_SEND_RESUME_TOKEN_VERSION = 1
 } dmu_send_resume_token_version_t;
-
-/*
- * The drr_versioninfo field of the dmu_replay_record has the
- * following layout:
- *
- *	64	56	48	40	32	24	16	8	0
- *	+-------+-------+-------+-------+-------+-------+-------+-------+
- *	|		reserved	|        feature-flags	    |C|S|
- *	+-------+-------+-------+-------+-------+-------+-------+-------+
- *
- * The low order two bits indicate the header type: SUBSTREAM (0x1)
- * or COMPOUNDSTREAM (0x2).  Using two bits for this is historical:
- * this field used to be a version number, where the two version types
- * were 1 and 2.  Using two bits for this allows earlier versions of
- * the code to be able to recognize send streams that don't use any
- * of the features indicated by feature flags.
- */
 
 #define	DMU_BACKUP_MAGIC 0x2F5bacbacULL
 
@@ -222,10 +230,6 @@ typedef enum dmu_send_resume_token_version {
 #define	DRR_OBJECT_PAYLOAD_SIZE(drro) \
 	((drro)->drr_raw_bonuslen != 0 ? \
 	(drro)->drr_raw_bonuslen : P2ROUNDUP((drro)->drr_bonuslen, 8))
-
-/*
- * zfs ioctl command structure
- */
 
 /* Header is used in C++ so can't forward declare untagged struct */
 struct drr_begin {
@@ -418,6 +422,8 @@ typedef struct zinject_record {
 	uint64_t	zi_nlanes;
 	uint32_t	zi_cmd;
 	uint32_t	zi_dvas;
+	uint64_t	zi_match_count;		/* count of times matched */
+	uint64_t	zi_inject_count;	/* count of times injected */
 } zinject_record_t;
 
 #define	ZINJECT_NULL		0x1
@@ -447,7 +453,29 @@ typedef enum zinject_type {
 	ZINJECT_PANIC,
 	ZINJECT_DELAY_IO,
 	ZINJECT_DECRYPT_FAULT,
+	ZINJECT_DELAY_IMPORT,
+	ZINJECT_DELAY_EXPORT,
+	ZINJECT_DELAY_READY,
 } zinject_type_t;
+
+typedef enum zinject_iotype {
+	/*
+	 * Compatibility: zi_iotype used to be set to ZIO_TYPE_, so make sure
+	 * the corresponding ZINJECT_IOTYPE_ matches. Note that existing here
+	 * does not mean that injections are possible for all these types.
+	 */
+	ZINJECT_IOTYPE_NULL	= ZIO_TYPE_NULL,
+	ZINJECT_IOTYPE_READ	= ZIO_TYPE_READ,
+	ZINJECT_IOTYPE_WRITE	= ZIO_TYPE_WRITE,
+	ZINJECT_IOTYPE_FREE	= ZIO_TYPE_FREE,
+	ZINJECT_IOTYPE_CLAIM	= ZIO_TYPE_CLAIM,
+	ZINJECT_IOTYPE_FLUSH	= ZIO_TYPE_FLUSH,
+	ZINJECT_IOTYPE_TRIM	= ZIO_TYPE_TRIM,
+	ZINJECT_IOTYPE_ALL	= ZIO_TYPES,
+	/* Room for future expansion for ZIO_TYPE_* */
+	ZINJECT_IOTYPE_PROBE	= 16,
+	ZINJECT_IOTYPES,
+} zinject_iotype_t;
 
 typedef struct zfs_share {
 	uint64_t	z_exportdata;
@@ -467,6 +495,10 @@ typedef enum zfs_case {
 	ZFS_CASE_INSENSITIVE,
 	ZFS_CASE_MIXED
 } zfs_case_t;
+
+/*
+ * zfs ioctl command structure
+ */
 
 /*
  * Note: this struct must have the same layout in 32-bit and 64-bit, so
@@ -503,10 +535,22 @@ typedef struct zfs_cmd {
 	zfs_share_t	zc_share;
 	dmu_objset_stats_t zc_objset_stats;
 	struct drr_begin zc_begin_record;
-	zinject_record_t zc_inject_record;
-	uint32_t	zc_defer_destroy;
-	uint32_t	zc_flags;
-	uint64_t	zc_action_handle;
+
+	/*
+	 * zinject_record_t grew past its original size, which would push out
+	 * the size of zfs_cmd_t. To adjust for this, we allow it to use the
+	 * space after it, since those fields aren't used with ZFS_IOC_INJECT.
+	 */
+	union {
+		zinject_record_t zc_inject_record;
+		struct {
+			char		zc_pad1[sizeof (zinject_record_t) - 16];
+			uint32_t	zc_defer_destroy;
+			uint32_t	zc_flags;
+			uint64_t	zc_action_handle;
+		};
+	};
+
 	int		zc_cleanup_fd;
 	uint8_t		zc_simple;
 	uint8_t		zc_pad[3];		/* alignment */
@@ -516,6 +560,20 @@ typedef struct zfs_cmd {
 	zfs_stat_t	zc_stat;
 	uint64_t	zc_zoneid;
 } zfs_cmd_t;
+
+/*
+ * zfs_cmd_t (and by extension, it's member structs) must always be the same
+ * size. Changing it will break compatibility between the kernel module and the
+ * userspace tools.
+ *
+ * This test is convoluted because MAXPATHLEN and MAXNAMELEN can vary across
+ * platforms. We include them directly here, which means it won't trip if those
+ * ever change, but if that happens we likely have other things to worry about.
+ */
+#define	_expected_zfs_cmd_size	((MAXPATHLEN*3)+MAXNAMELEN+1200)
+_Static_assert(sizeof (zfs_cmd_t) == _expected_zfs_cmd_size,
+	"zfs_cmd_t has wrong size");
+#undef	_expected_zfs_cmd_size
 
 typedef struct zfs_useracct {
 	char zu_domain[256];
@@ -539,11 +597,7 @@ typedef struct {
 #define ZPOOL_GET_IOPS_THRPUT_STATS	CTL_CODE(ZFSIOCTL_TYPE, 0xFFE, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define ZPOOL_ZFS_GET_METRICS_DATA	CTL_CODE(ZFSIOCTL_TYPE, 0xFFD, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-typedef struct
-{
-    uint64_t total;
-    uint64_t count;
-}stat_pair;
+/* stat_pair defined in include/os/windows/spl/sys/kstat.h */
 
 typedef struct {
     unsigned __int64	read_iops;
@@ -600,54 +654,7 @@ typedef struct {
     unsigned __int64	special_mirror_space;
 }zpool_zfs_metrics;
 
-typedef struct {
-    uint64_t	arcstat_hits;
-    uint64_t	arcstat_misses;
-    uint64_t	arcstat_total_demand_hits;
-    uint64_t	arcstat_total_demand_miss;
-    uint64_t	arcstat_perfetch_hits;
-    uint64_t	arcstat_perfetch_miss;
-    uint64_t	arcstat_size;
-    uint64_t	arcstat_c;
-    uint64_t	arcstat_mfu_hits;
-    uint64_t	arcstat_mru_hits;
-    uint64_t	arcstat_mru_ghost_hits;
-    uint64_t	arcstat_mfu_ghost_hits;
-    uint64_t	arcstat_evict_skip;
-    uint64_t	arcstat_mutex_miss;
-    uint64_t	arcstat_compressed_size;
-    uint64_t	arcstat_uncompressed_size;
-    uint64_t	arcstat_overhead_size;
-    uint64_t	arcstat_read_ps;
-    uint64_t	arcstat_metadata_accesses_ps;
-    uint64_t	arcstat_metadata_hit_ps;
-    uint64_t	arcstat_metadata_miss_ps;
-    uint64_t	arcstat_perfetch_ps;
-    uint64_t	arcstat_demand_ps;
-    uint64_t	arcstat_l2_hits;
-    uint64_t	arcstat_l2_misses;
-    uint64_t	arcstat_l2_read_bytes;
-    uint64_t	arcstat_l2_write_bytes;
-    uint64_t	arcstat_l2_access_ps;
-
-/*
- * ZIL and SLOG counters
- */
-    uint64_t	zil_commit_count;
-    uint64_t	zil_commit_writer_count;
-    uint64_t	zil_itx_count;
-    uint64_t	zil_itx_indirect_count;
-    uint64_t	zil_itx_indirect_bytes;
-    uint64_t	zil_itx_copied_count;
-    uint64_t	zil_itx_copied_bytes;
-    uint64_t	zil_itx_needcopy_count;
-    uint64_t	zil_itx_needcopy_bytes;
-    uint64_t	zil_itx_metaslab_normal_count;
-    uint64_t	zil_itx_metaslab_normal_bytes;
-    uint64_t	zil_itx_metaslab_slog_count;
-    uint64_t	zil_itx_metaslab_slog_bytes;
-
-} cache_counters;
+/* cache_counters defined in include/os/windows/spl/sys/kstat.h */
 
 #define	ZFSDEV_MAX_MINOR	(1 << 16)
 
@@ -697,9 +704,8 @@ typedef struct zfsdev_state {
 } zfsdev_state_t;
 
 extern void *zfsdev_get_state(minor_t minor, enum zfsdev_state_type which);
-extern int zfsdev_getminor(int fd, minor_t *minorp);
+extern int zfsdev_getminor(zfs_file_t *fp, minor_t *minorp);
 
-extern uint_t zfs_fsyncer_key;
 extern uint_t zfs_allow_log_key;
 
 NTSTATUS NTAPI

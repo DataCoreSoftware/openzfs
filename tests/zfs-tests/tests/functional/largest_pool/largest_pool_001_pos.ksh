@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -91,13 +92,13 @@ function cleanup
 		if ismounted $TESTPOOL/$TESTFS ; then
 			log_must zfs unmount $TESTPOOL/$TESTFS
 		fi
-		log_must zfs destroy $TESTPOOL/$TESTFS
+		destroy_dataset $TESTPOOL/$TESTFS
 	fi
 
 	destroy_pool $TESTPOOL
 
 	datasetexists $TESTPOOL2/$TESTVOL && \
-		log_must zfs destroy $TESTPOOL2/$TESTVOL
+		destroy_dataset $TESTPOOL2/$TESTVOL
 
 	destroy_pool $TESTPOOL2
 
@@ -117,15 +118,12 @@ log_onexit cleanup
 # units for 'df'.  It must be greater than one.
 # -----------------------------------------------------------------------
 typeset str
-typeset -i ret
 for volsize in $VOLSIZES; do
 	log_note "Create a pool which will contain a volume device"
-	create_pool $TESTPOOL2 "$DISKS"
+	log_must create_pool $TESTPOOL2 "$DISKS"
 
 	log_note "Create a volume device of desired sizes: $volsize"
-	str=$(zfs create -sV $volsize $TESTPOOL2/$TESTVOL 2>&1)
-	ret=$?
-	if (( ret != 0 )); then
+	if ! str=$(zfs create -sV $volsize $TESTPOOL2/$TESTVOL 2>&1); then
 		if [[ is_32bit && \
 			$str == *${VOL_LIMIT_KEYWORD1}* || \
 			$str == *${VOL_LIMIT_KEYWORD2}* || \
@@ -140,7 +138,7 @@ for volsize in $VOLSIZES; do
 	block_device_wait
 
 	log_note "Create the largest pool allowed using the volume vdev"
-	create_pool $TESTPOOL "$VOL_PATH"
+	log_must create_pool $TESTPOOL "$VOL_PATH"
 
 	log_note "Create a zfs file system in the largest pool"
 	log_must zfs create $TESTPOOL/$TESTFS
@@ -154,7 +152,7 @@ for volsize in $VOLSIZES; do
 	log_note "Destroy zfs, volume & zpool"
 	log_must zfs destroy $TESTPOOL/$TESTFS
 	destroy_pool $TESTPOOL
-	log_must zfs destroy $TESTPOOL2/$TESTVOL
+	log_must_busy zfs destroy $TESTPOOL2/$TESTVOL
 	destroy_pool $TESTPOOL2
 done
 

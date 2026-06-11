@@ -1,4 +1,5 @@
 #!/bin/ksh
+# SPDX-License-Identifier: CDDL-1.0
 
 #
 # This file and its contents are supplied under the terms of the
@@ -34,9 +35,10 @@ log_assert "Per-vdev ZAPs are created on pool creation with multi-level vdev "\
 log_must zpool create -f $TESTPOOL mirror $DISKS
 
 conf="$TESTDIR/vz003"
-log_must zdb -PC $TESTPOOL > $conf
+log_must eval "zdb -PC $TESTPOOL > $conf"
 
 assert_has_sentinel "$conf"
+assert_root_zap $TESTPOOL "$conf"
 assert_top_zap $TESTPOOL "type: 'mirror'" "$conf"
 for DISK in $DISKS; do
 	assert_leaf_zap $TESTPOOL $DISK "$conf"

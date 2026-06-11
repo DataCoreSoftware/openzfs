@@ -44,6 +44,8 @@
 #include <sys/zfs_vnops_os.h>
 #include <sys/zfs_ctldir.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <sys/dirent.h>
 
 #include <sys/unistd.h>
 #include <sys/uuid.h>
@@ -52,7 +54,7 @@
 #include <sys/zfs_mount.h>
 
 #include <sys/zfs_windows.h>
-
+#include <sys/driver_extension.h>
 
 #include <mountmgr.h>
 #include <Mountdev.h>
@@ -60,6 +62,62 @@
 #include <Storduid.h>
 
 #undef _NTDDK_
+
+/*
+ * Translate a POSIX errno returned by a ZFS vop into the NTSTATUS code
+ * that best represents the same condition to Windows callers.  Callers
+ * that need context-specific overrides (e.g. IRP_MJ_CREATE distinguishing
+ * FILE_EXISTS vs FILE_DOES_NOT_EXIST) should handle those cases before or
+ * after calling this helper.
+ */
+NTSTATUS
+zfs_error_to_ntstatus(int error)
+{
+	switch (error) {
+	case EPERM:
+	case EACCES:
+		return (STATUS_ACCESS_DENIED);
+	case ENOENT:
+		return (STATUS_OBJECT_NAME_NOT_FOUND);
+	case EEXIST:
+		return (STATUS_OBJECT_NAME_COLLISION);
+	case EXDEV:
+		return (STATUS_NOT_SAME_DEVICE);
+	case ENOTDIR:
+		return (STATUS_NOT_A_DIRECTORY);
+	case EISDIR:
+		return (STATUS_FILE_IS_A_DIRECTORY);
+	case ENOTEMPTY:
+		return (STATUS_DIRECTORY_NOT_EMPTY);
+	case ENAMETOOLONG:
+		return (STATUS_OBJECT_NAME_INVALID);
+	case ENOSPC:
+	case EDQUOT:
+		return (STATUS_DISK_FULL);
+	case EROFS:
+		return (STATUS_MEDIA_WRITE_PROTECTED);
+	case EINVAL:
+		return (STATUS_INVALID_PARAMETER);
+	case ENOMEM:
+		return (STATUS_INSUFFICIENT_RESOURCES);
+	case ENOTSUP:
+	case EOPNOTSUPP:
+		return (STATUS_NOT_SUPPORTED);
+	case EBUSY:
+		return (STATUS_DEVICE_BUSY);
+	case EMLINK:
+		return (STATUS_TOO_MANY_LINKS);
+	case ERANGE:
+	case EOVERFLOW:
+		return (STATUS_BUFFER_OVERFLOW);
+	default:
+		return (error);
+	}
+}
+
+uint64_t windows_load_security = 1;
+ZFS_MODULE_PARAM(, windows_, load_security, U64, ZMOD_RW,
+	"Windows: load Security Descriptors from storage");
 
 typedef struct {
 	UCHAR revision;
@@ -87,7 +145,7 @@ static sid_header sid_ML =
 typedef struct {
 	UCHAR flags;
 	ACCESS_MASK mask;
-	sid_header* sid;
+	sid_header *sid;
 } dacl;
 
 /*
@@ -102,6 +160,7 @@ typedef struct {
  *	BUILTIN\Users:(RX)
  *	BUILTIN\Users:(OI)(CI)(IO)(GR,GE)
  */
+#if 0
 static dacl def_dacls[] = {
 	// BUILTIN\Administrators:(F)
 	{ 0, FILE_ALL_ACCESS, &sid_BA },
@@ -133,6 +192,60 @@ static dacl def_dacls[] = {
 	// END
 	{ 0, 0, NULL }
 };
+#endif
+
+/* Btrfs */
+
+static dacl def_dacls[] = {
+	{ 0, FILE_ALL_ACCESS, &sid_BA },
+	{ OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+	FILE_ALL_ACCESS, &sid_BA },
+	{ 0, FILE_ALL_ACCESS, &sid_SY },
+	{ OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+	FILE_ALL_ACCESS, &sid_SY },
+	{ OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+	FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, &sid_BU },
+	{ OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+	FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
+	&sid_AU },
+	{ 0,
+	FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
+	&sid_AU },
+	// FIXME - Mandatory Label\High Mandatory Level:(OI)(NP)(IO)(NW)
+	{ 0, 0, NULL }
+};
+
+// ChatGPT version
+static dacl def_daclsY[] = {
+	// Allow Administrators full access
+	{ 0, FILE_ALL_ACCESS, &sid_BA },
+	{ OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+	FILE_ALL_ACCESS, &sid_BA },
+
+	// Allow SYSTEM full access
+	{ 0, FILE_ALL_ACCESS, &sid_SY },
+	{ OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+	FILE_ALL_ACCESS, &sid_SY },
+
+	// Allow Authenticated Users read/write/execute/delete
+	// (typical user permissions)
+	{ 0,
+	FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE |
+	DELETE | WRITE_DAC | WRITE_OWNER,
+	&sid_AU },
+	{ OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+	FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE |
+	DELETE | WRITE_DAC | WRITE_OWNER,
+	&sid_AU },
+
+	// Optional: Allow Built-in Users read-only
+	{ 0, FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, &sid_BU },
+	{ OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+	FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, &sid_BU },
+
+	{ 0, 0, NULL } // Terminator
+};
+
 
 // #define	USE_RECYCLE_ACL
 #ifdef USE_RECYCLE_ACL
@@ -296,6 +409,9 @@ major2str(int major, int minor)
 			return ("IRP_MJ_PNP(IRP_MN_DEVICE_USAGE_NOTIFICATION)");
 		case IRP_MN_SURPRISE_REMOVAL: // SUPPLIES!
 			return ("IRP_MJ_PNP(IRP_MN_SURPRISE_REMOVAL)");
+		case 0x18: // No longer used
+			return (
+			    "IRP_MJ_PNP(IRP_MN_QUERY_LEGACY_BUS_INFORMATION)");
 		}
 		return ("IRP_MJ_PNP");
 	default:
@@ -312,6 +428,8 @@ common_status_str(NTSTATUS Status)
 		return ("OK");
 	case STATUS_BUFFER_OVERFLOW:
 		return ("Overflow");
+	case STATUS_BUFFER_TOO_SMALL:
+		return ("BufferTooSmall");
 	case STATUS_END_OF_FILE:
 		return ("EOF");
 	case STATUS_NO_MORE_FILES:
@@ -342,8 +460,34 @@ common_status_str(NTSTATUS Status)
 		return ("STATUS_NO_MORE_EAS");
 	case STATUS_NO_EAS_ON_FILE:
 		return ("STATUS_NO_EAS_ON_FILE");
+	case 0xa0000003:
+		return ("STATUS_REPARSE_POINT");
+	case STATUS_DIRECTORY_IS_A_REPARSE_POINT:
+		return ("STATUS_DIRECTORY_IS_A_REPARSE_POINT");
+	case STATUS_REPARSE:
+		return ("STATUS_REPARSE");
+	case STATUS_DISK_QUOTA_EXCEEDED:
+		return ("STATUS_DISK_QUOTA_EXCEEDED");
+	case STATUS_UNRECOGNIZED_VOLUME:
+		return ("STATUS_UNRECOGNIZED_VOLUME");
+	case STATUS_VOLUME_MOUNTED:
+		return ("STATUS_VOLUME_MOUNTED");
+	case STATUS_VOLUME_DISMOUNTED:
+		return ("STATUS_VOLUME_DISMOUNTED");
+	case STATUS_DEVICE_NOT_READY:
+		return ("STATUS_DEVICE_NOT_READY");
 	default:
 		return ("<*****>");
+	}
+}
+
+void
+strupper(char *s, size_t max)
+{
+	while ((max > 0) && *s) {
+		*s = toupper(*s);
+		s++;
+		max--;
 	}
 }
 
@@ -448,10 +592,53 @@ int
 AsciiStringToUnicodeString(char *in, PUNICODE_STRING out)
 {
 	ANSI_STRING conv;
+	if (in == NULL) {
+		memset(out, 0, sizeof (UNICODE_STRING));
+		return (0);
+	}
 	conv.Buffer = in;
 	conv.Length = strlen(in);
 	conv.MaximumLength = PATH_MAX;
 	return (RtlAnsiStringToUnicodeString(out, &conv, TRUE));
+}
+
+/*
+ * Same again, but use NonPaged memory.
+ * IRP_MN_MOUNT_VOLUME is called with irql==2, and
+ * we try to copy zmo->name.Buffer to VolumeLabel, which
+ * is not allowed.
+ */
+int
+AsciiStringToUnicodeStringNP(char *in, PUNICODE_STRING out)
+{
+	NTSTATUS status;
+	ULONG len;
+
+	memset(out, 0, sizeof (UNICODE_STRING));
+	if (in == NULL)
+		return (0);
+
+	status = RtlUTF8ToUnicodeN(NULL, 0, &len,
+	    in, strlen(in));
+	if (!NT_SUCCESS(status))
+		return (0);
+
+	out->Buffer = (PWSTR)ExAllocatePoolWithTag(NonPagedPoolNx,
+	    len + sizeof (WCHAR), 'tag1');
+
+	if (out->Buffer == NULL)
+		return (0);
+
+	out->Length = len;
+	out->MaximumLength = len + sizeof (WCHAR);
+
+	status = RtlUTF8ToUnicodeN(out->Buffer, out->MaximumLength,
+	    NULL,
+	    in, strlen(in));
+
+	out->Buffer[out->Length / sizeof (WCHAR)] =
+	    UNICODE_NULL;
+	return (0);
 }
 
 void
@@ -459,6 +646,7 @@ FreeUnicodeString(PUNICODE_STRING s)
 {
 	if (s->Buffer) ExFreePool(s->Buffer);
 	s->Buffer = NULL;
+	s->Length = 0;
 }
 
 int
@@ -470,24 +658,30 @@ zfs_vnop_ioctl_fullfsync(struct vnode *vp, vfs_context_t *ct, zfsvfs_t *zfsvfs)
 	return (error);
 }
 
+/*
+ * Take zp, and convert zp->z_pflags into Windows
+ * FILE_ATTRIBUTES_ - Can we assume z_pflags is always
+ * up-to-date, or is there need to call zfs_getattr().
+ */
 uint32_t
-zfs_getwinflags(znode_t *zp)
+zfs_getwinflags(uint64_t zflags, boolean_t isdir)
 {
-	uint32_t  winflags = 0;
-	uint64_t zflags = zp->z_pflags;
+	uint32_t winflags = 0;
 
+	if (zflags & ZFS_READONLY)
+		winflags |= FILE_ATTRIBUTE_READONLY;
 	if (zflags & ZFS_HIDDEN)
 		winflags |= FILE_ATTRIBUTE_HIDDEN;
 	if (zflags & ZFS_SYSTEM)
 		winflags |= FILE_ATTRIBUTE_SYSTEM;
 	if (zflags & ZFS_ARCHIVE)
 		winflags |= FILE_ATTRIBUTE_ARCHIVE;
-	if (zflags & ZFS_READONLY)
-		winflags |= FILE_ATTRIBUTE_READONLY;
+	if (zflags & ZFS_SPARSE)
+		winflags |= FILE_ATTRIBUTE_SPARSE_FILE;
 	if (zflags & ZFS_REPARSE)
 		winflags |= FILE_ATTRIBUTE_REPARSE_POINT;
 
-	if (S_ISDIR(zp->z_mode)) {
+	if (isdir) {
 		winflags |= FILE_ATTRIBUTE_DIRECTORY;
 		winflags &= ~FILE_ATTRIBUTE_ARCHIVE;
 	}
@@ -500,41 +694,53 @@ zfs_getwinflags(znode_t *zp)
 	return (winflags);
 }
 
+/*
+ * Called when a request to change FileAttributes. So we
+ * need to populate "vap" with the information changes
+ * before calling zfs_setattr().
+ */
 int
-zfs_setwinflags(znode_t *zp, uint32_t winflags)
+zfs_setwinflags_xva(znode_t *zp, uint32_t win_flags, xvattr_t *xva)
 {
-	uint64_t zflags = 0;
+	uint64_t zfs_flags = 0ULL;
+	xoptattr_t *xoap;
 
-	zflags = zp->z_pflags;
+	/* zp is NULL if we have no yet created the file */
+	if (zp)
+		zfs_flags = zp->z_pflags;
 
-	if (winflags & FILE_ATTRIBUTE_HIDDEN)
-		zflags |= ZFS_HIDDEN;
-	else
-		zflags &= ~ZFS_HIDDEN;
+	win_flags &= ~FILE_ATTRIBUTE_NORMAL;
 
-	if (winflags & FILE_ATTRIBUTE_SYSTEM)
-		zflags |= ZFS_SYSTEM;
-	else
-		zflags &= ~ZFS_SYSTEM;
+	xva_init(xva);
+	xoap = xva_getxoptattr(xva);
 
-	if (winflags & FILE_ATTRIBUTE_ARCHIVE)
-		zflags |= ZFS_ARCHIVE;
-	else
-		zflags &= ~ZFS_ARCHIVE;
+#define	FLAG_CHANGE(zflag, wflag, xflag, xfield) do {	\
+		if (((win_flags & (wflag)) && !(zfs_flags & (zflag))) || \
+			((zfs_flags & (zflag)) && !(win_flags & (wflag)))) { \
+			XVA_SET_REQ(xva, (xflag)); \
+			(xfield) = ((win_flags & (wflag)) != 0); \
+		} \
+	} while (0)
 
-	if (winflags & FILE_ATTRIBUTE_READONLY)
-		zflags |= ZFS_READONLY;
-	else
-		zflags &= ~ZFS_READONLY;
+	FLAG_CHANGE(ZFS_READONLY, FILE_ATTRIBUTE_READONLY,
+	    XAT_READONLY, xoap->xoa_readonly);
+	FLAG_CHANGE(ZFS_HIDDEN, FILE_ATTRIBUTE_HIDDEN,
+	    XAT_HIDDEN, xoap->xoa_hidden);
+	FLAG_CHANGE(ZFS_SYSTEM, FILE_ATTRIBUTE_SYSTEM,
+	    XAT_SYSTEM, xoap->xoa_system);
+	FLAG_CHANGE(ZFS_ARCHIVE, FILE_ATTRIBUTE_ARCHIVE,
+	    XAT_ARCHIVE, xoap->xoa_archive);
+#if 0
+	/* You are allowed to call set on there, but they should do nothing */
+	FLAG_CHANGE(ZFS_SPARSE, FILE_ATTRIBUTE_SPARSE_FILE,
+	    XAT_SPARSE, xoap->xoa_sparse);
+	FLAG_CHANGE(ZFS_REPARSE, FILE_ATTRIBUTE_REPARSE_POINT,
+	    XAT_REPARSE, xoap->xoa_reparse);
+#endif
 
-	if (zp->z_pflags != zflags) {
-		zp->z_pflags = zflags;
-		dprintf("%s changing win 0x%08lx to zfs 0x%08llx\n", __func__,
-		    winflags, zflags);
-		return (1);
-	}
+#undef FLAG_CHANGE
 
-	return (0);
+	return (STATUS_SUCCESS);
 }
 
 // WSL uses special EAs to interact with uid/gid/mode/device major/minor
@@ -579,56 +785,65 @@ vnode_apply_single_ea(struct vnode *vp, struct vnode *xdvp,
 {
 	int error;
 	znode_t *xzp = NULL;
+	vnode_t *xvp = NULL;
+	struct iovec iov;
 
-	dprintf("%s: xattr '%.*s' valuelen %u\n", __func__,
-	    ea->EaNameLength, ea->EaName, ea->EaValueLength);
+	if (zfs_is_readonly(VTOZ(vp)->z_zfsvfs))
+		return (STATUS_MEDIA_WRITE_PROTECTED);
 
+	dprintf("%s: xattr (namelen=%d) valuelen %u\n", __func__,
+	    ea->EaNameLength, ea->EaValueLength);
+
+	// EaValueLength of zero, means no value, not delete.
 	if (ea->EaValueLength == 0) {
-
-		// Remove EA
-		error = zfs_remove(VTOZ(xdvp), ea->EaName, NULL, /* flags */0);
-
+		iov.iov_base = (void *)NULL;
+		iov.iov_len = 0;
 	} else {
-		// Add replace EA
-
-		error = zfs_obtain_xattr(VTOZ(xdvp), ea->EaName,
-		    VTOZ(vp)->z_mode, NULL, &xzp, 0);
-		if (error)
-			goto out;
-
-		/* Truncate, if it was existing */
-		error = zfs_freesp(xzp, 0, 0, VTOZ(vp)->z_mode, TRUE);
-
-		/* Write data */
-		struct iovec iov;
 		iov.iov_base = (void *)(ea->EaName + ea->EaNameLength + 1);
 		iov.iov_len = ea->EaValueLength;
-
-		zfs_uio_t uio;
-		zfs_uio_iovec_init(&uio, &iov, 1, 0, UIO_SYSSPACE, ea->EaValueLength, 0);
-		error = zfs_write(xzp, &uio, 0, NULL);
 	}
 
-out:
-	if (xzp != NULL)
-		zrele(xzp);
+	zfs_uio_t uio;
+	zfs_uio_iovec_init(&uio, &iov, 1, 0, UIO_SYSSPACE,
+	    ea->EaValueLength, 0);
 
-	return (error);
+	error = zpl_xattr_set(vp, ea->EaName, &uio, 0, NULL);
+
+	return (0);
 }
 
 
 /*
  * Apply a set of EAs to a vnode, while handling special Windows EAs that
  * set UID/GID/Mode/rdev.
+ * According to ChatGPT, if the LIST is empty, all the xattrs should be
+ * removed. (Keeping any non-xattr entries, like NTACL etc)
+ * Otherwise, update the xattrs for each EA. Note that an
+ * EA with EaValueLength==0 is not a delete request, but a
+ * no-value request. There is no way to delete a single
+ * EA, it is expected that Windows sends an empty list
+ * to delete all EAs, then a list of the other EAs to restore.
  */
 NTSTATUS
-vnode_apply_eas(struct vnode *vp, PFILE_FULL_EA_INFORMATION eas,
-    ULONG eaLength, PULONG pEaErrorOffset)
+vnode_apply_eas(struct vnode *vp, zfs_ccb_t *zccb,
+    PFILE_FULL_EA_INFORMATION eas, ULONG eaLength,
+    PULONG pEaErrorOffset)
 {
 	NTSTATUS Status = STATUS_SUCCESS;
 
-	if (vp == NULL || eas == NULL)
+	if (vp == NULL)
 		return (STATUS_INVALID_PARAMETER);
+
+	if (zfs_is_readonly(VTOZ(vp)->z_zfsvfs))
+		return (STATUS_MEDIA_WRITE_PROTECTED);
+
+	if (eas == NULL || eaLength == 0) {
+		dprintf("%s: delete all xattr request.\n", __func__);
+		// Delete all xattrs.
+		// Status = zpl_xattr_remove_all(vp);
+		vnode_clear_easize(vp);
+		return (Status);
+	}
 
 	// Optional: Check for validity if the caller wants it.
 	if (pEaErrorOffset != NULL) {
@@ -640,29 +855,27 @@ vnode_apply_eas(struct vnode *vp, PFILE_FULL_EA_INFORMATION eas,
 		}
 	}
 
+	znode_t *zp = VTOZ(vp);
+	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
+
+	// We can land here without a sa_hdl, for example .zfs
+	if (zp->z_sa_hdl == NULL)
+		return (Status);
+
 	struct vnode *xdvp = NULL;
 	znode_t *xdzp = NULL;
 	vattr_t vap = { 0 };
 	int error;
 	PFILE_FULL_EA_INFORMATION ea;
+
 	for (ea = eas; /* empty */;
 	    ea = (PFILE_FULL_EA_INFORMATION)
 	    ((uint8_t *)ea + ea->NextEntryOffset)) {
 		if (vattr_apply_lx_ea(&vap, ea)) {
-			dprintf("  encountered special attrs EA '%.*s'\n",
-			    ea->EaNameLength, ea->EaName);
+			dprintf("  encountered special attrs EA (len=%d)\n",
+			    ea->EaNameLength);
 		} else {
-			// optimization: defer creating an xattr dir until
-			// the first standard EA
-			if (xdvp == NULL) {
-				// Open (or Create) the xattr directory
-				if (zfs_get_xattrdir(VTOZ(vp), &xdzp, NULL,
-				    CREATE_XATTR_DIR) != 0) {
-					Status = STATUS_EA_CORRUPT_ERROR;
-					goto out;
-				}
-				xdvp = ZTOV(xdzp);
-			}
+
 			error = vnode_apply_single_ea(vp, xdvp, ea);
 			if (error != 0)
 				dprintf("failed to process xattr: %d\n", error);
@@ -678,14 +891,700 @@ vnode_apply_eas(struct vnode *vp, PFILE_FULL_EA_INFORMATION eas,
 
 	// Update zp based on LX eas.
 	if (vap.va_active != 0)
-		zfs_setattr(VTOZ(vp), &vap, 0, NULL);
+		zfs_setattr(zp, &vap, 0, NULL, NULL);
+
+	zfs_send_notify(zfsvfs, zccb->z_name_cache,
+	    zccb->z_name_offset,
+	    FILE_NOTIFY_CHANGE_EA,
+	    FILE_ACTION_MODIFIED);
 
 out:
-	if (xdvp != NULL) {
-		VN_RELE(xdvp);
-	}
+
+	vnode_clear_easize(vp);
 
 	return (Status);
+}
+
+
+extern int zfs_vnop_force_formd_normalized_output;
+
+void
+zfs_readdir_complete(emitdir_ptr_t *ctx)
+{
+	// The last eodp should have Next offset of 0
+	// This assumes NextEntryOffset is the FIRST entry in all structs
+	if (ctx->next_offset != NULL)
+		*ctx->next_offset = 0;
+
+	// The outcout += reclen; above unfortunately adds the possibly
+	// aligned (to 8 bytes) length. But the last entry should not
+	// be rounded-up.
+	if ((ctx->outcount > ctx->last_alignment) &&
+	    (ctx->last_alignment > 0)) {
+		ctx->outcount -= ctx->last_alignment;
+	}
+}
+
+/*
+ * Put out one directory entry to the output buffer, using
+ * whatever struct specified in ctx->dirlisttype.
+ * Return:
+ *    0   : keep iterating
+ *  ESRC  : search-pattern in use, and didn't match (keep iterating)
+ * ENOSPC : no more room in buffer (but more to come - stop)
+ */
+int
+zfs_readdir_emitdir(zfsvfs_t *zfsvfs, const char *name, emitdir_ptr_t *ctx,
+    zfs_ccb_t *zccb, ino64_t objnum)
+{
+	znode_t *tzp = NULL;
+	int structsize = 0;
+	void *nameptr = NULL;
+	ULONG namelenholder = 0;
+	int get_zp = ENOENT;
+	size_t namelen;
+	int error;
+	int force_formd_normalized_output = 0;
+	ushort_t reclen, rawsize;
+	ULONG *next_offset;
+	uint64_t guid;
+
+	// Windows combines vnop_readdir and vnop_getattr,
+	// so we need to lookup a bunch of values, we try
+	// to do that as lightweight as possible.
+
+	if ((zfsvfs->z_ctldir != NULL) &&
+	    (objnum == ZFSCTL_INO_ROOT) ||
+	    (objnum == ZFSCTL_INO_SNAPDIR) ||
+	    ((objnum >= zfsvfs->z_ctldir_startid) &&
+	    (objnum <= ZFSCTL_INO_SNAPDIRS))) {
+		struct vnode *vp;
+
+		get_zp = zfs_vfs_vget(zfsvfs->z_vfs, objnum, &vp, NULL);
+		if (get_zp == 0)
+			tzp = VTOZ(vp);
+
+	} else {
+		get_zp = zfs_zget_ext(zfsvfs,
+		    objnum, &tzp,
+		    ZGET_FLAG_UNLINKED);
+	}
+
+	// If it is marked to be deleted it, Windows expects
+	// the file to be invisible.
+	if (get_zp == 0 && tzp != NULL && ZTOV(tzp) &&
+	    (vnode_unlink(ZTOV(tzp)) & DELETE_HIDDEN)) {
+		// Return anything but ENOSPC to skip
+		zrele(tzp);
+		return (ENOTACTIVE);
+	}
+
+	/*
+	 * Could not find it, error out ? print name ?
+	 * Can't zget the .zfs dir etc, so we need a dummy
+	 * node, so we grab root node instead.
+	 */
+	if (get_zp != 0 && tzp == NULL) {
+		get_zp = zfs_zget_ext(zfsvfs,
+		    zfsvfs->z_root, &tzp,
+		    ZGET_FLAG_UNLINKED);
+	}
+	if (get_zp != 0 && tzp == NULL) {
+		return (get_zp);
+	}
+
+	/*
+	 * Check if name will fit.
+	 *
+	 * Note: non-ascii names may expand (up to 3x) when converted
+	 * to NFD
+	 */
+	namelen = strlen(name);
+
+	/* sysctl to force formD normalization of vnop output */
+	if (zfs_vnop_force_formd_normalized_output &&
+	    !is_ascii_str(name))
+		force_formd_normalized_output = 1;
+	else
+		force_formd_normalized_output = 0;
+
+	if (force_formd_normalized_output)
+		namelen = MIN(MAXNAMLEN, namelen * 3);
+
+	/*
+	 * Fetch filename conversion length
+	 */
+
+	error = RtlUTF8ToUnicodeN(NULL, 0, &namelenholder,
+	    name, namelen);
+
+	// We need to fill in more fields, for getattr
+	uint64_t mtime[2] = { 0 };
+	uint64_t ctime[2] = { 0 };
+	uint64_t crtime[2] = { 0 };
+	if (tzp->z_is_sa && tzp->z_sa_hdl != NULL) {
+		/* dummy_zp wont have sa_hdl */
+		sa_bulk_attr_t bulk[3];
+		int count = 0;
+		SA_ADD_BULK_ATTR(bulk, count,
+		    SA_ZPL_MTIME(zfsvfs), NULL, &mtime, 16);
+		SA_ADD_BULK_ATTR(bulk, count,
+		    SA_ZPL_CTIME(zfsvfs), NULL, &ctime, 16);
+		SA_ADD_BULK_ATTR(bulk, count,
+		    SA_ZPL_CRTIME(zfsvfs), NULL, &crtime, 16);
+		sa_bulk_lookup(tzp->z_sa_hdl, bulk, count);
+		// Is it worth warning about failed lookup here?
+	}
+
+	ULONG reparse_tag = 0;
+	ULONG ea_size = 0;
+	ea_size = xattr_getsize(ZTOV(tzp));
+	reparse_tag = get_reparse_tag(tzp);
+
+	uint64_t AllocationSize;
+	AllocationSize = allocationsize(tzp);
+
+	structsize = 0; /* size of win struct desired */
+	/* bufptr : output memory area, incrementing */
+	/* outcount : amount written to output, incrementing */
+	/* bufsize : size of output area - static */
+
+	/* Fill in struct based on desired type. */
+	switch (ctx->dirlisttype) {
+
+	case FileFullDirectoryInformation:
+		structsize = FIELD_OFFSET(
+		    FILE_FULL_DIR_INFORMATION,
+		    FileName[0]);
+		if (ctx->outcount + structsize +
+		    namelenholder > ctx->bufsize)
+			break;
+		FILE_FULL_DIR_INFORMATION *eodp =
+		    (FILE_FULL_DIR_INFORMATION *)ctx->bufptr;
+		next_offset = &eodp->NextEntryOffset;
+
+		eodp->FileIndex = ctx->offset;
+		eodp->AllocationSize.QuadPart =
+		    AllocationSize;
+		eodp->EndOfFile.QuadPart =
+		    S_ISDIR(tzp->z_mode) ? 0 :
+		    tzp->z_size;
+		TIME_UNIX_TO_WINDOWS(mtime,
+		    eodp->LastWriteTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(ctime,
+		    eodp->ChangeTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(crtime,
+		    eodp->CreationTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(tzp->z_atime,
+		    eodp->LastAccessTime.QuadPart);
+		// Magic code to change dir icon to link
+		eodp->EaSize = reparse_tag ? reparse_tag : ea_size;
+		eodp->FileAttributes =
+		    zfs_getwinflags(tzp->z_pflags, S_ISDIR(tzp->z_mode));
+		nameptr = eodp->FileName;
+		eodp->FileNameLength = namelenholder;
+		break;
+
+	case FileIdBothDirectoryInformation:
+		structsize = FIELD_OFFSET(
+		    FILE_ID_BOTH_DIR_INFORMATION,
+		    FileName[0]);
+		if (ctx->outcount + structsize +
+		    namelenholder > ctx->bufsize)
+			break;
+		FILE_ID_BOTH_DIR_INFORMATION *fibdi;
+		fibdi = (FILE_ID_BOTH_DIR_INFORMATION *)
+		    ctx->bufptr;
+		next_offset = &fibdi->NextEntryOffset;
+
+		fibdi->AllocationSize.QuadPart =
+		    AllocationSize;
+		fibdi->EndOfFile.QuadPart =
+		    S_ISDIR(tzp->z_mode) ? 0 :
+		    tzp->z_size;
+		TIME_UNIX_TO_WINDOWS(mtime,
+		    fibdi->LastWriteTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(ctime,
+		    fibdi->ChangeTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(crtime,
+		    fibdi->CreationTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(tzp->z_atime,
+		    fibdi->LastAccessTime.QuadPart);
+		fibdi->EaSize = reparse_tag ? reparse_tag : ea_size;
+		fibdi->FileAttributes =
+		    zfs_getwinflags(tzp->z_pflags, S_ISDIR(tzp->z_mode));
+		fibdi->FileId.QuadPart = objnum;
+		fibdi->FileIndex = ctx->offset;
+		fibdi->ShortNameLength = 0;
+		nameptr = fibdi->FileName;
+		fibdi->FileNameLength = namelenholder;
+
+		break;
+
+	case FileBothDirectoryInformation:
+		structsize = FIELD_OFFSET(
+		    FILE_BOTH_DIR_INFORMATION,
+		    FileName[0]);
+		if (ctx->outcount + structsize +
+		    namelenholder > ctx->bufsize)
+			break;
+		FILE_BOTH_DIR_INFORMATION *fbdi =
+		    (FILE_BOTH_DIR_INFORMATION *)ctx->bufptr;
+		next_offset = &fbdi->NextEntryOffset;
+
+		fbdi->AllocationSize.QuadPart =
+		    AllocationSize;
+		fbdi->EndOfFile.QuadPart =
+		    S_ISDIR(tzp->z_mode) ? 0 :
+		    tzp->z_size;
+		TIME_UNIX_TO_WINDOWS(mtime,
+		    fbdi->LastWriteTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(ctime,
+		    fbdi->ChangeTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(crtime,
+		    fbdi->CreationTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(tzp->z_atime,
+		    fbdi->LastAccessTime.QuadPart);
+		fbdi->EaSize = reparse_tag ? reparse_tag : ea_size;
+		fbdi->FileAttributes =
+		    zfs_getwinflags(tzp->z_pflags, S_ISDIR(tzp->z_mode));
+		fbdi->FileIndex = ctx->offset;
+		fbdi->ShortNameLength = 0;
+		nameptr = fbdi->FileName;
+		fbdi->FileNameLength = namelenholder;
+
+		break;
+
+	case FileDirectoryInformation:
+		structsize = FIELD_OFFSET(
+		    FILE_DIRECTORY_INFORMATION,
+		    FileName[0]);
+		if (ctx->outcount + structsize +
+		    namelenholder > ctx->bufsize)
+			break;
+		FILE_DIRECTORY_INFORMATION *fdi =
+		    (FILE_DIRECTORY_INFORMATION *)
+		    ctx->bufptr;
+		next_offset = &fdi->NextEntryOffset;
+
+		fdi->AllocationSize.QuadPart =
+		    AllocationSize;
+		fdi->EndOfFile.QuadPart =
+		    S_ISDIR(tzp->z_mode) ? 0 :
+		    tzp->z_size;
+		TIME_UNIX_TO_WINDOWS(mtime,
+		    fdi->LastWriteTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(ctime,
+		    fdi->ChangeTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(crtime,
+		    fdi->CreationTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(tzp->z_atime,
+		    fdi->LastAccessTime.QuadPart);
+		fdi->FileAttributes =
+		    zfs_getwinflags(tzp->z_pflags, S_ISDIR(tzp->z_mode));
+		fdi->FileIndex = ctx->offset;
+		nameptr = fdi->FileName;
+		fdi->FileNameLength = namelenholder;
+		break;
+
+	case FileNamesInformation:
+		structsize =
+		    FIELD_OFFSET(FILE_NAMES_INFORMATION,
+		    FileName[0]);
+		if (ctx->outcount + structsize +
+		    namelenholder > ctx->bufsize)
+			break;
+		FILE_NAMES_INFORMATION *fni =
+		    (FILE_NAMES_INFORMATION *)ctx->bufptr;
+		next_offset = &fni->NextEntryOffset;
+
+		fni->FileIndex = ctx->offset;
+		nameptr = fni->FileName;
+		fni->FileNameLength = namelenholder;
+		break;
+
+	case FileIdFullDirectoryInformation:
+		structsize = FIELD_OFFSET(
+		    FILE_ID_FULL_DIR_INFORMATION,
+		    FileName[0]);
+		if (ctx->outcount + structsize +
+		    namelenholder > ctx->bufsize)
+			break;
+		FILE_ID_FULL_DIR_INFORMATION *fifdi =
+		    (FILE_ID_FULL_DIR_INFORMATION *)
+		    ctx->bufptr;
+		next_offset = &fifdi->NextEntryOffset;
+
+		fifdi->FileIndex = ctx->offset;
+		fifdi->AllocationSize.QuadPart =
+		    AllocationSize;
+		fifdi->EndOfFile.QuadPart =
+		    S_ISDIR(tzp->z_mode) ? 0 :
+		    tzp->z_size;
+		TIME_UNIX_TO_WINDOWS(mtime,
+		    fifdi->LastWriteTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(ctime,
+		    fifdi->ChangeTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(crtime,
+		    fifdi->CreationTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(tzp->z_atime,
+		    fifdi->LastAccessTime.QuadPart);
+		fifdi->EaSize = reparse_tag ? reparse_tag : ea_size;
+		fifdi->FileAttributes =
+		    zfs_getwinflags(tzp->z_pflags, S_ISDIR(tzp->z_mode));
+		fifdi->FileId.QuadPart = tzp->z_id;
+		nameptr = fifdi->FileName;
+		fifdi->FileNameLength = namelenholder;
+		break;
+
+	case FileIdExtdDirectoryInformation:
+		structsize = FIELD_OFFSET(
+		    FILE_ID_EXTD_DIR_INFORMATION,
+		    FileName[0]);
+		if (ctx->outcount + structsize +
+		    namelenholder > ctx->bufsize)
+			break;
+		FILE_ID_EXTD_DIR_INFORMATION *fiedi =
+		    (FILE_ID_EXTD_DIR_INFORMATION *)
+		    ctx->bufptr;
+		next_offset = &fiedi->NextEntryOffset;
+
+		fiedi->FileIndex = ctx->offset;
+		fiedi->AllocationSize.QuadPart =
+		    AllocationSize;
+		fiedi->EndOfFile.QuadPart =
+		    S_ISDIR(tzp->z_mode) ? 0 :
+		    tzp->z_size;
+		TIME_UNIX_TO_WINDOWS(mtime,
+		    fiedi->LastWriteTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(ctime,
+		    fiedi->ChangeTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(crtime,
+		    fiedi->CreationTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(tzp->z_atime,
+		    fiedi->LastAccessTime.QuadPart);
+		fiedi->EaSize = ea_size;
+		fiedi->ReparsePointTag = reparse_tag;
+		fiedi->FileAttributes =
+		    zfs_getwinflags(tzp->z_pflags, S_ISDIR(tzp->z_mode));
+		RtlCopyMemory(&fiedi->FileId.Identifier[0], &tzp->z_id,
+		    sizeof (UINT64));
+		guid = dmu_objset_fsid_guid(zfsvfs->z_os);
+		RtlCopyMemory(&fiedi->FileId.Identifier[sizeof (UINT64)],
+		    &guid, sizeof (UINT64));
+		nameptr = fiedi->FileName;
+		fiedi->FileNameLength = namelenholder;
+		break;
+
+	case FileIdExtdBothDirectoryInformation:
+		structsize = FIELD_OFFSET(
+		    FILE_ID_EXTD_BOTH_DIR_INFORMATION,
+		    FileName[0]);
+		if (ctx->outcount + structsize +
+		    namelenholder > ctx->bufsize)
+			break;
+		FILE_ID_EXTD_BOTH_DIR_INFORMATION *fiebdi =
+		    (FILE_ID_EXTD_BOTH_DIR_INFORMATION *)
+		    ctx->bufptr;
+		next_offset = &fiebdi->NextEntryOffset;
+
+		fiebdi->FileIndex = ctx->offset;
+		fiebdi->AllocationSize.QuadPart =
+		    AllocationSize;
+		fiebdi->EndOfFile.QuadPart =
+		    S_ISDIR(tzp->z_mode) ? 0 :
+		    tzp->z_size;
+		TIME_UNIX_TO_WINDOWS(mtime,
+		    fiebdi->LastWriteTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(ctime,
+		    fiebdi->ChangeTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(crtime,
+		    fiebdi->CreationTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(tzp->z_atime,
+		    fiebdi->LastAccessTime.QuadPart);
+		fiebdi->EaSize = ea_size;
+		fiebdi->ReparsePointTag = reparse_tag;
+		fiebdi->FileAttributes =
+		    zfs_getwinflags(tzp->z_pflags, S_ISDIR(tzp->z_mode));
+		fiebdi->ShortNameLength = 0;
+		RtlCopyMemory(&fiebdi->FileId.Identifier[0], &tzp->z_id,
+		    sizeof (UINT64));
+		guid = dmu_objset_fsid_guid(zfsvfs->z_os);
+		RtlCopyMemory(&fiebdi->FileId.Identifier[sizeof (UINT64)],
+		    &guid, sizeof (UINT64));
+		nameptr = fiebdi->FileName;
+		fiebdi->FileNameLength = namelenholder;
+		break;
+
+#ifdef DATACORE_HAVE_FILE_ID_ALL_EXTD
+	case FileIdAllExtdBothDirectoryInformation:
+		structsize = FIELD_OFFSET(
+		    FILE_ID_ALL_EXTD_BOTH_DIR_INFORMATION,
+		    FileName[0]);
+		if (ctx->outcount + structsize +
+		    namelenholder > ctx->bufsize)
+			break;
+		FILE_ID_ALL_EXTD_BOTH_DIR_INFORMATION *fiaebdi =
+		    (FILE_ID_ALL_EXTD_BOTH_DIR_INFORMATION *)
+		    ctx->bufptr;
+		next_offset = &fiebdi->NextEntryOffset;
+
+		fiaebdi->FileIndex = ctx->offset;
+		fiaebdi->AllocationSize.QuadPart =
+		    AllocationSize;
+		fiaebdi->EndOfFile.QuadPart =
+		    S_ISDIR(tzp->z_mode) ? 0 :
+		    tzp->z_size;
+		TIME_UNIX_TO_WINDOWS(mtime,
+		    fiaebdi->LastWriteTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(ctime,
+		    fiaebdi->ChangeTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(crtime,
+		    fiaebdi->CreationTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS(tzp->z_atime,
+		    fiaebdi->LastAccessTime.QuadPart);
+		fiaebdi->EaSize = ea_size;
+		fiaebdi->ReparsePointTag = reparse_tag;
+		fiaebdi->FileAttributes =
+		    zfs_getwinflags(tzp->z_pflags, S_ISDIR(tzp->z_mode));
+		fiaebdi->ShortNameLength = 0;
+		fiaebdi->FileId.QuadPart = tzp->z_id;
+
+		RtlCopyMemory(&fiaebdi->FileId128.Identifier[0], &tzp->z_id,
+		    sizeof (UINT64));
+		guid = dmu_objset_fsid_guid(zfsvfs->z_os);
+		RtlCopyMemory(&fiaebdi->FileId128.Identifier[sizeof (UINT64)],
+		    &guid, sizeof (UINT64));
+		nameptr = fiaebdi->FileName;
+		fiaebdi->FileNameLength = namelenholder;
+		break;
+#endif /* DATACORE_HAVE_FILE_ID_ALL_EXTD */
+
+	default:
+		panic("%s unknown listing type %d\n",
+		    __func__, ctx->dirlisttype);
+	}
+
+	// Release the zp
+	if (get_zp == 0 && tzp != NULL && ZTOV(tzp) != NULL) {
+		VN_RELE(ZTOV(tzp));
+	}
+
+	// If know we can't fit struct, just leave
+	if (ctx->outcount + structsize +
+	    namelenholder > ctx->bufsize)
+		return (ENOSPC);
+
+	rawsize = structsize + namelenholder;
+	reclen = DIRENT_RECLEN(rawsize); /* align to 8 */
+
+	/*
+	 * Will this entry fit in the buffer?
+	 * This time with alignment
+	 */
+	if (ctx->outcount + rawsize > ctx->bufsize) {
+		return (ENOSPC);
+	}
+
+	// Convert the filename over, or as much
+	// as we can fit
+	ULONG namelenholder2 = 0;
+	error = RtlUTF8ToUnicodeN(nameptr,
+	    namelenholder, &namelenholder2,
+	    name, namelen);
+	ASSERT(namelenholder == namelenholder2);
+#if 0
+	dprintf("%s: -> '%s' (namelen %d bytes: structsize %d)\n", __func__,
+	    name, namelenholder, structsize);
+#endif
+
+	/* SEARCH PATTERN */
+	if (zccb->searchname.Buffer && zccb->searchname.Length) {
+		UNICODE_STRING thisname;
+		// dprintf("%s: '%.*S' -> '%s'\n", __func__,
+		// tmpnamelen / sizeof(WCHAR), tmpname, zap.za_name);
+
+		thisname.Buffer = nameptr;
+		thisname.Length = thisname.MaximumLength = namelenholder2;
+		// wildcard?
+		if (zccb->ContainsWildCards) {
+			if (!FsRtlIsNameInExpression(&zccb->searchname,
+			    &thisname,
+			    !(zfsvfs->z_case == ZFS_CASE_SENSITIVE),
+			    NULL))
+				return (ESRCH);
+		} else {
+			if (!FsRtlAreNamesEqual(&thisname,
+			    &zccb->searchname,
+			    !(zfsvfs->z_case == ZFS_CASE_SENSITIVE),
+			    NULL))
+				return (ESRCH);
+		}
+#if 0
+		dprintf("comparing names (skip %d)\n",
+		    skip_this_entry);
+#endif
+	}
+	/* SEARCH PATTERN */
+
+	// If it is going to fit, compute alignment,
+	// in case this dir entry is the last one,
+	// we don't align last one.
+	ctx->last_alignment = reclen - rawsize;
+
+	// If we aren't to skip, advance all pointers
+	VERIFY3P(next_offset, !=, NULL);
+	ctx->next_offset = next_offset;
+	*ctx->next_offset = reclen;
+
+	ctx->outcount += reclen;
+	ctx->bufptr += reclen;
+	return (0);
+}
+
+/*
+ * Called by taskq, to call zfs_znode_getvnode( vnode_create( - and
+ * attach vnode to znode.
+ */
+void
+zfs_znode_asyncgetvnode_impl(void *arg)
+{
+	znode_t *zp = (znode_t *)arg;
+	VERIFY3P(zp, !=, NULL);
+	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
+	VERIFY3P(zfsvfs, !=, NULL);
+
+	// Attach vnode, done as different thread
+	zfs_znode_getvnode(zp, NULL, zfsvfs);
+
+	// Wake up anyone blocked on us
+	mutex_enter(&zp->z_attach_lock);
+	taskq_init_ent(&zp->z_attach_taskq);
+	cv_broadcast(&zp->z_attach_cv);
+	mutex_exit(&zp->z_attach_lock);
+
+}
+
+
+/*
+ * If the znode's vnode is not yet attached (zp->z_vnode == NULL)
+ * we call taskq_wait to wait for it to complete.
+ * We guarantee znode has a vnode at the return of function only
+ * when return is "0". On failure to wait, it returns -1, and caller
+ * may consider waiting by other means.
+ */
+int
+zfs_znode_asyncwait(zfsvfs_t *zfsvfs, znode_t *zp)
+{
+	int ret = -1;
+	int error = 0;
+
+	if (zp == NULL)
+		return (ret);
+
+	if (zfsvfs == NULL)
+		return (ret);
+
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (ret);
+
+	if (zfsvfs->z_os == NULL)
+		goto out;
+
+	// Work out if we need to block, that is, we have
+	// no vnode AND a taskq was launched. Unsure if we should
+	// look inside taskqent node like this.
+again:
+	mutex_enter(&zp->z_attach_lock);
+	if (zp->z_vnode == NULL &&
+	    zp->z_attach_taskq.tqent_func != NULL) {
+		// We need to block and wait for taskq to finish.
+		cv_wait(&zp->z_attach_cv, &zp->z_attach_lock);
+		ret = 0;
+	}
+	mutex_exit(&zp->z_attach_lock);
+
+	// Why would it be NULL?
+	if (zp->z_vnode == NULL &&
+	    zp->z_attach_taskq.tqent_func != NULL)
+		goto again;
+
+out:
+	zfs_exit(zfsvfs, FTAG);
+	return (ret);
+}
+
+/*
+ * Called in place of VN_RELE() for the places that uses ZGET_FLAG_ASYNC.
+ */
+void
+zfs_znode_asyncput_impl(znode_t *zp)
+{
+	// Make sure the other thread finished zfs_znode_getvnode();
+	// This may block, if waiting is required.
+	zfs_znode_asyncwait(zp->z_zfsvfs, zp);
+
+	// This shouldn't happen
+	if (ZTOV(zp) == NULL) {
+		dprintf("%s: zp %p vp still NULL after wait?\n", __func__, zp);
+		return;
+	}
+	// Safe to release now that it is attached.
+	VN_RELE(ZTOV(zp));
+
+}
+
+/*
+ * Called in place of VN_RELE() for the places that uses ZGET_FLAG_ASYNC,
+ * where we also taskq it - as we come from reclaim.
+ */
+void
+zfs_znode_asyncput(znode_t *zp)
+{
+	dsl_pool_t *dp = dmu_objset_pool(zp->z_zfsvfs->z_os);
+	taskq_t *tq = dsl_pool_zrele_taskq(dp);
+	vnode_t *vp = ZTOV(zp);
+
+	VERIFY3P(tq, !=, NULL);
+
+	/* If iocount > 1, AND, vp is set (not async_get) */
+	if (vp != NULL && vnode_iocount(vp) > 1) {
+		VN_RELE(vp);
+		return;
+	}
+
+	VERIFY(taskq_dispatch(
+	    (taskq_t *)tq,
+	    (task_func_t *)zfs_znode_asyncput_impl, zp, TQ_SLEEP) != 0);
+}
+
+/*
+ * Attach a new vnode to the znode asynchronically. We do this using
+ * a taskq to call it, and then wait to release the iocount.
+ * Called of zget_ext(..., ZGET_FLAG_ASYNC); will use
+ * zfs_znode_asyncput(zp) instead of VN_RELE(vp).
+ */
+int
+zfs_znode_asyncgetvnode(znode_t *zp, zfsvfs_t *zfsvfs)
+{
+	VERIFY(zp != NULL);
+	VERIFY(zfsvfs != NULL);
+
+	// We should not have a vnode here.
+	VERIFY3P(ZTOV(zp), ==, NULL);
+
+	dsl_pool_t *dp = dmu_objset_pool(zfsvfs->z_os);
+	taskq_t *tq = dsl_pool_zrele_taskq(dp);
+	VERIFY3P(tq, !=, NULL);
+
+	mutex_enter(&zp->z_attach_lock);
+	taskq_dispatch_ent(tq,
+	    (task_func_t *)zfs_znode_asyncgetvnode_impl,
+	    zp,
+	    TQ_SLEEP,
+	    &zp->z_attach_taskq);
+	mutex_exit(&zp->z_attach_lock);
+	return (0);
 }
 
 /*
@@ -718,8 +1617,8 @@ zfs_obtain_xattr(znode_t *dzp, const char *name, mode_t mode, cred_t *cr,
 
 	/* zfs_dirent_lock() expects a component name */
 
-	ZFS_ENTER(zfsvfs);
-	ZFS_VERIFY_ZP(dzp);
+	if ((error = zfs_enter_verify_zp(zfsvfs, dzp, FTAG)) != 0)
+		return (error);
 	zilog = zfsvfs->z_log;
 
 	vattr.va_type = VREG;
@@ -727,13 +1626,14 @@ zfs_obtain_xattr(znode_t *dzp, const char *name, mode_t mode, cred_t *cr,
 	vattr.va_mask = ATTR_TYPE | ATTR_MODE;
 
 	if ((error = zfs_acl_ids_create(dzp, 0,
-	    &vattr, cr, NULL, &acl_ids)) != 0) {
-		ZFS_EXIT(zfsvfs);
+	    &vattr, cr, NULL, &acl_ids, NULL)) != 0) {
+		zfs_exit(zfsvfs, FTAG);
 		return (error);
 	}
 
 	cn.cn_namelen = cn.cn_pnlen = strlen(name)+1;
-	cn.cn_nameptr = cn.cn_pnbuf = (char *)kmem_zalloc(cn.cn_pnlen, KM_SLEEP);
+	cn.cn_nameptr = cn.cn_pnbuf = (char *)kmem_zalloc(cn.cn_pnlen,
+	    KM_SLEEP);
 
 top:
 	/* Lock the attribute entry name. */
@@ -757,7 +1657,7 @@ top:
 	}
 #endif
 	zfs_sa_upgrade_txholds(tx, dzp);
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		zfs_dirent_unlock(dl);
 		if (error == ERESTART) {
@@ -797,7 +1697,7 @@ out:
 	if (xzp)
 		*vpp = ZTOV(xzp);
 
-	ZFS_EXIT(zfsvfs);
+	zfs_exit(zfsvfs, FTAG);
 	return (error);
 }
 
@@ -812,7 +1712,7 @@ out:
  */
 int
 ace_trivial_common(void *acep, int aclcnt,
-    uint64_t (*walk)(void *, uint64_t, int aclcnt,
+    uintptr_t (*walk)(void *, uintptr_t, int,
     uint16_t *, uint16_t *, uint32_t *))
 {
 	uint16_t flags;
@@ -1016,11 +1916,11 @@ getuseraccess(znode_t *zp, vfs_context_t ctx)
 	return (user_access);
 }
 
-#define KAUTH_WKG_NOT   0       /* not a well-known GUID */
-#define KAUTH_WKG_OWNER 1
-#define KAUTH_WKG_GROUP 2
-#define KAUTH_WKG_NOBODY        3
-#define KAUTH_WKG_EVERYBODY     4
+#define	KAUTH_WKG_NOT	0	/* not a well-known GUID */
+#define	KAUTH_WKG_OWNER	1
+#define	KAUTH_WKG_GROUP	2
+#define	KAUTH_WKG_NOBODY	3
+#define	KAUTH_WKG_EVERYBODY	4
 
 
 static unsigned char fingerprint[] = {0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef,
@@ -1063,7 +1963,7 @@ nfsacl_set_wellknown(int wkg, guid_t *guid)
 	/*
 	 * All WKGs begin with the same 12 bytes.
 	 */
-	bcopy(fingerprint, (void *)guid, 12);
+	memcpy((void *)guid, fingerprint, 12);
 	/*
 	 * The final 4 bytes are our code (in network byte order).
 	 */
@@ -1105,7 +2005,7 @@ aces_from_acl(ace_t *aces, int *nentries, struct kauth_acl *k_acl,
 
 	*nentries = k_acl->acl_entrycount;
 
-	// bzero(aces, sizeof (*aces) * *nentries);
+	// memset(aces, 0, sizeof (*aces) * *nentries);
 
 	// *nentries = aclp->acl_cnt;
 	for (i = 0; i < *nentries; i++) {
@@ -1256,7 +2156,7 @@ zpl_xattr_set_sa(struct vnode *vp, const char *name, const void *value,
 
 	/* Update the SA for additions, modifications, and removals. */
 	if (!error)
-		error = -zfs_sa_set_xattr(zp);
+		error = -zfs_sa_set_xattr(zp, name, value, size);
 
 	ASSERT3S(error, <=, 0);
 
@@ -1380,22 +2280,24 @@ zfs_vfs_uuid_gen(const char *osname, uuid_t uuid)
  * If supplied, start_zp_offset, is the index into fullpath where the
  * start_zp component name starts. (Point between start_parent/start_zp).
  * returnsize includes the final NULL, so it is strlen(fullpath)+1
+ * Note this is a dataset path, starting from its "/", does not
+ * include the mountpoint, nor should it.
  */
 int
 zfs_build_path(znode_t *start_zp, znode_t *start_parent, char **fullpath,
     uint32_t *returnsize, uint32_t *start_zp_offset)
 {
 	char *work;
-	int index, size, part, error;
-	struct vnode *vp = NULL;
-	struct vnode *dvp = NULL;
+	int index, size, part, error = 0;
 	znode_t *zp = NULL;
 	znode_t *dzp = NULL;
 	uint64_t parent;
 	zfsvfs_t *zfsvfs;
-	char name[MAXPATHLEN];
+	mount_t *zmo;
+	char name[ZAP_MAXNAMELEN];
+
 	// No output? nothing to do
-	if (!fullpath)
+	if (!fullpath || !returnsize)
 		return (EINVAL);
 	// No input? nothing to do
 	if (!start_zp)
@@ -1403,6 +2305,7 @@ zfs_build_path(znode_t *start_zp, znode_t *start_parent, char **fullpath,
 
 	zfsvfs = start_zp->z_zfsvfs;
 	zp = start_zp;
+	zmo = zfsvfs->z_vfs;
 
 	VN_HOLD(ZTOV(zp));
 
@@ -1414,6 +2317,7 @@ zfs_build_path(znode_t *start_zp, znode_t *start_parent, char **fullpath,
 
 	while (1) {
 
+		// rewrite this using vnode_parent
 		// Fetch parent
 		if (start_parent) {
 			dzp = start_parent;
@@ -1423,28 +2327,74 @@ zfs_build_path(znode_t *start_zp, znode_t *start_parent, char **fullpath,
 		} else if (zp->z_sa_hdl != NULL) {
 			VERIFY(sa_lookup(zp->z_sa_hdl, SA_ZPL_PARENT(zfsvfs),
 			    &parent, sizeof (parent)) == 0);
-			error = zfs_zget(zfsvfs, parent, &dzp);
+			// error = zfs_zget(zfsvfs, parent, &dzp);
+			error = zfs_zget_ext(zfsvfs, parent, &dzp,
+			    ZGET_FLAG_UNLINKED);
 			if (error) {
 				dprintf("%s: zget failed %d\n",
 				    __func__, error);
 				goto failed;
 			}
+		} else if (zfsctl_is_node(zp)) {
+			struct vnode *vp = NULL;
+			vp = zfs_root_dotdot(ZTOV(zp));
+			// .zfs/snapshot/$name - parent is snapshot
+			if (vp == NULL) {
+				dprintf("%s: snapshot dotdot failed %d\n",
+				    __func__, error);
+				goto failed;
+			}
+			dzp = VTOZ(vp);
 		}
 		// dzp held from here.
 
 		// Find name
-		if (zp->z_id == zfsvfs->z_root ||
-		    zp->z_id == ZFSCTL_INO_ROOT)
-			strlcpy(name, "", MAXPATHLEN);
-		else
-			if ((error = zap_value_search(zfsvfs->z_os, parent,
-			    zp->z_id, ZFS_DIRENT_OBJ(-1ULL), name)) != 0) {
-				dprintf("%s: zap_value_search failed %d\n",
+		if (zp->z_id == zfsvfs->z_root) {
+#if 0
+			if (zmo->mounted_on)
+				strlcpy(name, zmo->mounted_on, MAXPATHLEN);
+			else
+#endif
+				strlcpy(name, "", MAXPATHLEN);
+		} else if (zp->z_id == ZFSCTL_INO_ROOT)
+			strlcpy(name, ZFS_CTLDIR_NAME, MAXPATHLEN);
+		else if (zp->z_id == ZFSCTL_INO_SNAPDIR)
+			strlcpy(name, ZFS_SNAPDIR_NAME, MAXPATHLEN);
+		else if (zfsctl_is_leafnode(zp)) {
+			uint64_t id, pos = 0;
+			while (error == 0) {
+				boolean_t case_conflict;
+				dsl_pool_config_enter(
+				    dmu_objset_pool(zfsvfs->z_os), FTAG);
+				error = dmu_snapshot_list_next(zfsvfs->z_os,
+				    MAXPATHLEN, name, &id, &pos,
+				    &case_conflict);
+				dsl_pool_config_exit(
+				    dmu_objset_pool(zfsvfs->z_os), FTAG);
+				if (error == 0 &&
+				    (ZFSCTL_INO_SNAPDIRS - id) == zp->z_id)
+					break;
+			}
+			if (error != 0) {
+				dprintf("%s: snapshot search failed %d\n",
 				    __func__, error);
 				goto failed;
 			}
+		} else {
+			do {
+				if ((error = zap_value_search(zfsvfs->z_os,
+				    parent, zp->z_id, ZFS_DIRENT_OBJ(-1ULL),
+				    name, ZAP_MAXNAMELEN)) != 0) {
+					dprintf("%s: zap_value_search %d\n",
+					    __func__, error);
+					goto failed;
+				}
+			} while (error == EBUSY);
+		}
+
 		// Copy in name.
 		part = strlen(name);
+
 		// Check there is room
 		if (part + 1 > index) {
 			dprintf("%s: out of space\n", __func__);
@@ -1467,12 +2417,11 @@ zfs_build_path(znode_t *start_zp, znode_t *start_parent, char **fullpath,
 		zp = dzp; // Now focus on parent
 		dzp = NULL;
 
-		if (zp == NULL)	// No parent
+		if (zp == NULL) // No parent
 			break;
 
 		// If parent, stop, "/" is already copied in.
-		if (zp->z_id == zfsvfs->z_root ||
-		    zp->z_id == ZFSCTL_INO_ROOT)
+		if (zp->z_id == zfsvfs->z_root)
 			break;
 	}
 
@@ -1483,27 +2432,108 @@ zfs_build_path(znode_t *start_zp, znode_t *start_parent, char **fullpath,
 	// Correct index
 	if (start_zp_offset)
 		*start_zp_offset = *start_zp_offset - index;
-	if (returnsize)
-		*returnsize = size;
+
+	// Free existing, if any
+	if (*fullpath != NULL)
+		kmem_free(*fullpath, *returnsize);
+
+	// Allocate new
+	*returnsize = size;
 	ASSERT(size != 0);
+
 	*fullpath = kmem_alloc(size, KM_SLEEP);
 	memmove(*fullpath, &work[index], size);
 	kmem_free(work, MAXPATHLEN * 2);
-	dprintf("%s: set '%s' as name\n", __func__, *fullpath);
+
+	// If "/" we don't want offset to be "1", but "0".
+	if ((*fullpath)[0] == '\\' &&
+	    (*fullpath)[1] == 0 &&
+	    start_zp_offset)
+		*start_zp_offset = 0;
+
+	dprintf("%s: set '%s' as name, with offset %d for '%s'\n",
+	    __func__, *fullpath, *start_zp_offset,
+	    &(*fullpath)[*start_zp_offset]);
 	return (0);
 
 failed:
-	if (zp != NULL)
+	if (zp != NULL && ZTOV(zp) != NULL)
 		VN_RELE(ZTOV(zp));
-	if (dzp != NULL)
+	if (dzp != NULL && ZTOV(dzp) != NULL)
 		VN_RELE(ZTOV(dzp));
 	kmem_free(work, MAXPATHLEN * 2);
-	return (-1);
+	return (SET_ERROR(-1));
+}
+
+/*
+ * Eventually, build_path above could handle streams, but for now lets
+ * just set the stream name.
+ * Using FileTest on NTFS file:Zone.Identifier:$DATA returns the
+ * name "/src/openzfs/zpool.exe:Zone.Identifier"
+ *
+ * Re-confirmed yet again with NTFS, opening
+ * "\README.md:Zone.Identifier:$DATA"
+ *
+ * FILE_NAME_INFORMATION: "\README.md:Zone.Identifier"
+ * FILE_STREAM_INFORMATION: "::$DATA" and ":Zone.Identifier:$DATA"
+ *
+ * So FULL path for file_name, with no tail DATA. And even though we
+ * opened ":Zone.Identifier", FILE_STREAM_INFORMATION shows all streams
+ * as if we opened the parent file.
+ *
+ */
+int
+zfs_build_path_stream(znode_t *start_zp, znode_t *start_parent, char **fullpath,
+    uint32_t *returnsize, uint32_t *start_zp_offset, char *stream)
+{
+	int error;
+
+	if (start_zp == NULL)
+		return (EINVAL);
+
+	error = zfs_build_path(start_zp, start_parent, fullpath,
+	    returnsize, start_zp_offset);
+
+	if (!error && stream) {
+		// name + ":" + streamname + null
+		// TODO: clean this up to not realloc
+		// make sure it isn't already the correct name
+		if (!*fullpath || strcmp(*fullpath, stream) != 0) {
+			char *newname;
+			newname = kmem_asprintf("%s:%s",
+			    *fullpath ? *fullpath : "", stream);
+
+			// Fetch new offset, before ":stream"
+			*start_zp_offset = *returnsize;
+			// free previous full name
+			kmem_free(*fullpath, *returnsize);
+			// assign new size
+			*returnsize = strlen(newname) + 1;
+			// assign new string
+			*fullpath = newname;
+		}
+	} else if (error) {
+		*fullpath = kmem_asprintf("(nameunknown)");
+		*returnsize = strlen(*fullpath) + 1;
+		*start_zp_offset = 0;
+	}
+
+	// If it ends with ":$DATA", truncate.
+	if (returnsize && *returnsize >= 7) {
+		if (strcmp(&((*fullpath)[(*returnsize) - 7]), ":$DATA") == 0) {
+			// dont change returnsize, used to free.
+			((*fullpath)[(*returnsize) - 7]) = 0;
+		}
+	}
+
+	return (0);
 }
 
 /*
  * This is connected to IRP_MN_NOTIFY_DIRECTORY_CHANGE
  * and sending the notifications of changes
+ *
+ * Should be sent as "file0:streamname"
  */
 void
 zfs_send_notify_stream(zfsvfs_t *zfsvfs, char *name, int nameoffset,
@@ -1513,32 +2543,107 @@ zfs_send_notify_stream(zfsvfs_t *zfsvfs, char *name, int nameoffset,
 	zmo = zfsvfs->z_vfs;
 	UNICODE_STRING ustr;
 	UNICODE_STRING ustream;
+	int wideoffset = nameoffset / sizeof (WCHAR);
+	int allocateBytes = 0;
+	int length;
+	NTSTATUS status;
 
 	if (name == NULL)
 		return;
 
-	AsciiStringToUnicodeString(name, &ustr);
+	length = strlen(name);
 
-	dprintf("%s: '%wZ' part '%S' %u %u\n", __func__, &ustr,
-	    /* &name[nameoffset], */ &ustr.Buffer[nameoffset],
-	    FilterMatch, Action);
+	if (nameoffset > length)
+		return;
 
-	if (stream != NULL) {
-		AsciiStringToUnicodeString(stream, &ustream);
-		dprintf("%s: with stream '%wZ'\n", __func__, &ustream);
+	if (!zmo->NotifySync)
+		return;
+
+	RtlUTF8ToUnicodeN(NULL, 0, &allocateBytes, name, length);
+	if (allocateBytes == 0)
+		return;
+
+	allocateBytes += sizeof (wchar_t); // Add space for the null terminator.
+	wchar_t *widepath = (wchar_t *)ExAllocatePoolWithTag(NonPagedPoolNx,
+	    allocateBytes, 'znot');
+	if (widepath == NULL)
+		return;
+
+	// Initialize UNICODE_STRING for conversion.
+	RtlInitEmptyUnicodeString(&ustr, widepath, (USHORT)allocateBytes);
+
+	// Convert UTF-8 to Unicode.
+	status = RtlUTF8ToUnicodeN(ustr.Buffer, ustr.MaximumLength,
+	    &ustr.Length, name, length);
+	if (!NT_SUCCESS(status)) {
+		ExFreePoolWithTag(widepath, 'znot');
+		return;
 	}
 
-	FsRtlNotifyFullReportChange(zmo->NotifySync, &zmo->DirNotifyList,
-	    (PSTRING)&ustr, nameoffset * sizeof (WCHAR),
+	widepath[ustr.Length / sizeof (WCHAR)] = 0;
+
+	// Now find last backslash
+	wchar_t *lastBackslash = wcsrchr(widepath, L'\\');
+
+	// No slash, or only root, then don't skip over it.
+	if (lastBackslash == NULL || ustr.Length == sizeof (WCHAR))
+		wideoffset = 0;
+	else
+		wideoffset = (int)((lastBackslash - widepath) + 1);
+
+	// wideoffset is currently in character-offset, for this print
+	dprintf("zfs_send_notify_stream: '%S' %lu %u\n", ustr.Buffer,
+	    FilterMatch, Action);
+
+	dprintf("%s: offset %d part '%S'\n", __func__,
+	    wideoffset, &(ustr.Buffer[wideoffset]));
+
+	// Now wideoffset will go into byte-offset, for the call
+	wideoffset *= sizeof (wchar_t);
+
+	// We will destroy many local variables now
+	if (stream != NULL) {
+		length = strlen(stream);
+		allocateBytes = 0;
+		RtlUTF8ToUnicodeN(NULL, 0, &allocateBytes, stream, length);
+		if (allocateBytes != 0) {
+			// Add space for the null terminator.
+			allocateBytes += sizeof (wchar_t);
+			wchar_t *widepath =
+			    (wchar_t *)ExAllocatePoolWithTag(NonPagedPoolNx,
+			    allocateBytes, 'znot');
+			if (widepath != NULL) {
+				RtlInitEmptyUnicodeString(&ustream, widepath,
+				    (USHORT)allocateBytes);
+				status = RtlUTF8ToUnicodeN(ustream.Buffer,
+				    ustream.MaximumLength, &ustream.Length,
+				    stream, length);
+				if (NT_SUCCESS(status)) {
+					dprintf("%s: with stream '%wZ'\n",
+					    __func__, &ustream);
+					widepath[ustream.Length /
+					    sizeof (wchar_t)] = 0;
+				} else {
+					FreeUnicodeString(&ustream);
+					stream = NULL;
+				}
+			}
+		}
+	}
+	/* Is nameoffset in bytes, or in characters? */
+	FsRtlNotifyFilterReportChange(zmo->NotifySync, &zmo->DirNotifyList,
+	    (PSTRING)&ustr,
+	    wideoffset,
 	    stream == NULL ? NULL : (PSTRING)&ustream, // StreamName
-	    NULL, // NormalizedParentName
-	    FilterMatch, Action,
-	    NULL); // TargetContext
+	    NULL, FilterMatch, Action, NULL, NULL);
+
 	FreeUnicodeString(&ustr);
 	if (stream != NULL)
 		FreeUnicodeString(&ustream);
 }
 
+// Filenames should be "/dir/filename:streamname"
+// currently it is "streamname:$DATA"
 void
 zfs_send_notify(zfsvfs_t *zfsvfs, char *name, int nameoffset,
     ULONG FilterMatch, ULONG Action)
@@ -1580,35 +2685,18 @@ zfs_uid2sid(uint64_t uid, SID **sid)
 	}
 
 	*sid = tmp;
+
+	dprintf("%s: %llu -> 00:00:00:00:00:%02d:%02d:%02d\n",
+	    __func__, uid, tmp->IdentifierAuthority.Value[5],
+	    tmp->SubAuthority[0], (uid == 0) ? 0 :
+	    tmp->SubAuthority[1]);
 }
 
 uint64_t
 zfs_sid2uid(SID *sid)
 {
-	// Root
-	if (sid->Revision == 1 && sid->SubAuthorityCount == 1 &&
-	    sid->IdentifierAuthority.Value[0] == 0 &&
-	    sid->IdentifierAuthority.Value[1] == 0 &&
-	    sid->IdentifierAuthority.Value[2] == 0 &&
-	    sid->IdentifierAuthority.Value[3] == 0 &&
-	    sid->IdentifierAuthority.Value[4] == 0 &&
-	    sid->IdentifierAuthority.Value[5] == 18)
-		return (0);
-
-	// Samba's SID scheme: S-1-22-1-X
-	if (sid->Revision == 1 && sid->SubAuthorityCount == 2 &&
-	    sid->IdentifierAuthority.Value[0] == 0 &&
-	    sid->IdentifierAuthority.Value[1] == 0 &&
-	    sid->IdentifierAuthority.Value[2] == 0 &&
-	    sid->IdentifierAuthority.Value[3] == 0 &&
-	    sid->IdentifierAuthority.Value[4] == 0 &&
-	    sid->IdentifierAuthority.Value[5] == 22 &&
-	    sid->SubAuthority[0] == 1)
-		return (sid->SubAuthority[1]);
-
-	return (UID_NOBODY);
+	return (spl_sid_to_uid((struct _SID *)sid));
 }
-
 
 void
 zfs_gid2sid(uint64_t gid, SID **sid)
@@ -1634,6 +2722,12 @@ zfs_gid2sid(uint64_t gid, SID **sid)
 	tmp->SubAuthority[1] = gid; // bits truncation?
 
 	*sid = tmp;
+}
+
+uint64_t
+zfs_sid2gid(SID *sid)
+{
+	return (spl_sid_to_gid((struct _SID *)sid));
 }
 
 void
@@ -1690,14 +2784,177 @@ zfs_set_acl(dacl *dacls)
 	return (acl);
 }
 
+void
+find_set_gid(struct vnode *vp, struct vnode *dvp,
+    PSECURITY_SUBJECT_CONTEXT subjcont)
+{
+	NTSTATUS Status;
+	TOKEN_OWNER *to = NULL;
+	TOKEN_PRIMARY_GROUP *tpg = NULL;
+	TOKEN_GROUPS *tg = NULL;
+	znode_t *zp = VTOZ(vp);
+
+	if (dvp && zp) {
+		znode_t *dzp = VTOZ(dvp);
+		if (dzp && dzp->z_mode & S_ISGID) {
+			zp->z_gid = dzp->z_gid;
+			return;
+		}
+	}
+
+	if (!subjcont || !subjcont->PrimaryToken)
+		return;
+#if 0
+	Status = SeQueryInformationToken(subjcont->PrimaryToken,
+	    TokenOwner, (void**)&to);
+	if (!NT_SUCCESS(Status)) {
+		dprintf("SeQueryInformationToken returned %08lx\n", Status);
+	} else {
+		if (zp) {
+			zp->z_uid = zfs_sid2uid(to->Owner);
+			dprintf("Using uid %lu\n", zp->z_uid);
+			dump_sid(to->Owner);
+		}
+		ExFreePool(to);
+	}
+#endif
+
+	// If we one day implement a gid_mapping_list
+#if 0
+	Status = SeQueryInformationToken(subjcont->PrimaryToken,
+	    TokenPrimaryGroup, (void**)&tpg);
+	if (!NT_SUCCESS(Status) || !tpg) {
+		dprintf("SeQueryInformationToken returned %08lx\n", Status);
+	} else {
+		if (zp) {
+			zp->z_gid = zfs_sid2gid(tpg->PrimaryGroup);
+			dprintf("Using gid %lu\n", zp->z_gid);
+			dump_sid(tpg->PrimaryGroup);
+		}
+		ExFreePool(tpg);
+	}
+#endif
+#if 0
+	Status = SeQueryInformationToken(subjcont->PrimaryToken,
+	    TokenGroups, (void**)&tg);
+	if (!NT_SUCCESS(Status)) {
+		dprintf("SeQueryInformationToken returned %08lx\n", Status);
+	} else {
+		ULONG i;
+
+		for (i = 0; i < tg->GroupCount; i++) {
+		    // tg->Groups[i].Sid
+		}
+
+		ExFreePool(tg);
+	}
+#endif
+}
 
 void
-zfs_set_security_root(struct vnode *vp)
+zfs_save_ntsecurity(struct vnode *vp)
+{
+	int error;
+	zfs_uio_t uio;
+	struct iovec iov;
+
+	/* Don't set on ctldir */
+	if (zfsctl_is_node(VTOZ(vp)))
+		return;
+
+	if (zfs_is_readonly(VTOZ(vp)->z_zfsvfs))
+		return; // (STATUS_MEDIA_WRITE_PROTECTED);
+
+	iov.iov_base = vnode_security(vp);
+	iov.iov_len = RtlLengthSecurityDescriptor(iov.iov_base);
+
+	zfs_uio_iovec_init(&uio, &iov, 1, 0,
+	    UIO_SYSSPACE, iov.iov_len, 0);
+
+	error = zpl_xattr_set(vp, EA_NTACL, &uio, 0, NULL);
+
+	if (error == 0) {
+		dprintf("%s: wrote NTSecurity\n", __func__);
+	} else {
+		dprintf("%s: failed to add NTSecurity: %d\n", __func__,
+		    error);
+	}
+}
+
+void
+zfs_load_ntsecurity(struct vnode *vp)
+{
+	int error;
+	zfs_uio_t uio;
+	struct iovec iov;
+	ssize_t retsize;
+
+	if (!windows_load_security)
+		return;
+
+	error = zpl_xattr_get(vp, EA_NTACL, NULL,
+	    &retsize, NULL);
+
+	if (error || retsize <= 0)
+		return;
+
+
+	void *oldsd = vnode_security(vp);
+	vnode_setsecurity(vp, NULL);
+	if (oldsd)
+		ExFreePool(oldsd);
+
+	void *sd = ExAllocatePoolWithTag(PagedPool, retsize, 'ZSEC');
+	if (sd == NULL)
+		return;
+
+	iov.iov_base = sd;
+	iov.iov_len = retsize;
+
+	zfs_uio_iovec_init(&uio, &iov, 1, 0,
+	    UIO_SYSSPACE, retsize, 0);
+
+	error = zpl_xattr_get(vp, EA_NTACL, &uio, &retsize, NULL);
+
+	if (error == 0) {
+		if (RtlValidSecurityDescriptor(sd)) {
+			dprintf("%s: read NTSecurity\n", __func__);
+			vnode_setsecurity(vp, sd);
+			return;
+		}
+		dprintf("%s: invalid NTSecurity xattr\n", __func__);
+	}
+	ExFreePool(sd);
+}
+
+void
+zfs_remove_ntsecurity(struct vnode *vp)
+{
+	int error;
+	void *oldsd = vnode_security(vp);
+	vnode_setsecurity(vp, NULL);
+	if (oldsd)
+		ExFreePool(oldsd);
+
+	if (zfs_is_readonly(VTOZ(vp)->z_zfsvfs))
+		return;
+
+	error = zpl_xattr_set(vp, EA_NTACL, NULL, 0, NULL);
+
+	if (error == 0) {
+		dprintf("%s: removed NTSecurity\n", __func__);
+	} else {
+		dprintf("%s: failed to remove NTSecurity: %d\n",
+		    __func__, error);
+	}
+}
+
+void
+zfs_attach_security_root(struct vnode *vp)
 {
 	SECURITY_DESCRIPTOR sd;
 	SID *usersid = NULL, *groupsid = NULL;
 	znode_t *zp = VTOZ(vp);
-	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
 	NTSTATUS Status;
 	ACL *acl = NULL;
 
@@ -1734,6 +2991,8 @@ zfs_set_security_root(struct vnode *vp)
 
 	vnode_setsecurity(vp, tmp);
 
+	zfs_save_ntsecurity(vp);
+
 err:
 	if (acl)
 		ExFreePool(acl);
@@ -1743,94 +3002,238 @@ err:
 		zfs_freesid(groupsid);
 }
 
+// Attach security based on parent SD, or
+// optionally, passed in SD.
 int
-zfs_set_security(struct vnode *vp, struct vnode *dvp)
+zfs_attach_security(struct vnode *vp, struct vnode *dvp,
+    PACCESS_STATE access_state)
 {
 	SECURITY_SUBJECT_CONTEXT subjcont;
-	NTSTATUS Status;
+	PSECURITY_SUBJECT_CONTEXT psubjcont = NULL;
+	NTSTATUS Status = STATUS_INVALID_PARAMETER;
 	SID *usersid = NULL, *groupsid = NULL;
+	int error = 0;
+	boolean_t defaulted;
+	uint8_t *buf = NULL;
+	boolean_t allocated_usersid = B_FALSE;
+	boolean_t allocated_groupsid = B_FALSE;
 
 	if (vp == NULL)
-		return (0);
+		return (Status);
 
 	if (vp->security_descriptor != NULL)
-		return (0);
+		return (Status);
 
 	znode_t *zp = VTOZ(vp);
 	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
 
+	/* First check if we can read in an existing NTSecurity */
+	zfs_load_ntsecurity(vp);
+	if (vp->security_descriptor != NULL)
+		return (0);
+
 	// If we are the rootvp, we don't have a parent, so do different setup
 	if (zp->z_id == zfsvfs->z_root ||
 	    zp->z_id == ZFSCTL_INO_ROOT) {
-		zfs_set_security_root(vp);
+		zfs_attach_security_root(vp);
 		return (0);
 	}
 
-	ZFS_ENTER(zfsvfs);
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);
 
 	// If no parent, find it. This will take one hold on
 	// dvp, either directly or from zget().
 	znode_t *dzp = NULL;
+
 	if (dvp == NULL) {
-		if (zp->z_sa_hdl != NULL) {
-			uint64_t parent;
-			if (sa_lookup(zp->z_sa_hdl, SA_ZPL_PARENT(zfsvfs),
-			    &parent, sizeof (parent)) != 0) {
-				goto err;
-			}
-			if (zfs_zget(zfsvfs, parent, &dzp)) {
-				dvp = NULL;
-				goto err;
-			}
-			dvp = ZTOV(dzp);
-		} // What to do if no sa_hdl ?
+		dvp = zfs_parent(vp);
 	} else {
-		VN_HOLD(dvp);
-		dzp = VTOZ(dvp);
+		VERIFY0(VN_HOLD(dvp));
 	}
+
+	if (dvp == NULL)
+		goto err;
+	dzp = VTOZ(dvp);
+
+	// We can fail here, if we are processing unlinked-list
+	if (vnode_security(dvp) == NULL)
+		goto err;
 
 	ASSERT(dvp != NULL);
 	ASSERT(dzp != NULL);
 	ASSERT(vnode_security(dvp) != NULL);
 
-	SeCaptureSubjectContext(&subjcont);
+	ULONG flags = SEF_DEFAULT_DESCRIPTOR_FOR_OBJECT;
+
+	if (access_state != NULL) {
+		psubjcont = &access_state->SubjectSecurityContext;
+	} else {
+		flags |= SEF_DACL_AUTO_INHERIT | SEF_SACL_AUTO_INHERIT;
+		SeCaptureSubjectContext(&subjcont);
+		psubjcont = &subjcont;
+	}
+
 	void *sd = NULL;
-	Status = SeAssignSecurityEx(vnode_security(dvp), NULL, (void**)&sd,
-	    NULL, vnode_isdir(vp)?TRUE:FALSE, SEF_DACL_AUTO_INHERIT,
-	    &subjcont, IoGetFileObjectGenericMapping(), PagedPool);
+	Status = SeAssignSecurityEx(vnode_security(dvp),
+	    access_state ? access_state->SecurityDescriptor : NULL,
+	    (void**)&sd,
+	    NULL, vnode_isdir(vp)?TRUE:FALSE, flags,
+	    psubjcont, IoGetFileObjectGenericMapping(), PagedPool);
 
 	if (Status != STATUS_SUCCESS)
 		goto err;
 
-	vnode_setsecurity(vp, sd);
+	// what OwnerID did we get?
+	Status = RtlGetOwnerSecurityDescriptor(sd,
+	    &usersid, &defaulted);
+	if (!NT_SUCCESS(Status)) {
+		dprintf("RtlGetOwnerSecurityDescriptor returned %08lx\n",
+		    Status);
+	} else {
+		zp->z_uid = zfs_sid2uid(usersid);
+	}
 
-	zfs_uid2sid(zp->z_uid, &usersid);
-	RtlSetOwnerSecurityDescriptor(&sd, usersid, FALSE);
+	// what GroupID did we get?
+	Status = RtlGetGroupSecurityDescriptor(sd,
+	    &groupsid, &defaulted);
+	if (!NT_SUCCESS(Status)) {
+		dprintf("RtlGetGroupSecurityDescriptor returned %08lx\n",
+		    Status);
+	} else {
+		zp->z_gid = zfs_sid2gid(groupsid);
+	}
 
-	zfs_gid2sid(zp->z_gid, &groupsid);
-	RtlSetGroupSecurityDescriptor(&sd, groupsid, FALSE);
+	find_set_gid(vp, dvp, &subjcont);
+	dprintf("%s: set uid %llu gid %llu\n", __func__,
+	    zp->z_uid, zp->z_gid);
+#if 0
+	if (usersid)
+		dump_sid(usersid);
+	if (groupsid)
+		dump_sid(groupsid);
+#endif
+
+	/* Why do we do this rel -> abs -> rel ? */
+	ULONG buflen;
+	PSECURITY_DESCRIPTOR *abssd;
+	PSECURITY_DESCRIPTOR newsd;
+	PACL dacl, sacl;
+	PSID owner, group;
+	ULONG abssdlen = 0, dacllen = 0, sacllen = 0, ownerlen = 0,
+	    grouplen = 0;
+
+	Status = RtlSelfRelativeToAbsoluteSD(sd, NULL, &abssdlen, NULL,
+	    &dacllen, NULL, &sacllen, NULL, &ownerlen, NULL, &grouplen);
+	if (!NT_SUCCESS(Status) && Status != STATUS_BUFFER_TOO_SMALL) {
+		dprintf("RtlSelfRelativeToAbsoluteSD returned %08lx\n", Status);
+		goto err;
+	}
+
+	if (abssdlen + dacllen + sacllen + ownerlen + grouplen == 0) {
+		dprintf("RtlSelfRelativeToAbsoluteSD returned zero lengths\n");
+		goto err;
+	}
+
+	buf = (uint8_t *)ExAllocatePoolWithTag(PagedPool, abssdlen + dacllen +
+	    sacllen + ownerlen + grouplen, 'ZACL');
+	if (!buf) {
+		dprintf("out of memory\n");
+		goto err;
+	}
+
+	abssd = (PSECURITY_DESCRIPTOR)buf;
+	dacl = (PACL)(buf + abssdlen);
+	sacl = (PACL)(buf + abssdlen + dacllen);
+	owner = (PSID)(buf + abssdlen + dacllen + sacllen);
+	group = (PSID)(buf + abssdlen + dacllen + sacllen + ownerlen);
+
+	Status = RtlSelfRelativeToAbsoluteSD(sd, abssd, &abssdlen, dacl,
+	    &dacllen, sacl, &sacllen, owner, &ownerlen, group, &grouplen);
+	if (!NT_SUCCESS(Status) && Status != STATUS_BUFFER_TOO_SMALL) {
+		dprintf("RtlSelfRelativeToAbsoluteSD returned %08lx\n", Status);
+		goto err;
+	}
+
+	// Only convert over uid if SD does not contain OwnerID
+	if (usersid == NULL) {
+		zfs_uid2sid(zp->z_uid, &usersid);
+		if (!usersid) {
+			dprintf("uid_to_sid returned %08lx\n", Status);
+			Status = STATUS_NO_MEMORY;
+			goto err;
+		}
+		allocated_usersid = B_TRUE;
+	}
+	RtlSetOwnerSecurityDescriptor(abssd, usersid, FALSE);
+
+	if (groupsid == NULL) {
+		zfs_gid2sid(zp->z_gid, &groupsid);
+		if (!groupsid) {
+			dprintf("out of memory\n");
+			Status = STATUS_NO_MEMORY;
+			goto err;
+		}
+		allocated_groupsid = B_TRUE;
+	}
+	RtlSetGroupSecurityDescriptor(abssd, groupsid, FALSE);
+
+	buflen = 0;
+
+	Status = RtlAbsoluteToSelfRelativeSD(abssd, NULL, &buflen);
+	if (!NT_SUCCESS(Status) && Status != STATUS_BUFFER_TOO_SMALL) {
+		dprintf("RtlAbsoluteToSelfRelativeSD returned %08lx\n", Status);
+		goto err;
+	}
+
+	if (buflen == 0) {
+		dprintf("RtlAbsoluteToSelfRelativeSD returned size of 0\n");
+		Status = STATUS_INVALID_PARAMETER;
+		goto err;
+	}
+
+	newsd = ExAllocatePoolWithTag(PagedPool, buflen, 'ZACL');
+	if (!newsd) {
+		dprintf("out of memory\n");
+		Status = STATUS_NO_MEMORY;
+		goto err;
+	}
+
+	Status = RtlAbsoluteToSelfRelativeSD(abssd, newsd, &buflen);
+	if (!NT_SUCCESS(Status)) {
+		dprintf("RtlAbsoluteToSelfRelativeSD returned %08lx\n", Status);
+		ExFreePool(newsd);
+		goto err;
+	}
+
+	void *oldsd = vnode_security(vp);
+	vnode_setsecurity(vp, newsd);
+	if (oldsd)
+		ExFreePool(oldsd);
+
+	zfs_save_ntsecurity(vp);
 
 err:
-	if (dvp) VN_RELE(dvp);
-	ZFS_EXIT(zfsvfs);
 
-	if (usersid != NULL)
+	if (dvp)
+		VN_RELE(dvp);
+	zfs_exit(zfsvfs, FTAG);
+
+	if (psubjcont == &subjcont)
+		SeReleaseSubjectContext(&subjcont);
+
+	if (buf != NULL)
+		ExFreePool(buf);
+	if (allocated_usersid)
 		zfs_freesid(usersid);
-	if (groupsid != NULL)
+	if (allocated_groupsid)
 		zfs_freesid(groupsid);
-	return (0);
-}
-
-// return true if a XATTR name should be skipped
-int
-xattr_protected(char *name)
-{
-	return (0);
+	return (Status);
 }
 
 // return true if xattr is a stream (name ends with ":$DATA")
 int
-xattr_stream(char *name)
+xattr_stream(const char *name)
 {
 	char tail[] = ":$DATA";
 	int taillen = sizeof (tail);
@@ -1853,173 +3256,303 @@ xattr_stream(char *name)
 uint64_t
 xattr_getsize(struct vnode *vp)
 {
-	uint64_t ret = 0;
-	struct vnode *xdvp = NULL;
-	znode_t *zp, *xdzp = NULL, *xzp = NULL;
+	znode_t *zp;
 	zfsvfs_t *zfsvfs;
-	zap_cursor_t  zc;
-	zap_attribute_t  za;
-	objset_t  *os;
+	ssize_t retsize = 0;
 
 	if (vp == NULL)
 		return (0);
 
+#if 0
+	boolean_t cached = B_FALSE;
+	uint64_t cached_size = 0ULL;
+	// To test the caching is correct
+	cached = vnode_easize(vp, &cached_size);
+#else
 	// Cached? Easy, use it
-	if (vnode_easize(vp, &ret))
-		return (ret);
+	if (vnode_easize(vp, &retsize))
+		return (retsize);
+#endif
 
 	zp = VTOZ(vp);
 	zfsvfs = zp->z_zfsvfs;
 
-/*
- * Iterate through all the xattrs, adding up namelengths and value sizes.
- * There was some suggestion that this should be 4 + (5 + name + valuelen)
- * but that no longer appears to be true. The returned value is used directly
- * with IRP_MJ_QUERY_EA and we will have to return short.
- * We will return the true space needed.
- */
-	if (zfs_get_xattrdir(zp, &xdzp, NULL, 0) != 0) {
-		goto out;
-	}
-	xdvp = ZTOV(xdzp);
-	os = zfsvfs->z_os;
+	if (!zp->z_is_sa || zp->z_sa_hdl == NULL)
+		return (0);
 
-	for (zap_cursor_init(&zc, os, VTOZ(xdvp)->z_id);
-	    zap_cursor_retrieve(&zc, &za) == 0; zap_cursor_advance(&zc)) {
+	// Fake ctrldir nodes can't have xattr
+	if (zfsctl_is_node(zp))
+		return (0);
 
-		if (xattr_protected(za.za_name))
-			continue;	 /* skip */
-		if (xattr_stream(za.za_name))
-			continue;	 /* skip */
+	zfs_uio_t uio;
+	zfs_uio_iovec_init(&uio, NULL, 0, 0,
+	    UIO_SYSSPACE, 0, 0);
 
-		if (zfs_dirlook(VTOZ(xdvp), za.za_name, &xzp, 0, NULL,
-		    NULL) == 0) {
-			ret = ((ret + 3) & ~3); // aligned to 4 bytes.
-			ret += offsetof(FILE_FULL_EA_INFORMATION, EaName) +
-			    strlen(za.za_name) + 1 + xzp->z_size;
-			zrele(xzp);
-		}
-	}
-	zap_cursor_fini(&zc);
-	VN_RELE(xdvp);
+	zpl_xattr_list(vp, &uio, &retsize, NULL);
 
-out:
+	// It appears I should round it up here:
+	retsize += (((retsize)+3) & ~3) - (retsize);
+
 	// Cache result, even if failure (cached as 0).
-	vnode_set_easize(vp, ret);
+	vnode_set_easize(vp, retsize);
 
-	return (ret);
+	return (retsize);
+}
+
+/*
+ * try harder to get parent, including looking it up.
+ * this will return with iocount held on dvp.
+ * call, VN_RELE() when done.
+ */
+struct vnode *
+zfs_parent(struct vnode *vp)
+{
+	struct vnode *dvp;
+
+	if (vp == NULL)
+		return (NULL);
+
+	/* easy, do we have it? */
+	dvp = vnode_parent(vp);
+	if (dvp != NULL) {
+		if (VN_HOLD(dvp) == 0)
+			return (dvp);
+		else
+			return (NULL);
+	}
+	/* .. then look it up */
+	znode_t *zp = VTOZ(vp);
+
+	if (zp == NULL)
+		return (NULL);
+
+	if (zfsctl_is_node(zp))
+		return (zfs_root_dotdot(vp));
+
+	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
+	uint64_t parent;
+
+	VERIFY(sa_lookup(zp->z_sa_hdl, SA_ZPL_PARENT(zfsvfs),
+	    &parent, sizeof (parent)) == 0);
+
+	znode_t *dzp;
+	int error;
+
+	error = zfs_zget(zfsvfs, parent, &dzp);
+	if (error)
+		return (NULL);
+
+	/*
+	 * Tempting as it may be, we can not
+	 * call setparent() here as there is
+	 * nothing to release parent usecount.
+	 */
+	// vnode_setparent(vp, ZTOV(dzp));
+	return (ZTOV(dzp));
 }
 
 /*
  * Call vnode_setunlink if zfs_zaccess_delete() allows it
  * TODO: provide credentials
+ * deleteonclose is the open flag, which is a softer delete, and
+ * only actioned on fileobject_cleanup. If false, we are from
+ * set_disposition, which is more instant, and global.
  */
 NTSTATUS
-zfs_setunlink(FILE_OBJECT *fo, vnode_t *dvp)
+zfs_setunlink(FILE_OBJECT *fo, vnode_t *dvp, boolean_t deleteonclose)
 {
 	vnode_t *vp = NULL;
 	NTSTATUS Status = STATUS_UNSUCCESSFUL;
 
 	if (fo == NULL) {
 		Status = STATUS_INVALID_PARAMETER;
-		goto err;
+		goto out;
 	}
 
 	vp = fo->FsContext;
 
 	if (vp == NULL) {
 		Status = STATUS_INVALID_PARAMETER;
-		goto err;
+		goto out;
 	}
 
 	znode_t *zp = NULL;
 	znode_t *dzp = NULL;
-	zfs_dirlist_t *zccb = fo->FsContext2;
+	zfs_ccb_t *zccb = fo->FsContext2;
 
 	zfsvfs_t *zfsvfs;
-	VN_HOLD(vp);
+
 	zp = VTOZ(vp);
+
+	// Holding vp, not dvp, use "out:" to leave
 
 	if (vp && zp) {
 		zfsvfs = zp->z_zfsvfs;
 	} else {
 		Status = STATUS_INVALID_PARAMETER;
-		goto err;
+		goto out;
+	}
+
+	// If it belongs in .zfs, just reply OK.
+	// mounting will attempted to delete directory
+	// to replace with reparse point.
+	if (zfsctl_is_node(zp)) {
+		if (zfsctl_is_leafnode(zp)) {
+			fo->DeletePending = TRUE;
+			ASSERT3P(zccb, !=, NULL);
+			zccb->deleteonclose = 1;
+			Status = STATUS_SUCCESS;
+			goto out;
+		}
+		Status = STATUS_CANNOT_DELETE;
+		goto out;
 	}
 
 	if (zfsvfs->z_rdonly || vfs_isrdonly(zfsvfs->z_vfs) ||
 	    !spa_writeable(dmu_objset_spa(zfsvfs->z_os))) {
 		Status = STATUS_MEDIA_WRITE_PROTECTED;
-		goto err;
+		goto out;
+	}
+
+	// If it is a reparsepoint, deny if used as mountpoint
+	if ((zp->z_pflags & ZFS_REPARSE) && zccb &&
+	    vfs_has_mount(zccb->z_name_cache)) {
+		Status = STATUS_ACCESS_DENIED;
+		goto out;
 	}
 
 	// Cannot delete a user mapped image.
 	if (!MmFlushImageSection(&vp->SectionObjectPointers,
 	    MmFlushForDelete)) {
 		Status = STATUS_CANNOT_DELETE;
-		goto err;
+		goto out;
 	}
 
-	// if dvp == null, find it
+	// Call out_unlock from now on,
+	// zfs_parent() holds dvp
+	if (dvp == NULL)
+		dvp = zfs_parent(vp);
+	else
+		VN_HOLD(dvp);
 
 	if (dvp == NULL) {
-		uint64_t parent;
-
-		if (sa_lookup(zp->z_sa_hdl, SA_ZPL_PARENT(zfsvfs),
-		    &parent, sizeof (parent)) != 0) {
-			goto err;
-		}
-		if (zfs_zget(zfsvfs, parent, &dzp)) {
-			dvp = NULL;
-			goto err;
-		}
-		dvp = ZTOV(dzp);
-	} else {
-		dzp = VTOZ(dvp);
-		VN_HOLD(dvp);
+		Status = STATUS_INVALID_PARAMETER;
+		goto out_unlock;
 	}
+
+	dzp = VTOZ(dvp);
 
 	// If we are root
 	if (zp->z_id == zfsvfs->z_root) {
 		Status = STATUS_CANNOT_DELETE;
-		goto err;
+		goto out_unlock;
 	}
 
 	// If we are a dir, and have more than "." and "..", we
 	// are not empty.
 	if (S_ISDIR(zp->z_mode)) {
 
-		int nodeadlock = 0;
-
-		if (zp->z_size > 2) {
+		if (!zfs_dirempty(zp)) {
 			Status = STATUS_DIRECTORY_NOT_EMPTY;
-			goto err;
+			goto out_unlock;
 		}
 	}
 
-	int error = zfs_zaccess_delete(dzp, zp, 0);
+	int error = 0;
+
+	if (dzp != NULL) {
+		/*
+		 * Use Windows SeAccessCheck as the authoritative delete check,
+		 * mirroring the mkdir path. If the Windows SD grants DELETE on
+		 * the file itself or FILE_DELETE_CHILD on the parent, pass an
+		 * elevated cred (uid=0) so the ZFS POSIX ACL is bypassed.
+		 * This handles pools whose root is uid=0/0755, where a regular
+		 * user owns a subdirectory but the POSIX parent write-bit check
+		 * would otherwise deny deletion.
+		 */
+		cred_t elevated_delete_cr = { .cr_uid = 0, .cr_gid = 0 };
+		cred_t *delete_cr = NULL;
+		PSECURITY_DESCRIPTOR fileSD = vnode_security(vp);
+		PSECURITY_DESCRIPTOR parentSD = vnode_security(dvp);
+		if (fileSD != NULL || parentSD != NULL) {
+			SECURITY_SUBJECT_CONTEXT subject;
+			SeCaptureSubjectContext(&subject);
+			ACCESS_MASK grantedAccess;
+			NTSTATUS accessStatus;
+			BOOLEAN winOK = FALSE;
+			KPROCESSOR_MODE mode = ExGetPreviousMode();
+			if (fileSD != NULL) {
+				SeLockSubjectContext(&subject);
+				winOK = SeAccessCheck(fileSD, &subject, TRUE,
+				    DELETE, 0, NULL,
+				    IoGetFileObjectGenericMapping(),
+				    mode, &grantedAccess, &accessStatus);
+				SeUnlockSubjectContext(&subject);
+			}
+			if (!winOK && parentSD != NULL) {
+				SeLockSubjectContext(&subject);
+				winOK = SeAccessCheck(parentSD, &subject, TRUE,
+				    FILE_DELETE_CHILD, 0, NULL,
+				    IoGetFileObjectGenericMapping(),
+				    mode, &grantedAccess, &accessStatus);
+				SeUnlockSubjectContext(&subject);
+			}
+			SeReleaseSubjectContext(&subject);
+			if (winOK)
+				delete_cr = &elevated_delete_cr;
+		}
+		error = zfs_zaccess_delete(dzp, zp, delete_cr, NULL);
+	}
 
 	if (error == 0) {
 		ASSERT3P(zccb, !=, NULL);
-		zccb->deleteonclose = 1;
+		if (deleteonclose)
+			zccb->deleteonclose = 1;
+		else
+			vnode_setunlink(vp, DELETE_PENDING);
 		fo->DeletePending = TRUE;
 		Status = STATUS_SUCCESS;
 	} else {
 		Status = STATUS_ACCESS_DENIED;
 	}
 
-err:
-	if (vp) {
-		VN_RELE(vp);
-		vp = NULL;
-	}
-
+out_unlock:
 	if (dvp) {
 		VN_RELE(dvp);
 		dvp = NULL;
 	}
 
+out:
 	return (Status);
+}
+
+/*
+ * "File System Behavior Overview.pdf" page 33
+ * Note that if the DELETE_ON_CLOSE flag is specified on
+ * a directory with child files or directories, the
+ * create operation will succeed, but the delete on close
+ * flag will be silently ignored when processing the
+ * cleanup IRP and the directory will not be deleted.
+ * The create operation can fail marking the file delete
+ * on close for any of the following reasons:
+ * The file is marked read-only : STATUS_CANNOT_DELETE
+ * The volume is marked read-only : STATUS_CANNOT_DELETE
+ * The file backs an image section : STATUS_CANNOT_DELETE
+ * The link or stream is already in the delete-pending
+ * state : STATUS_DELETE_PENDING
+ */
+NTSTATUS
+zfs_setunlink_masked(FILE_OBJECT *fo, vnode_t *dvp)
+{
+	NTSTATUS Status;
+	Status = zfs_setunlink(fo, dvp, B_TRUE);
+	switch (Status) {
+	case STATUS_CANNOT_DELETE:
+	case STATUS_DELETE_PENDING:
+		return (Status);
+	default:
+		return (STATUS_SUCCESS);
+	}
 }
 
 int
@@ -2030,14 +3563,14 @@ uio_prefaultpages(ssize_t n, struct uio *uio)
 
 /* No #pragma weaks here! */
 void
-dmu_buf_add_ref(dmu_buf_t *db, void *tag)
+dmu_buf_add_ref(dmu_buf_t *db, const void *tag)
 {
 	dbuf_add_ref((dmu_buf_impl_t *)db, tag);
 }
 
 boolean_t
 dmu_buf_try_add_ref(dmu_buf_t *db, objset_t *os, uint64_t object,
-    uint64_t blkid, void *tag)
+    uint64_t blkid, const void *tag)
 {
 	return (dbuf_try_add_ref(db, os, object, blkid, tag));
 }
@@ -2046,205 +3579,406 @@ dmu_buf_try_add_ref(dmu_buf_t *db, objset_t *os, uint64_t object,
 
 
 NTSTATUS
-file_disposition_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+set_file_basic_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp)
 {
-	NTSTATUS Status = STATUS_SUCCESS;
+	NTSTATUS Status = STATUS_INVALID_PARAMETER;
 
-	if (IrpSp->FileObject == NULL || IrpSp->FileObject->FsContext == NULL)
+	if (IrpSp->FileObject == NULL || IrpSp->FileObject->FsContext == NULL ||
+	    IrpSp->FileObject->FsContext == NULL)
 		return (STATUS_INVALID_PARAMETER);
 
 	PFILE_OBJECT FileObject = IrpSp->FileObject;
 	struct vnode *vp = FileObject->FsContext;
-	zfs_dirlist_t *zccb = FileObject->FsContext2;
-	znode_t *zp = VTOZ(vp);
-	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
-	FILE_DISPOSITION_INFORMATION *fdi = Irp->AssociatedIrp.SystemBuffer;
+	zfs_ccb_t *zccb = FileObject->FsContext2;
 	mount_t *zmo = DeviceObject->DeviceExtension;
+	ULONG NotifyFilter = 0;
 
-	if (vp) {
-		dprintf("Deletion %s on '%wZ'\n",
-		    fdi->DeleteFile ? "set" : "unset",
-		    IrpSp->FileObject->FileName);
-		Status = STATUS_SUCCESS;
-		if (fdi->DeleteFile) {
-			Status = zfs_setunlink(IrpSp->FileObject, NULL);
-		} else {
-			if (zccb) zccb->deleteonclose = 0;
-			FileObject->DeletePending = FALSE;
-		}
-		// Dirs marked for Deletion should release all
-		// pending Notify events
-		if (Status == STATUS_SUCCESS && fdi->DeleteFile) {
-			FsRtlNotifyCleanup(zmo->NotifySync,
-			    &zmo->DirNotifyList, VTOZ(vp));
-		}
-	}
-	return (Status);
-}
-
-NTSTATUS
-file_disposition_information_ex(PDEVICE_OBJECT DeviceObject, PIRP Irp,
-    PIO_STACK_LOCATION IrpSp)
-{
-	NTSTATUS Status = STATUS_SUCCESS;
-
-	if (IrpSp->FileObject == NULL || IrpSp->FileObject->FsContext == NULL)
-		return (STATUS_INVALID_PARAMETER);
-
-	PFILE_OBJECT FileObject = IrpSp->FileObject;
-	struct vnode *vp = FileObject->FsContext;
-	zfs_dirlist_t *zccb = FileObject->FsContext2;
-	znode_t *zp = VTOZ(vp);
-	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
-	FILE_DISPOSITION_INFORMATION_EX *fdie = Irp->AssociatedIrp.SystemBuffer;
-	mount_t *zmo = DeviceObject->DeviceExtension;
-
-	if (vp) {
-
-		Status = STATUS_SUCCESS;
-
-		dprintf("%s: Flags 0x%x\n", __func__, fdie->Flags);
-
-		if (fdie->Flags | FILE_DISPOSITION_ON_CLOSE)
-			if (fdie->Flags | FILE_DISPOSITION_DELETE)
-				Status = zfs_setunlink(FileObject, NULL);
-			else
-				if (zccb) zccb->deleteonclose = 0;
-
-		// Do we care about FILE_DISPOSITION_POSIX_SEMANTICS ?
-
-		// Dirs marked for Deletion should release all
-		// pending Notify events
-		if (Status == STATUS_SUCCESS &&
-		    (fdie->Flags | FILE_DISPOSITION_DELETE)) {
-			FsRtlNotifyCleanup(zmo->NotifySync, &zmo->DirNotifyList,
-			    VTOZ(vp));
-		}
-	}
-	return (Status);
-}
-
-NTSTATUS
-file_endoffile_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
-    PIO_STACK_LOCATION IrpSp)
-{
-	NTSTATUS Status = STATUS_SUCCESS;
-
-	if (IrpSp->FileObject == NULL || IrpSp->FileObject->FsContext == NULL)
-		return (STATUS_INVALID_PARAMETER);
-
-	PFILE_OBJECT FileObject = IrpSp->FileObject;
-	struct vnode *vp = FileObject->FsContext;
-	zfs_dirlist_t *zccb = FileObject->FsContext2;
-	znode_t *zp = VTOZ(vp);
-	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
-	FILE_END_OF_FILE_INFORMATION *feofi = Irp->AssociatedIrp.SystemBuffer;
-	int changed = 0;
+	zfsvfs_t *zfsvfs = NULL;
+	if (zmo != NULL &&
+	    (zfsvfs = vfs_fsprivate(zmo)) != NULL &&
+	    zfsvfs->z_rdonly)
+		return (STATUS_MEDIA_WRITE_PROTECTED);
 
 	if (zfsvfs == NULL)
 		return (STATUS_INVALID_PARAMETER);
 
-	dprintf("* File_EndOfFile_Information:\n");
+	if (VTOZ(vp) != NULL && VN_HOLD(vp) == 0) {
+		FILE_BASIC_INFORMATION *fbi =
+		    Irp->AssociatedIrp.SystemBuffer;
+		uint64_t unixtime[2] = { 0 };
+		znode_t *zp = VTOZ(vp);
+		boolean_t changed = FALSE;
+		// READONLY etc are part of extended vattr.
+		xvattr_t xva = { 0 };
+		vattr_t *vap = &xva.xva_vattr;
 
-	ZFS_ENTER(zfsvfs);
-
-	// From FASTFAT
-	//  This is kinda gross, but if the file is not cached, but there is
-	//  a data section, we have to cache the file to avoid a bunch of
-	//  extra work.
-	BOOLEAN CacheMapInitialized = FALSE;
-	if (FileObject && FileObject->SectionObjectPointer &&
-	    (FileObject->SectionObjectPointer->DataSectionObject != NULL) &&
-	    (FileObject->SectionObjectPointer->SharedCacheMap == NULL) &&
-	    !FlagOn(Irp->Flags, IRP_PAGING_IO)) {
-		vnode_pager_setsize(vp, zp->z_size);
-		CcInitializeCacheMap(FileObject,
-		    (PCC_FILE_SIZES)&vp->FileHeader.AllocationSize,
-		    FALSE,
-		    &CacheManagerCallbacks, vp);
-		CcSetAdditionalCacheAttributes(FileObject, TRUE, TRUE);
-		CacheMapInitialized = TRUE;
-	}
-
-	VN_HOLD(vp);
-	if (!zfsvfs->z_unmounted) {
-
-		// Can't be done on DeleteOnClose
-		if (zccb && zccb->deleteonclose)
-			goto out;
-
-		// Advance only?
-		if (IrpSp->Parameters.SetFile.AdvanceOnly) {
-			if (feofi->EndOfFile.QuadPart > zp->z_size) {
-				Status = zfs_freesp(zp,
-				    feofi->EndOfFile.QuadPart,
-				    0, 0, TRUE);
-				changed = 1;
-			}
-			dprintf("%s: AdvanceOnly\n", __func__);
-			goto out;
-		}
-		// Truncation?
-		if (zp->z_size > feofi->EndOfFile.QuadPart) {
-			// Are we able to truncate?
-			if (FileObject->SectionObjectPointer &&
-			    !MmCanFileBeTruncated(
-			    FileObject->SectionObjectPointer,
-			    &feofi->EndOfFile)) {
-				Status = STATUS_USER_MAPPED_FILE;
-				goto out;
-			}
-			dprintf("%s: CanTruncate\n", __func__);
+		if ((fbi->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+		    !vnode_isdir(vp)) {
+			VN_RELE(vp);
+			return (STATUS_INVALID_PARAMETER);
 		}
 
-		// Set new size
-		Status = zfs_freesp(zp, feofi->EndOfFile.QuadPart,
-		    0, 0, TRUE); // Len = 0 is truncate
-		changed = 1;
-	}
+		/* Set to -1 to disable updating this time until CLOSE */
+		if (fbi->CreationTime.QuadPart == -1) {
+			fbi->CreationTime.QuadPart = 0;
+			zccb->user_set_creation_time = TRUE;
+		}
+		if (fbi->LastAccessTime.QuadPart == -1) {
+			fbi->LastAccessTime.QuadPart = 0;
+			zccb->user_set_access_time = TRUE;
+		}
+		if (fbi->LastWriteTime.QuadPart == -1) {
+			fbi->LastWriteTime.QuadPart = 0;
+			zccb->user_set_write_time = TRUE;
+		}
+		if (fbi->ChangeTime.QuadPart == -1) {
+			fbi->ChangeTime.QuadPart = 0;
+			zccb->user_set_change_time = TRUE;
+		}
 
-out:
-	ZFS_EXIT(zfsvfs);
-	VN_RELE(vp);
+		/* Set to -2 to undo that disable, and update again */
+		if (fbi->CreationTime.QuadPart == -2) {
+			fbi->CreationTime.QuadPart = 0;
+			zccb->user_set_creation_time = FALSE;
+		}
+		if (fbi->LastAccessTime.QuadPart == -2) {
+			fbi->LastAccessTime.QuadPart = 0;
+			zccb->user_set_access_time = FALSE;
+		}
+		if (fbi->LastWriteTime.QuadPart == -2) {
+			fbi->LastWriteTime.QuadPart = 0;
+			zccb->user_set_write_time = FALSE;
+		}
+		if (fbi->ChangeTime.QuadPart == -2) {
+			fbi->ChangeTime.QuadPart = 0;
+			zccb->user_set_change_time = FALSE;
+		}
 
-	if (NT_SUCCESS(Status) && changed) {
+		/*
+		 * FastFAT will set ChangeTime, AccessTime, LastWrite "times"
+		 * when IRP_CLOSE is received. If one, or all, are set to "-1"
+		 * FastFAT will not change the corresponding values in this
+		 * set_information() call, as well as, not update them
+		 * at IRP_CLOSE. The same skip is applied when values
+		 * are set here (since in FastFAT they would be automatically
+		 * overwritten by IRP_CLOSE).
+		 * ZFS updates most things as we go, so if they are set here
+		 * then closed, those values will remain. But it seems you
+		 * can then issue a IRP_WRITE, which should not update
+		 * the time members, until IRP_CLOSE, or cleared with -2.
+		 */
 
-		dprintf("%s: new size 0x%llx set\n", __func__, zp->z_size);
+		if (fbi->ChangeTime.QuadPart > 0) {
+			TIME_WINDOWS_TO_UNIX(fbi->ChangeTime.QuadPart,
+			    unixtime);
+			vap->va_change_time.tv_sec = unixtime[0];
+			vap->va_change_time.tv_nsec = unixtime[1];
+			vap->va_active |= ATTR_CTIME;
+			// change time has no notify
+			changed = TRUE;
+		}
 
-		// zfs_freesp() calls vnode_paget_setsize(), but we need
-		// xto update it here.
-		if (FileObject->SectionObjectPointer)
-			CcSetFileSizes(FileObject,
-			    (PCC_FILE_SIZES)&vp->FileHeader.AllocationSize);
+		if (fbi->LastWriteTime.QuadPart > 0) {
+			TIME_WINDOWS_TO_UNIX(
+			    fbi->LastWriteTime.QuadPart,
+			    unixtime);
+			vap->va_modify_time.tv_sec = unixtime[0];
+			vap->va_modify_time.tv_nsec = unixtime[1];
+			vap->va_active |= ATTR_MTIME;
+			NotifyFilter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
+			changed = TRUE;
+		}
 
-		// No notify for XATTR/Stream for now
-		if (!(zp->z_pflags & ZFS_XATTR)) {
-			zfs_send_notify(zfsvfs, zp->z_name_cache,
-			    zp->z_name_offset,
-			    FILE_NOTIFY_CHANGE_SIZE,
+		if (fbi->CreationTime.QuadPart > 0) {
+			TIME_WINDOWS_TO_UNIX(fbi->CreationTime.QuadPart,
+			    unixtime);
+			vap->va_create_time.tv_sec = unixtime[0];
+			vap->va_create_time.tv_nsec = unixtime[1];
+			vap->va_active |= ATTR_CRTIME;  // ATTR_CRTIME
+			NotifyFilter |= FILE_NOTIFY_CHANGE_CREATION;
+			changed = TRUE;
+		}
+
+		if (fbi->LastAccessTime.QuadPart > 0) {
+			TIME_WINDOWS_TO_UNIX(
+			    fbi->LastAccessTime.QuadPart,
+			    zp->z_atime);
+			NotifyFilter |= FILE_NOTIFY_CHANGE_LAST_ACCESS;
+			changed = TRUE;
+		}
+
+		if (fbi->FileAttributes != 0) {
+
+			if (!zccb->user_set_change_time) {
+				gethrestime(&vap->va_change_time);
+				vap->va_active |= ATTR_CTIME;
+			}
+
+			// Changes vap from vattr into xvattr.
+			zfs_setwinflags_xva(VTOZ(vp),
+			    fbi->FileAttributes, &xva);
+
+			vap->va_active |= ATTR_MODE;
+			NotifyFilter |= FILE_NOTIFY_CHANGE_ATTRIBUTES;
+			changed = TRUE;
+		}
+
+		if (changed) {
+			Status = zfs_setattr(zp, vap, 0, NULL, NULL);
+
+			/* Unfortunately, ZFS turns on ARCHIVE sometimes */
+			if (!(fbi->FileAttributes & FILE_ATTRIBUTE_ARCHIVE) &&
+			    (zccb->user_set_change_time ||
+			    zccb->user_set_write_time))
+				zp->z_pflags &= ~ZFS_ARCHIVE;
+		}
+
+		if (NotifyFilter != 0) {
+			zfs_send_notify(zp->z_zfsvfs, zccb->z_name_cache,
+			    zccb->z_name_offset,
+			    NotifyFilter,
 			    FILE_ACTION_MODIFIED);
 		}
+
+		VN_RELE(vp);
+		Status = STATUS_SUCCESS;
 	}
 
-	if (CacheMapInitialized) {
-		dprintf("other uninit\n");
-		CcUninitializeCacheMap(FileObject, NULL, NULL);
-		dprintf("done uninit\n");
+	return (Status);
+}
+
+NTSTATUS
+set_file_disposition_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp, boolean_t ex)
+{
+	NTSTATUS Status = STATUS_INVALID_PARAMETER;
+
+	if (IrpSp->FileObject == NULL || IrpSp->FileObject->FsContext == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	PFILE_OBJECT FileObject = IrpSp->FileObject;
+	struct vnode *vp = FileObject->FsContext;
+	zfs_ccb_t *zccb = FileObject->FsContext2;
+	mount_t *zmo = DeviceObject->DeviceExtension;
+	ULONG flags = 0;
+
+	zfsvfs_t *zfsvfs = NULL;
+	if (zmo != NULL &&
+	    (zfsvfs = vfs_fsprivate(zmo)) != NULL &&
+	    zfsvfs->z_rdonly)
+		return (STATUS_MEDIA_WRITE_PROTECTED);
+
+	if (zfsvfs == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	if (VTOZ(vp) != NULL && VN_HOLD(vp) == 0) {
+
+		if (ex) {
+			FILE_DISPOSITION_INFORMATION_EX *fdie =
+			    Irp->AssociatedIrp.SystemBuffer;
+			flags = fdie->Flags;
+		} else {
+			FILE_DISPOSITION_INFORMATION *fdi =
+			    Irp->AssociatedIrp.SystemBuffer;
+			flags = fdi->DeleteFile ? FILE_DISPOSITION_DELETE : 0;
+		}
+
+		dprintf("Deletion %s on '%wZ'\n",
+		    flags & FILE_DISPOSITION_DELETE ? "set" : "unset",
+		    &IrpSp->FileObject->FileName);
+		Status = STATUS_SUCCESS;
+		if (flags & FILE_DISPOSITION_DELETE) {
+			Status = zfs_setunlink(IrpSp->FileObject, NULL,
+			    B_FALSE);
+		} else {
+			vnode_setunlink(vp, DELETE_CLEAR);
+			FileObject->DeletePending = FALSE;
+		}
+		// Dirs marked for Deletion should release all
+		// pending Notify events
+		if (Status == STATUS_SUCCESS &&
+		    (flags & FILE_DISPOSITION_DELETE)) {
+
+			FsRtlNotifyFullChangeDirectory(zmo->NotifySync,
+			    &zmo->DirNotifyList,
+			    FileObject->FsContext2,
+			    NULL,
+			    FALSE,
+			    FALSE,
+			    0,
+			    NULL,
+			    NULL,
+			    NULL);
+		}
+
+		VN_RELE(vp);
+	}
+	dprintf("set_file_disposition_information returning %08lx\n", Status);
+	return (Status);
+}
+
+NTSTATUS
+set_file_endoffile_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp, boolean_t advance_only, boolean_t prealloc)
+{
+	NTSTATUS Status = STATUS_SUCCESS;
+	uint64_t new_end_of_file;
+	PFILE_OBJECT FileObject = IrpSp->FileObject;
+	struct vnode *vp = FileObject->FsContext;
+	zfs_ccb_t *zccb = FileObject->FsContext2;
+	FILE_END_OF_FILE_INFORMATION *feofi = Irp->AssociatedIrp.SystemBuffer;
+	int changed = 0;
+	int error = 0;
+	mount_t *zmo = DeviceObject->DeviceExtension;
+	CC_FILE_SIZES ccfs;
+	LIST_ENTRY rollback;
+	boolean_t set_size = B_FALSE;
+	ULONG filter = 0UL;
+
+	if (IrpSp->FileObject == NULL || IrpSp->FileObject->FsContext == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	zfsvfs_t *zfsvfs = NULL;
+	if (zmo != NULL &&
+	    (zfsvfs = vfs_fsprivate(zmo)) != NULL &&
+	    zfsvfs->z_rdonly)
+		return (STATUS_MEDIA_WRITE_PROTECTED);
+
+	if (zfsvfs == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	if (vnode_isdir(vp))
+		return (STATUS_INVALID_PARAMETER);
+
+	dprintf("* File_EndOfFile_Information:\n");
+
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);
+
+	if (!VTOZ(vp) || VN_HOLD(vp) != 0) {
+		zfs_exit(zfsvfs, FTAG);
+		return (STATUS_INVALID_PARAMETER);
 	}
 
-	// We handled setsize in here.
-	vnode_setsizechange(vp, 0);
+	ExAcquireResourceExclusiveLite(
+	    vp->FileHeader.Resource, TRUE);
 
+	znode_t *zp = VTOZ(vp);
+
+	new_end_of_file = feofi->EndOfFile.QuadPart;
+
+
+	/*
+	 * The lazy writer sometimes tries to round files to the
+	 * next page size through CcSetValidData -
+	 * ignore these. See fastfat!FatSetEndOfFileInfo, where
+	 * Microsoft does the same as we're doing below.
+	 */
+	if (advance_only &&
+	    feofi->EndOfFile.QuadPart >=
+	    (uint64_t)vp->FileHeader.FileSize.QuadPart)
+		new_end_of_file = vp->FileHeader.FileSize.QuadPart;
+
+
+	// zfs_freesp() will update MTIME when it shouldnt
+	// add checks for ccb->user_set_write_time
+	if (new_end_of_file < zp->z_size) {
+
+		if (advance_only) {
+			Status = STATUS_SUCCESS;
+			goto end;
+		}
+
+		dprintf("truncating file to %I64x bytes\n", new_end_of_file);
+
+		if (!MmCanFileBeTruncated(
+		    &vp->SectionObjectPointers,
+		    &feofi->EndOfFile)) {
+			Status = STATUS_USER_MAPPED_FILE;
+			goto end;
+		}
+
+		Status = zfs_freesp(zp, new_end_of_file,
+		    0, 0, B_TRUE); // Len = 0 is truncate
+
+		if (!NT_SUCCESS(Status)) {
+			dprintf("error - truncate_file failed\n");
+			goto end;
+		}
+
+	} else if ((new_end_of_file > zp->z_size) && !prealloc) {
+		dprintf("extending file to %I64x bytes\n", new_end_of_file);
+
+		Status = zfs_freesp(zp,
+		    new_end_of_file,
+		    0, 0, B_TRUE);
+		if (!NT_SUCCESS(Status)) {
+			dprintf("error - extend_file failed\n");
+			goto end;
+		}
+
+	} else if (new_end_of_file == zp->z_size && advance_only) {
+		Status = STATUS_SUCCESS;
+		goto end;
+	}
+
+	vp->FileHeader.AllocationSize.QuadPart = new_end_of_file;
+	if (!prealloc) {
+		vp->FileHeader.FileSize.QuadPart = new_end_of_file;
+		vp->FileHeader.ValidDataLength.QuadPart = new_end_of_file;
+	}
+	ccfs.AllocationSize.QuadPart =
+	    vp->FileHeader.AllocationSize.QuadPart;
+	ccfs.FileSize.QuadPart =
+	    vp->FileHeader.FileSize.QuadPart;
+	ccfs.ValidDataLength.QuadPart =
+	    vp->FileHeader.ValidDataLength.QuadPart;
+	set_size = B_TRUE;
+
+	if (zp->z_pflags & ZFS_XATTR) {
+		filter = FILE_NOTIFY_CHANGE_STREAM_SIZE;
+		zfs_send_notify(zfsvfs, zccb->z_name_cache,
+		    zccb->z_name_offset,
+		    filter,
+		    FILE_ACTION_MODIFIED_STREAM);
+	} else {
+		filter = FILE_NOTIFY_CHANGE_SIZE; // if ccb->user_set_write_time
+		filter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
+		zfs_send_notify(zfsvfs, zccb->z_name_cache,
+		    zccb->z_name_offset,
+		    filter,
+		    FILE_ACTION_MODIFIED);
+	}
+
+	Status = STATUS_SUCCESS;
+
+end:
+
+	ExReleaseResource(vp->FileHeader.Resource);
+
+	if (set_size) {
+		try {
+			CcSetFileSizes(FileObject, &ccfs);
+		} except(EXCEPTION_EXECUTE_HANDLER) {
+			Status = GetExceptionCode();
+		}
+
+		if (!NT_SUCCESS(Status))
+			dprintf("CcSetFileSizes threw exception %08lx\n",
+			    Status);
+	}
+
+	VN_RELE(vp);
+	zfs_exit(zfsvfs, FTAG);
 	return (Status);
 }
 
 // create hardlink by calling zfs_create
 NTSTATUS
-file_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+set_file_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp)
 {
-	NTSTATUS Status;
 	/*
 	 * typedef struct _FILE_LINK_INFORMATION {
 	 * BOOLEAN ReplaceIfExists;
@@ -2255,8 +3989,8 @@ file_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	 */
 
 	FILE_LINK_INFORMATION *link = Irp->AssociatedIrp.SystemBuffer;
-	dprintf("* FileLinkInformation: %.*S\n",
-	    link->FileNameLength / sizeof (WCHAR), link->FileName);
+	dprintf("* FileLinkInformation (namelen=%d)\n",
+	    (int)link->FileNameLength / sizeof (WCHAR));
 
 	// So, use FileObject to get VP.
 	// Use VP to lookup parent.
@@ -2264,16 +3998,29 @@ file_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	if (IrpSp->FileObject == NULL || IrpSp->FileObject->FsContext == NULL)
 		return (STATUS_INVALID_PARAMETER);
 
+	mount_t *zmo = DeviceObject->DeviceExtension;
+
+	if (zmo == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
+
+	if (zfsvfs == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	if (zfsvfs->z_rdonly)
+		return (STATUS_MEDIA_WRITE_PROTECTED);
+
 	FILE_OBJECT *RootFileObject = NULL;
 	PFILE_OBJECT FileObject = IrpSp->FileObject;
 	struct vnode *fvp = FileObject->FsContext;
+	zfs_ccb_t *fccb = FileObject->FsContext2;
 	znode_t *zp = VTOZ(fvp);
 	znode_t *dzp = NULL;
-	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
 	int error;
 	ULONG outlen;
 	char *remainder = NULL;
-	char buffer[MAXNAMELEN], *filename;
+	char buffer[PATH_MAX], *filename;
 	struct vnode *tdvp = NULL, *tvp = NULL, *fdvp = NULL;
 	uint64_t parent = 0;
 
@@ -2285,26 +4032,38 @@ file_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			return (STATUS_INVALID_PARAMETER);
 		}
 		tdvp = RootFileObject->FsContext;
-		VN_HOLD(tdvp);
 	} else {
 		// Name can be absolute, if so use name, otherwise,
 		// use vp's parent.
 	}
 
 	// Convert incoming filename to utf8
-	error = RtlUnicodeToUTF8N(buffer, MAXNAMELEN, &outlen,
+	error = RtlUnicodeToUTF8N(buffer, PATH_MAX - 1, &outlen,
 	    link->FileName, link->FileNameLength);
 
 	if (error != STATUS_SUCCESS &&
 	    error != STATUS_SOME_NOT_MAPPED) {
-		if (tdvp) VN_RELE(tdvp);
-		if (RootFileObject) ObDereferenceObject(RootFileObject);
+		if (RootFileObject)
+			ObDereferenceObject(RootFileObject);
 		return (STATUS_ILLEGAL_CHARACTER);
 	}
 
 	// Output string is only null terminated if input is, so do so now.
 	buffer[outlen] = 0;
 	filename = buffer;
+
+	if (/* strchr(filename, '/') ||
+	    strchr(filename, '\\') || */
+	    /* strchr(&colon[2], ':') || there is one at ":$DATA" */
+	    !strcasecmp("DOSATTRIB:$DATA", filename) ||
+	    !strcasecmp("EA:$DATA", filename) ||
+	    !strcasecmp("reparse:$DATA", filename) ||
+	    !strcasecmp("casesensitive:$DATA", filename)) {
+		if (RootFileObject)
+			ObDereferenceObject(RootFileObject);
+		return (STATUS_OBJECT_NAME_INVALID);
+	}
+
 
 	// Filename is often "\??\E:\name" so we want to eat everything
 	// up to the "\name"
@@ -2318,10 +4077,10 @@ file_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		filename = &filename[6];
 
 	error = zfs_find_dvp_vp(zfsvfs, filename, 1, 0, &remainder, &tdvp,
-	    &tvp, 0, 0);
+	    &tvp, 0, 0, fccb != NULL ? &fccb->cred : NULL);
 	if (error) {
-		if (tdvp) VN_RELE(tdvp);
-		if (RootFileObject) ObDereferenceObject(RootFileObject);
+		if (RootFileObject)
+			ObDereferenceObject(RootFileObject);
 		return (STATUS_OBJECTID_NOT_FOUND);
 	}
 
@@ -2335,21 +4094,22 @@ file_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		error = STATUS_OBJECTID_NOT_FOUND;
 		goto out;
 	}
-
-	// Lookup name
-	if (zp->z_name_cache == NULL) {
-		error = STATUS_OBJECTID_NOT_FOUND;
-		goto out;
-	}
-
 	fdvp = ZTOV(dzp);
+
 	VN_HOLD(fvp);
 	// "tvp"(if not NULL) and "tdvp" is held by zfs_find_dvp_vp
 
-	// What about link->ReplaceIfExist ?
+	if (tvp != NULL &&
+	    (!MmFlushImageSection(&tvp->SectionObjectPointers,
+	    MmFlushForWrite))) {
+		error = STATUS_ACCESS_DENIED;
+		goto out;
+	}
 
+	// What about link->ReplaceIfExist ?
 	error = zfs_link(VTOZ(tdvp), VTOZ(fvp),
-	    remainder ? remainder : filename, NULL, 0);
+	    remainder ? remainder : filename, NULL,
+	    link->ReplaceIfExists ? FLINKREPLACE : 0);
 
 	if (error == 0) {
 
@@ -2367,19 +4127,27 @@ file_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		}
 #endif
 	}
+
+	error = zfs_error_to_ntstatus(error);
+
 	// Release all holds
 out:
-	if (RootFileObject) ObDereferenceObject(RootFileObject);
-	if (tdvp) VN_RELE(tdvp);
-	if (fdvp) VN_RELE(fdvp);
-	if (fvp) VN_RELE(fvp);
-	if (tvp) VN_RELE(tvp);
+	if (RootFileObject)
+		ObDereferenceObject(RootFileObject);
+	if (tdvp)
+		VN_RELE(tdvp);
+	if (fdvp)
+		VN_RELE(fdvp);
+	if (fvp)
+		VN_RELE(fvp);
+	if (tvp)
+		VN_RELE(tvp);
 
 	return (error);
 }
 
 NTSTATUS
-file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+set_file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp)
 {
 	NTSTATUS Status;
@@ -2404,29 +4172,49 @@ file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
  *
  *	NOTE: The RootDirectory handle thing never happens, and no sample
  * source (including fastfat) handles it.
+ *
+ * Oh so, we can get a second FileObject in
+ * IrpSp->Parameters.SetFile.FileObject, this is the FO of the destination
+ * Directory. If it is set, we only use the last part of the filename.
+ *
+ * It is also allowed to end the name with "\\", then we should strip that.
  */
 
 	FILE_RENAME_INFORMATION *ren = Irp->AssociatedIrp.SystemBuffer;
-	dprintf("* FileRenameInformation: %.*S\n",
-	    ren->FileNameLength / sizeof (WCHAR), ren->FileName);
+	dprintf("* FileRenameInformation (namelen=%d)\n",
+	    (int)ren->FileNameLength / sizeof (WCHAR));
 
 	// ASSERT(ren->RootDirectory == NULL);
 
 	// So, use FileObject to get VP.
 	// Use VP to lookup parent.
 	// Use Filename to find destonation dvp, and vp if it exists.
-	if (IrpSp->FileObject == NULL || IrpSp->FileObject->FsContext == NULL)
+	if (IrpSp->FileObject == NULL ||
+	    IrpSp->FileObject->FsContext == NULL ||
+	    IrpSp->FileObject->FsContext2 == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	mount_t *zmo = DeviceObject->DeviceExtension;
+
+	zfsvfs_t *zfsvfs = NULL;
+	if (zmo != NULL &&
+	    (zfsvfs = vfs_fsprivate(zmo)) != NULL &&
+	    zfsvfs->z_rdonly)
+		return (STATUS_MEDIA_WRITE_PROTECTED);
+
+	if (zfsvfs == NULL)
 		return (STATUS_INVALID_PARAMETER);
 
 	PFILE_OBJECT FileObject = IrpSp->FileObject;
 	struct vnode *fvp = FileObject->FsContext;
+	zfs_ccb_t *fccb = FileObject->FsContext2;
+	zfs_ccb_t *tdccb = NULL;
 	znode_t *zp = VTOZ(fvp);
 	znode_t *dzp = NULL;
-	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
 	int error;
 	ULONG outlen;
 	char *remainder = NULL;
-	char buffer[MAXNAMELEN], *filename;
+	char buffer[PATH_MAX], *filename;
 	struct vnode *tdvp = NULL, *tvp = NULL, *fdvp = NULL;
 	uint64_t parent = 0;
 	PFILE_OBJECT dFileObject = NULL;
@@ -2434,37 +4222,82 @@ file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	int use_fdvp_for_tdvp = 0;
 
 	// Convert incoming filename to utf8
-	error = RtlUnicodeToUTF8N(buffer, MAXNAMELEN, &outlen,
+	error = RtlUnicodeToUTF8N(buffer, PATH_MAX - 1, &outlen,
 	    ren->FileName, ren->FileNameLength);
 
 	if (error != STATUS_SUCCESS &&
 	    error != STATUS_SOME_NOT_MAPPED) {
 		return (STATUS_ILLEGAL_CHARACTER);
 	}
-
+	SetFlag(FileObject->Flags, FO_FILE_MODIFIED);
 	// Output string is only null terminated if input is, so do so now.
 	buffer[outlen] = 0;
 	filename = buffer;
+
+	// If it ends with "\", strip it.
+	if (outlen > 0 &&
+	    buffer[outlen - 1] == '\\')
+		buffer[outlen - 1] = 0;
 
 	// Filename is often "\??\E:\lower\name" - and "/lower" might be
 	// another dataset so we need to drive a lookup, with
 	// SL_OPEN_TARGET_DIRECTORY set so we get the parent of where
 	// we are renaming to. This will give us "tdvp", and
 	// possibly "tvp" is we are to rename over an item.
-#if 0
-	if ((filename[0] == '\\') &&
-	    (filename[1] == '?') &&
-	    (filename[2] == '?') &&
-	    (filename[3] == '\\') &&
-	    /* [4] drive letter */
-	    (filename[5] == ':') &&
-	    (filename[6] == '\\'))
-		filename = &filename[6];
-#endif
+
+	/* Quick check to see if it ends in reserved names */
+	char *tail;
+	tail = strrchr(filename, '\\');
+	if (tail == NULL) {
+		tail = filename;
+	} else {
+		tail++;
+		filename = tail;
+	}
+
+	if (strchr(tail, ':')) {
+		dprintf("file rename to stream should be implemented!\n");
+		return (STATUS_NOT_IMPLEMENTED);
+	}
+
+	/*
+	 * Also check for renaming of streams (xattrs here) and apparently
+	 * if (fn.Length == 0)
+	 *  return rename_stream_to_file(Vcb);
+	 * So that's a thing too.
+	 */
+
+	if (strchr(tail, ':') ||
+	    !strcasecmp("DOSATTRIB", tail) ||
+	    !strcasecmp("EA", tail) ||
+	    !strcasecmp("reparse", tail) ||
+	    !strcasecmp("casesensitive", tail))
+		return (STATUS_OBJECT_NAME_INVALID);
+
+	// If given Target Directory FileObject, it is easy
+	if (IrpSp->Parameters.SetFile.FileObject != NULL) {
+
+		dFileObject = IrpSp->Parameters.SetFile.FileObject;
+		tdvp = dFileObject->FsContext;
+		tdccb = dFileObject->FsContext2;
+
+		// We have tdvp held from the FileObject
+		VN_HOLD(tdvp);
+
+		error = zfs_find_dvp_vp(zfsvfs, filename, 1, 0, &remainder,
+		    &tdvp, &tvp, 0, 0, &fccb->cred);
+
+		dFileObject = NULL; // Dont ObDereference later
+
+		if (error) {
+			Status = STATUS_OBJECTID_NOT_FOUND;
+			tdvp = NULL; // did not hold, dont rele
+			goto out;
+		}
 
 	// If it starts with "\" drive the lookup, if it is just a name
 	// like "HEAD", assume tdvp is same as fdvp.
-	if ((filename[0] == '\\')) {
+	} else if (filename[0] == '\\') {
 		OBJECT_ATTRIBUTES oa;
 		IO_STATUS_BLOCK ioStatus;
 		UNICODE_STRING uFileName;
@@ -2515,25 +4348,18 @@ file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 		// Assign tdvp
 		tdvp = dFileObject->FsContext;
-
-
-		// Hold it
-		VERIFY0(VN_HOLD(tdvp));
+		tdccb = dFileObject->FsContext2;
 
 		// Filename is '\??\E:\dir\dir\file' and we only care about
 		// the last part.
-		char *r = strrchr(filename, '\\');
-		if (r == NULL)
-			r = strrchr(filename, '/');
-		if (r != NULL) {
-			r++;
-			filename = r;
-		}
+		if (tail)
+			filename = tail;
 
 		error = zfs_find_dvp_vp(zfsvfs, filename, 1, 0, &remainder,
-		    &tdvp, &tvp, 0, 0);
+		    &tdvp, &tvp, 0, 0, &fccb->cred);
 		if (error) {
 			Status = STATUS_OBJECTID_NOT_FOUND;
+			tdvp = NULL; // did not hold, dont rele
 			goto out;
 		}
 	} else {
@@ -2549,28 +4375,23 @@ file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		error = STATUS_OBJECT_NAME_COLLISION;
 		goto out;
 	}
+#if defined(FILE_RENAME_REPLACE_IF_EXISTS)
 	if (tvp && ExVariant && !(ren->Flags&FILE_RENAME_REPLACE_IF_EXISTS)) {
 		error = STATUS_OBJECT_NAME_COLLISION;
 		goto out;
 	}
-
-	VERIFY(sa_lookup(zp->z_sa_hdl, SA_ZPL_PARENT(zfsvfs),
-	    &parent, sizeof (parent)) == 0);
-
-	// Fetch fdvp
-	error = zfs_zget(zfsvfs, parent, &dzp);
-	if (error) {
-		error = STATUS_OBJECTID_NOT_FOUND;
+#endif
+	// May not rename over a file that is mmapped.
+	if (tvp &&
+	    !MmFlushImageSection(&tvp->SectionObjectPointers,
+	    MmFlushForWrite)) {
+		error = STATUS_ACCESS_DENIED;
 		goto out;
 	}
 
-	// Lookup name
-	if (zp->z_name_cache == NULL) {
-		error = STATUS_OBJECTID_NOT_FOUND;
-		goto out;
-	}
+	// Fetch parent, and hold
+	fdvp = zfs_parent(fvp);
 
-	fdvp = ZTOV(dzp);
 	// "tvp" (if not NULL) and "tdvp" is held by zfs_find_dvp_vp
 
 	if (use_fdvp_for_tdvp) {
@@ -2578,41 +4399,103 @@ file_rename_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		VERIFY0(VN_HOLD(tdvp));
 	}
 
+	/*
+	 * The IO Manager verifies the FileObject has DELETE access before
+	 * dispatching FileRenameInformation, so if we are here Windows has
+	 * already performed the access check. Skip the redundant POSIX ACL
+	 * check in zfs_rename so non-admin users can rename files/dirs that
+	 * Windows has granted them permission to rename.
+	 */
+	error = zfs_rename(VTOZ(fdvp), &fccb->z_name_cache[fccb->z_name_offset],
+	    VTOZ(tdvp), remainder ? remainder : filename, &fccb->cred,
+	    FBYPASS_ZFS_ACL, 0, NULL, NULL);
+	error = zfs_error_to_ntstatus(error);
 
-	error = zfs_rename(VTOZ(fdvp), &zp->z_name_cache[zp->z_name_offset],
-	    VTOZ(tdvp), remainder ? remainder : filename, NULL, 0);
+	if (error == STATUS_SUCCESS) {
 
-	if (error == 0) {
-		// TODO: rename file in same directory, send OLD_NAME, NEW_NAME
-		// Moving to different directory, send:
+		// rename file in same directory:
+		// send dir modified, send OLD_NAME, NEW_NAME
+		// Moving to different volume:
 		// FILE_ACTION_REMOVED, FILE_ACTION_ADDED
 		// send CHANGE_LAST_WRITE
 
-		zfs_send_notify(zfsvfs, zp->z_name_cache, zp->z_name_offset,
-		    vnode_isdir(fvp) ?
-		    FILE_NOTIFY_CHANGE_DIR_NAME :
-		    FILE_NOTIFY_CHANGE_FILE_NAME,
-		    FILE_ACTION_RENAMED_OLD_NAME);
+		// remember we renamed, so get-filename on already open
+		// files can rescan.
+		atomic_inc_64(&zp->z_name_renamed);
 
-		// Release fromname, and lookup new name
-		kmem_free(zp->z_name_cache, zp->z_name_len);
-		zp->z_name_cache = NULL;
-		if (zfs_build_path(zp, VTOZ(tdvp), &zp->z_name_cache,
-		    &zp->z_name_len, &zp->z_name_offset) == 0) {
-			zfs_send_notify(zfsvfs, zp->z_name_cache,
-			    zp->z_name_offset,
+		znode_t *tdzp = VTOZ(tdvp);
+
+		// NTFS is the weird kid on the block here, if the parents are
+		// the same, it uses RENAME event. When the parents are
+		// different, it uses REMOVE and ADD.
+		// Remember the old name, so we can cluster the notify events
+		// together.
+
+		char *old_z_name_cache = fccb->z_name_cache;
+		uint32_t old_z_name_offset = fccb->z_name_offset;
+		uint32_t old_z_name_len = fccb->z_name_len;
+
+		fccb->z_name_cache = NULL;
+		fccb->z_name_offset = 0;
+		fccb->z_name_len = 0;
+
+		if (zfs_build_path(zp, tdzp, &fccb->z_name_cache,
+		    &fccb->z_name_len, &fccb->z_name_offset) == 0) {
+
+			// Temporarily building parent path is a bit weak.
+			// Should we fetch it some other way?
+			char *parent_name_cache = NULL;
+			uint32_t parent_name_offset = 0;
+			uint32_t parent_name_len = 0;
+			int parent_name;
+			parent_name = zfs_build_path(VTOZ(fdvp), NULL,
+			    &parent_name_cache, &parent_name_len,
+			    &parent_name_offset);
+
+			// Send out old name.
+			zfs_send_notify(zfsvfs, old_z_name_cache,
+			    old_z_name_offset,
 			    vnode_isdir(fvp) ?
 			    FILE_NOTIFY_CHANGE_DIR_NAME :
 			    FILE_NOTIFY_CHANGE_FILE_NAME,
-			    FILE_ACTION_RENAMED_NEW_NAME);
+			    fdvp == tdvp ? FILE_ACTION_RENAMED_OLD_NAME :
+			    FILE_ACTION_REMOVED);
+
+			// Send out new name.
+			zfs_send_notify(zfsvfs, fccb->z_name_cache,
+			    fccb->z_name_offset,
+			    vnode_isdir(fvp) ?
+			    FILE_NOTIFY_CHANGE_DIR_NAME :
+			    FILE_NOTIFY_CHANGE_FILE_NAME,
+			    fdvp == tdvp ? FILE_ACTION_RENAMED_NEW_NAME :
+			    FILE_ACTION_ADDED);
+
+			// Also tell parents they were MODIFIED
+			if (parent_name == 0) {
+				zfs_send_notify(zfsvfs, parent_name_cache,
+				    parent_name_offset,
+				    FILE_NOTIFY_CHANGE_LAST_WRITE,
+				    FILE_ACTION_MODIFIED);
+
+				kmem_free(parent_name_cache, parent_name_len);
+			}
+
+			if (tdccb != NULL) {
+				zfs_send_notify(zfsvfs, tdccb->z_name_cache,
+				    tdccb->z_name_offset,
+				    FILE_NOTIFY_CHANGE_LAST_WRITE,
+				    FILE_ACTION_MODIFIED);
+			}
 		}
-
-		znode_t *tdzp = VTOZ(tdvp);
-		zfs_send_notify(zfsvfs, tdzp->z_name_cache, tdzp->z_name_offset,
-		    FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
-
+		// Free old name
+		kmem_free(old_z_name_cache, old_z_name_len);
 	}
+
 	// Release all holds
+	if (error == EBUSY)
+		error = STATUS_ACCESS_DENIED;
+	if (error == ENAMETOOLONG)
+		error = STATUS_NAME_TOO_LONG;
 out:
 	if (destParentHandle != 0)
 		ZwClose(destParentHandle);
@@ -2626,14 +4509,207 @@ out:
 	return (error);
 }
 
+NTSTATUS
+set_file_valid_data_length_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp)
+{
+	NTSTATUS Status;
+	FILE_VALID_DATA_LENGTH_INFORMATION *fvdli =
+	    Irp->AssociatedIrp.SystemBuffer;
+	mount_t *zmo = DeviceObject->DeviceExtension;
+	int error;
+	CC_FILE_SIZES ccfs;
+	boolean_t set_size = B_FALSE;
+
+	dprintf("* FileValidDataLengthInformation: \n");
+
+	if (IrpSp->Parameters.SetFile.Length <
+	    sizeof (FILE_VALID_DATA_LENGTH_INFORMATION))
+		return (STATUS_INVALID_PARAMETER);
+
+	if (IrpSp->FileObject == NULL ||
+	    IrpSp->FileObject->FsContext == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	struct vnode *vp = IrpSp->FileObject->FsContext;
+	zfs_ccb_t *ccb = IrpSp->FileObject->FsContext2;
+	znode_t *zp = VTOZ(vp);
+
+	if (zmo == NULL || zp == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
+	if (zfsvfs == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);
+
+	ExAcquireResourceExclusiveLite(vp->FileHeader.Resource, B_TRUE);
+
+	if (zp->z_pflags & ZFS_SPARSE /* FILE_ATTRIBUTE_SPARSE_FILE */) {
+		Status = STATUS_INVALID_PARAMETER;
+		goto end;
+	}
+
+	if (fvdli->ValidDataLength.QuadPart <
+	    vp->FileHeader.ValidDataLength.QuadPart ||
+	    fvdli->ValidDataLength.QuadPart >
+	    vp->FileHeader.FileSize.QuadPart) {
+		dprintf("invalid VDL of %I64u (%I64u, file %I64u)\n",
+		    fvdli->ValidDataLength.QuadPart,
+		    vp->FileHeader.ValidDataLength.QuadPart,
+		    vp->FileHeader.FileSize.QuadPart);
+		Status = STATUS_INVALID_PARAMETER;
+		goto end;
+	}
+
+	if (zp && zp->z_unlinked) {
+		Status = STATUS_FILE_CLOSED;
+		goto end;
+	}
+
+	ccfs.AllocationSize = vp->FileHeader.AllocationSize;
+	ccfs.FileSize = vp->FileHeader.FileSize;
+	ccfs.ValidDataLength = fvdli->ValidDataLength;
+	set_size = B_TRUE;
+
+	zfs_send_notify(zp->z_zfsvfs, ccb->z_name_cache,
+	    ccb->z_name_offset,
+	    FILE_NOTIFY_CHANGE_SIZE,
+	    FILE_ACTION_MODIFIED);
+
+	Status = STATUS_SUCCESS;
+
+end:
+	ExReleaseResourceLite(vp->FileHeader.Resource);
+
+	if (set_size) {
+		try {
+			CcSetFileSizes(IrpSp->FileObject, &ccfs);
+		} except(EXCEPTION_EXECUTE_HANDLER) {
+			Status = GetExceptionCode();
+		}
+
+		if (!NT_SUCCESS(Status)) {
+			dprintf("CcSetFileSizes threw exception %08lx\n",
+			    Status);
+		} else {
+			vp->FileHeader.AllocationSize = ccfs.AllocationSize;
+		}
+	}
+
+	zfs_exit(zfsvfs, FTAG);
+	return (Status);
+}
+
+NTSTATUS
+set_file_case_sensitive_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp)
+{
+	NTSTATUS Status;
+	FILE_CASE_SENSITIVE_INFORMATION *fcsi =
+	    Irp->AssociatedIrp.SystemBuffer;
+	mount_t *zmo = DeviceObject->DeviceExtension;
+	int error;
+
+	dprintf("* FileCaseSensitiveInformation: \n");
+
+	if (IrpSp->Parameters.SetFile.Length <
+	    sizeof (FILE_CASE_SENSITIVE_INFORMATION))
+		return (STATUS_INFO_LENGTH_MISMATCH);
+
+	if (IrpSp->FileObject == NULL ||
+	    IrpSp->FileObject->FsContext == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	struct vnode *vp = IrpSp->FileObject->FsContext;
+	zfs_ccb_t *ccb = IrpSp->FileObject->FsContext2;
+	znode_t *zp = VTOZ(vp);
+
+	if (zmo == NULL || zp == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	if (!vnode_isdir(vp))
+		return (STATUS_INVALID_PARAMETER);
+
+	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
+	if (zfsvfs == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);
+
+	xvattr_t xva = { 0 };
+	vattr_t *vap = &xva.xva_vattr;
+	xoptattr_t *xoap;
+
+	xva_init(&xva);
+	xoap = xva_getxoptattr(&xva);
+
+	/*
+	 * We need to check if there are case issues in this dir, if
+	 * the request is to make it case insensitive again. Return
+	 * the code: STATUS_CASE_DIFFERING_NAMES_IN_DIR
+	 */
+	xoap->xoa_case_sensitive_dir =
+	    (fcsi->Flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR);
+	XVA_SET_REQ(&xva, XAT_CASESENSITIVEDIR);
+
+	Status = zfs_setattr(zp, vap, 0, NULL, NULL);
+
+	zfs_exit(zfsvfs, FTAG);
+	return (Status);
+}
+
+NTSTATUS
+set_file_position_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp)
+{
+	FILE_POSITION_INFORMATION *fpi = Irp->AssociatedIrp.SystemBuffer;
+	dprintf("* FilePositionInformation: \n");
+
+	if (IrpSp->FileObject == NULL || IrpSp->FileObject->FsContext == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	if (IrpSp->Parameters.SetFile.Length <
+	    sizeof (FILE_POSITION_INFORMATION))
+		return (STATUS_INVALID_PARAMETER);
+
+	IrpSp->FileObject->CurrentByteOffset = fpi->CurrentByteOffset;
+	return (STATUS_SUCCESS);
+}
 
 /* IRP_MJ_QUERY_INFORMATION helpers */
+ULONG
+get_reparse_tag(znode_t *zp)
+{
+	if (!(zp->z_pflags & ZFS_REPARSE))
+		return (0);
 
+	if (zfsctl_is_node(zp))
+		return (zfsctl_get_reparse_tag(zp));
+
+	int err;
+	REPARSE_DATA_BUFFER tagdata = {0};
+	struct iovec iov;
+	iov.iov_base = (void *)&tagdata;
+	iov.iov_len = sizeof (tagdata);
+
+	zfs_uio_t uio;
+	zfs_uio_iovec_init(&uio, &iov, 1, 0, UIO_SYSSPACE,
+	    sizeof (tagdata), 0);
+	err = zfs_readlink(ZTOV(zp), &uio, NULL);
+	if (err != 0)
+		return (0);
+	return (tagdata.ReparseTag);
+}
 
 NTSTATUS
 file_attribute_tag_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp, FILE_ATTRIBUTE_TAG_INFORMATION *tag)
 {
+	dprintf("   %s\n", __func__);
 	if (IrpSp->Parameters.QueryFile.Length <
 	    sizeof (FILE_ATTRIBUTE_TAG_INFORMATION)) {
 		Irp->IoStatus.Information =
@@ -2646,20 +4722,10 @@ file_attribute_tag_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		znode_t *zp = VTOZ(vp);
 		zfsvfs_t *zfsvfs = zp->z_zfsvfs;
 
-		tag->FileAttributes = zfs_getwinflags(zp);
-		if (zp->z_pflags & ZFS_REPARSE) {
-			int err;
-			REPARSE_DATA_BUFFER tagdata;
-			struct iovec iov;
-			iov.iov_base = (void *)&tagdata;
-			iov.iov_len = sizeof (tagdata);
+		tag->FileAttributes =
+		    zfs_getwinflags(zp->z_pflags, vnode_isdir(vp));
 
-			zfs_uio_t uio;
-			zfs_uio_iovec_init(&uio, &iov, 1, 0, UIO_SYSSPACE, sizeof (tagdata), 0);
-			err = zfs_readlink(vp, &uio, NULL);
-			tag->ReparseTag = tagdata.ReparseTag;
-			dprintf("Returning tag 0x%x\n", tag->ReparseTag);
-		}
+		tag->ReparseTag = get_reparse_tag(zp);
 		Irp->IoStatus.Information =
 		    sizeof (FILE_ATTRIBUTE_TAG_INFORMATION);
 		ASSERT(tag->FileAttributes != 0);
@@ -2672,6 +4738,7 @@ NTSTATUS
 file_internal_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp, FILE_INTERNAL_INFORMATION *infernal)
 {
+	dprintf("   %s\n", __func__);
 	if (IrpSp->Parameters.QueryFile.Length <
 	    sizeof (FILE_INTERNAL_INFORMATION)) {
 		Irp->IoStatus.Information = sizeof (FILE_INTERNAL_INFORMATION);
@@ -2680,13 +4747,116 @@ file_internal_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 	if (IrpSp->FileObject && IrpSp->FileObject->FsContext) {
 		struct vnode *vp = IrpSp->FileObject->FsContext;
+		zfs_ccb_t *zccb = IrpSp->FileObject->FsContext2;
 		znode_t *zp = VTOZ(vp);
-		infernal->IndexNumber.QuadPart = zp->z_id;
+		/* For streams, we need to reply with parent file */
+		if (zccb && zp->z_pflags & ZFS_XATTR)
+			infernal->IndexNumber.QuadPart = zccb->real_file_id;
+		else
+			infernal->IndexNumber.QuadPart = zp->z_id;
 		Irp->IoStatus.Information = sizeof (FILE_INTERNAL_INFORMATION);
 		return (STATUS_SUCCESS);
 	}
 
 	return (STATUS_NO_SUCH_FILE);
+}
+
+/*
+ * Assumes NULL tests, and VN_HOLD(vp) has already been done.
+ */
+void
+file_basic_information_impl(PDEVICE_OBJECT DeviceObject,
+    PFILE_OBJECT FileObject, FILE_BASIC_INFORMATION *fbi,
+    PIO_STATUS_BLOCK IoStatus)
+{
+	struct vnode *vp = FileObject->FsContext;
+	int error = 0;
+	uint64_t fflags = 0;
+
+	if (vp != NULL) {
+
+		// znode_t *zp = VTOZ(vp);
+		mount_t *zmo = DeviceObject->DeviceExtension;
+		zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
+
+		xvattr_t xva;
+		vattr_t *vap = &xva.xva_vattr;
+		xva_init(&xva);
+
+		// XVA_SET_REQ(&xva, XAT_IMMUTABLE);
+		// XVA_SET_REQ(&xva, XAT_APPENDONLY);
+		// XVA_SET_REQ(&xva, XAT_NOUNLINK);
+		// XVA_SET_REQ(&xva, XAT_NODUMP);
+		// XVA_SET_REQ(&xva, XAT_REPARSE);
+		// XVA_SET_REQ(&xva, XAT_OFFLINE);
+		XVA_SET_REQ(&xva, XAT_READONLY);
+		XVA_SET_REQ(&xva, XAT_HIDDEN);
+		XVA_SET_REQ(&xva, XAT_SYSTEM);
+		XVA_SET_REQ(&xva, XAT_ARCHIVE);
+		XVA_SET_REQ(&xva, XAT_SPARSE);
+		XVA_SET_REQ(&xva, XAT_REPARSE);
+
+		vap->va_mask |=
+		    (ATTR_MTIME | ATTR_CTIME | ATTR_CRTIME | ATTR_ATIME);
+
+		error = zfs_getattr(vp, (vattr_t *)&xva, 0, NULL, NULL);
+
+#define	FLAG_CHECK(fflag, xflag, xfield) do { \
+	if (XVA_ISSET_RTN(&xva, (xflag)) && (xfield) != 0) \
+		fflags |= (fflag); \
+} while (0)
+
+		FLAG_CHECK(FILE_ATTRIBUTE_READONLY, XAT_READONLY,
+		    xva.xva_xoptattrs.xoa_readonly);
+		FLAG_CHECK(FILE_ATTRIBUTE_HIDDEN, XAT_HIDDEN,
+		    xva.xva_xoptattrs.xoa_hidden);
+		FLAG_CHECK(FILE_ATTRIBUTE_SYSTEM, XAT_SYSTEM,
+		    xva.xva_xoptattrs.xoa_system);
+		FLAG_CHECK(FILE_ATTRIBUTE_ARCHIVE, XAT_ARCHIVE,
+		    xva.xva_xoptattrs.xoa_archive);
+		FLAG_CHECK(FILE_ATTRIBUTE_SPARSE_FILE, XAT_SPARSE,
+		    xva.xva_xoptattrs.xoa_sparse);
+		FLAG_CHECK(FILE_ATTRIBUTE_REPARSE_POINT, XAT_REPARSE,
+		    xva.xva_xoptattrs.xoa_reparse);
+
+#undef FLAG_CHECK
+
+		if (vnode_isdir(vp)) {
+			fflags |= FILE_ATTRIBUTE_DIRECTORY;
+			fflags &= ~FILE_ATTRIBUTE_ARCHIVE;
+		}
+
+		if (fflags == 0)
+			fflags = FILE_ATTRIBUTE_NORMAL;
+
+		fbi->FileAttributes = fflags;
+
+		TIME_UNIX_TO_WINDOWS_EX(vap->va_modify_time.tv_sec,
+		    vap->va_modify_time.tv_nsec, fbi->LastWriteTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS_EX(vap->va_change_time.tv_sec,
+		    vap->va_change_time.tv_nsec, fbi->ChangeTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS_EX(vap->va_create_time.tv_sec,
+		    vap->va_create_time.tv_nsec, fbi->CreationTime.QuadPart);
+		TIME_UNIX_TO_WINDOWS_EX(vap->va_access_time.tv_sec,
+		    vap->va_access_time.tv_nsec, fbi->LastAccessTime.QuadPart);
+
+		IoStatus->Information = sizeof (FILE_BASIC_INFORMATION);
+		IoStatus->Status = STATUS_SUCCESS;
+		return;
+	}
+
+	// This can be called from diskDispatcher, referring to the volume.
+	// if so, make something up. Is this the right thing to do?
+	// zp is NULL
+
+	LARGE_INTEGER JanOne1980 = { 0xe1d58000, 0x01a8e79f };
+	ExLocalTimeToSystemTime(&JanOne1980,
+	    &fbi->LastWriteTime);
+	fbi->CreationTime = fbi->LastAccessTime =
+	    fbi->LastWriteTime;
+	fbi->FileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+	IoStatus->Information = sizeof (FILE_BASIC_INFORMATION);
+	IoStatus->Status = STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -2701,56 +4871,83 @@ file_basic_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		return (STATUS_BUFFER_TOO_SMALL);
 	}
 
-	if (IrpSp->FileObject && IrpSp->FileObject->FsContext) {
-		struct vnode *vp = IrpSp->FileObject->FsContext;
-		if (VN_HOLD(vp) == 0) {
-			znode_t *zp = VTOZ(vp);
-			zfsvfs_t *zfsvfs = zp->z_zfsvfs;
-			sa_bulk_attr_t bulk[3];
-			int count = 0;
-			uint64_t mtime[2];
-			uint64_t ctime[2];
-			uint64_t crtime[2];
-			SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_MTIME(zfsvfs),
-			    NULL, &mtime, 16);
-			SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_CTIME(zfsvfs),
-			    NULL, &ctime, 16);
-			SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_CRTIME(zfsvfs),
-			    NULL, &crtime, 16);
-			sa_bulk_lookup(zp->z_sa_hdl, bulk, count);
+#if 0
+	if (IrpSp->FileObject == NULL ||
+	    IrpSp->FileObject->FsContext == NULL ||
+	    IrpSp->FileObject->FsContext2 == NULL) {
+		Irp->IoStatus.Information = 0;
+		Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+		return (Irp->IoStatus.Status);
+	}
+#endif
+	// This function relies on VN_HOLD in dispatcher.
+	file_basic_information_impl(DeviceObject, IrpSp->FileObject,
+	    basic, &Irp->IoStatus);
 
-			TIME_UNIX_TO_WINDOWS(mtime,
-			    basic->LastWriteTime.QuadPart);
-			TIME_UNIX_TO_WINDOWS(ctime,
-			    basic->ChangeTime.QuadPart);
-			TIME_UNIX_TO_WINDOWS(crtime,
-			    basic->CreationTime.QuadPart);
-			TIME_UNIX_TO_WINDOWS(zp->z_atime,
-			    basic->LastAccessTime.QuadPart);
+	return (Irp->IoStatus.Status);
+}
 
-			basic->FileAttributes = zfs_getwinflags(zp);
-			VN_RELE(vp);
-		}
-		Irp->IoStatus.Information = sizeof (FILE_BASIC_INFORMATION);
-		return (STATUS_SUCCESS);
+NTSTATUS
+file_compression_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp, FILE_COMPRESSION_INFORMATION *fci)
+{
+	if (IrpSp->Parameters.QueryFile.Length <
+	    sizeof (FILE_COMPRESSION_INFORMATION)) {
+		Irp->IoStatus.Information =
+		    sizeof (FILE_COMPRESSION_INFORMATION);
+		return (STATUS_BUFFER_TOO_SMALL);
 	}
 
-	// This can be called from diskDispatcher, referring to the volume.
-	// if so, make something up. Is this the right thing to do?
-	if (IrpSp->FileObject && IrpSp->FileObject->FsContext == NULL) {
-		LARGE_INTEGER JanOne1980 = { 0xe1d58000, 0x01a8e79f };
-		ExLocalTimeToSystemTime(&JanOne1980,
-		    &basic->LastWriteTime);
-		basic->CreationTime = basic->LastAccessTime =
-		    basic->LastWriteTime;
-		basic->FileAttributes = FILE_ATTRIBUTE_NORMAL;
-		Irp->IoStatus.Information = sizeof (FILE_BASIC_INFORMATION);
-		return (STATUS_SUCCESS);
+	if (IrpSp->FileObject == NULL ||
+	    IrpSp->FileObject->FsContext == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
+	struct vnode *vp = IrpSp->FileObject->FsContext;
+	if (VN_HOLD(vp) != 0)
+		return (STATUS_INVALID_PARAMETER);
+
+	znode_t *zp = VTOZ(vp);
+	memset(fci, 0, sizeof (FILE_COMPRESSION_INFORMATION));
+
+	dmu_object_info_t doi;
+	boolean_t compressed = B_FALSE;
+	uint64_t phys_bytes = 0;
+
+	objset_t *os = zp->z_zfsvfs->z_os;
+	boolean_t ds_compressed = (os != NULL &&
+	    os->os_compress != ZIO_COMPRESS_OFF &&
+	    os->os_compress != ZIO_COMPRESS_EMPTY);
+
+	if (zp->z_sa_hdl != NULL) {
+
+		dmu_object_info_from_db(sa_get_db(zp->z_sa_hdl), &doi);
+		compressed = ds_compressed;
+		phys_bytes = doi.doi_physical_blocks_512 * 512ULL;
+		fci->CompressedFileSize.QuadPart =
+		    (int64_t)(compressed ? phys_bytes : zp->z_size);
+		fci->CompressionFormat = compressed ?
+		    COMPRESSION_FORMAT_DEFAULT : COMPRESSION_FORMAT_NONE;
+		/*
+		 * CompressionUnitShift: log2 of the compression unit size.
+		 * highbit64 returns 1-based position of highest set bit, so
+		 * subtract 1 to get log2.
+		 */
+		fci->CompressionUnitShift =
+		    (UCHAR)(highbit64(doi.doi_data_block_size) - 1);
+		fci->ChunkShift = fci->CompressionUnitShift;
+		fci->ClusterShift = fci->CompressionUnitShift;
+	} else {
+		/* Fallback: no object info, report uncompressed */
+		fci->CompressedFileSize.QuadPart = (int64_t)zp->z_size;
 	}
 
-	ASSERT(basic->FileAttributes != 0);
-	dprintf("   %s failing\n", __func__);
-	return (STATUS_OBJECT_NAME_NOT_FOUND);
+	dprintf("%s: phys=%llu logical=%llu fmt=%u\n", __func__,
+	    (unsigned long long)phys_bytes,
+	    (unsigned long long)zp->z_size, fci->CompressionFormat);
+
+	VN_RELE(vp);
+	Irp->IoStatus.Information = sizeof (FILE_COMPRESSION_INFORMATION);
+	return (STATUS_SUCCESS);
 }
 
 uint64_t
@@ -2771,9 +4968,95 @@ zfs_blksz(znode_t *zp)
 	return (512ULL);
 }
 
+uint64_t
+allocationsize(znode_t *zp)
+{
+	if (S_ISDIR(zp->z_mode))
+		return (0ULL);
+
+	if (zp->z_size == 0) {
+		struct vnode *vp = ZTOV(zp);
+		if (vp != NULL &&
+		    vp->FileHeader.AllocationSize.QuadPart > 0ULL)
+			return (vp->FileHeader.AllocationSize.QuadPart);
+		return (0ULL);
+	}
+
+	return (P2ROUNDUP(zp->z_size, zfs_blksz(zp)));
+}
+
+void
+file_standard_information_impl(PDEVICE_OBJECT DeviceObject,
+    PFILE_OBJECT FileObject, FILE_STANDARD_INFORMATION *fsi,
+    size_t length, PIO_STATUS_BLOCK IoStatus)
+{
+	struct vnode *vp = FileObject->FsContext;
+	zfs_ccb_t *zccb = FileObject->FsContext2;
+	znode_t *zp = VTOZ(vp);
+	mount_t *zmo = DeviceObject->DeviceExtension;
+	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
+	int error = 0;
+
+	if (zp != NULL) {
+
+		// If we are a steam, we need to grab the parent,
+		// either way, we hold iocount.
+		if (zccb && (zp->z_pflags & ZFS_XATTR) &&
+		    (zccb->real_file_id > 0)) {
+			error = zfs_zget(zp->z_zfsvfs, zccb->real_file_id, &zp);
+			if (!error)
+				vp = ZTOV(zp);
+			else
+				VN_HOLD(vp); // ah well, fallback
+		} else {
+			VN_HOLD(vp);
+		}
+
+		// Set it again, in case zget fails, and zp = NULL.
+		zp = VTOZ(vp);
+
+		fsi->Directory = vnode_isdir(vp) ? TRUE : FALSE;
+
+		fsi->AllocationSize.QuadPart = allocationsize(zp);
+		fsi->EndOfFile.QuadPart = vnode_isdir(vp) ? 0 : zp->z_size;
+		fsi->NumberOfLinks = vnode_unlink(vp) ? 0 : DIR_LINKS(zp);
+		fsi->DeletePending = vnode_unlink(vp) ? TRUE : FALSE;
+
+		IoStatus->Information = sizeof (FILE_STANDARD_INFORMATION);
+
+#ifndef FILE_STANDARD_INFORMATION_EX
+		typedef struct _FILE_STANDARD_INFORMATION_EX {
+		    LARGE_INTEGER AllocationSize;
+		    LARGE_INTEGER EndOfFile;
+		    ULONG NumberOfLinks;
+		    BOOLEAN DeletePending;
+		    BOOLEAN Directory;
+		    BOOLEAN AlternateStream;
+		    BOOLEAN MetadataAttribute;
+		} FILE_STANDARD_INFORMATION_EX, *PFILE_STANDARD_INFORMATION_EX;
+#endif
+		if (length >=
+		    sizeof (FILE_STANDARD_INFORMATION_EX)) {
+			FILE_STANDARD_INFORMATION_EX *estandard;
+			estandard = (FILE_STANDARD_INFORMATION_EX *)fsi;
+			estandard->AlternateStream = zp->z_pflags & ZFS_XATTR;
+			estandard->MetadataAttribute = FALSE;
+			IoStatus->Information =
+			    sizeof (FILE_STANDARD_INFORMATION_EX);
+		}
+
+		VN_RELE(vp);
+		IoStatus->Status = STATUS_SUCCESS;
+		return;
+	}
+
+	IoStatus->Information = 0;
+	IoStatus->Status = STATUS_INVALID_PARAMETER;
+}
+
 NTSTATUS
 file_standard_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
-    PIO_STACK_LOCATION IrpSp, FILE_STANDARD_INFORMATION *standard)
+    PIO_STACK_LOCATION IrpSp, FILE_STANDARD_INFORMATION *fsi)
 {
 	dprintf("   %s\n", __func__);
 
@@ -2782,35 +5065,19 @@ file_standard_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		Irp->IoStatus.Information = sizeof (FILE_STANDARD_INFORMATION);
 		return (STATUS_BUFFER_TOO_SMALL);
 	}
-
-	standard->Directory = TRUE;
-	standard->AllocationSize.QuadPart = 512;
-	standard->EndOfFile.QuadPart = 512;
-	standard->DeletePending = FALSE;
-	standard->NumberOfLinks = 1;
-	if (IrpSp->FileObject && IrpSp->FileObject->FsContext) {
-		struct vnode *vp = IrpSp->FileObject->FsContext;
-		zfs_dirlist_t *zccb = IrpSp->FileObject->FsContext2;
-		VN_HOLD(vp);
-		znode_t *zp = VTOZ(vp);
-		standard->Directory = vnode_isdir(vp) ? TRUE : FALSE;
-		// sa_object_size(zp->z_sa_hdl, &blksize, &nblks);
-		uint64_t blk = zfs_blksz(zp);
-		// space taken on disk, multiples of block size
-		standard->AllocationSize.QuadPart =
-		    P2ROUNDUP(zp->z_size ? zp->z_size : 1, blk);
-		standard->EndOfFile.QuadPart = vnode_isdir(vp) ? 0 : zp->z_size;
-		standard->NumberOfLinks = zp->z_links;
-		standard->DeletePending = zccb &&
-		    zccb->deleteonclose ? TRUE : FALSE;
-		VN_RELE(vp);
-		dprintf("Returning size %llu and allocsize %llu\n",
-		    standard->EndOfFile.QuadPart,
-		    standard->AllocationSize.QuadPart);
-		Irp->IoStatus.Information = sizeof (FILE_STANDARD_INFORMATION);
-		return (STATUS_SUCCESS);
+	if (IrpSp->FileObject == NULL ||
+	    IrpSp->FileObject->FsContext == NULL ||
+	    IrpSp->FileObject->FsContext2 == NULL) {
+		Irp->IoStatus.Information = 0;
+		Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+		return (Irp->IoStatus.Status);
 	}
-	return (STATUS_OBJECT_NAME_NOT_FOUND);
+
+	// This function relies on VN_HOLD in dispatcher.
+	file_standard_information_impl(DeviceObject, IrpSp->FileObject,
+	    fsi, IrpSp->Parameters.QueryFile.Length, &Irp->IoStatus);
+
+	return (Irp->IoStatus.Status);
 }
 
 NTSTATUS
@@ -2863,53 +5130,90 @@ file_ea_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 }
 
 NTSTATUS
-file_network_open_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
-    PIO_STACK_LOCATION IrpSp, FILE_NETWORK_OPEN_INFORMATION *netopen)
+file_alignment_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp, FILE_ALIGNMENT_INFORMATION *fai)
 {
 	dprintf("   %s\n", __func__);
-
 	if (IrpSp->Parameters.QueryFile.Length <
-	    sizeof (FILE_NETWORK_OPEN_INFORMATION)) {
-		Irp->IoStatus.Information =
-		    sizeof (FILE_NETWORK_OPEN_INFORMATION);
+	    sizeof (FILE_ALIGNMENT_INFORMATION)) {
+		Irp->IoStatus.Information = sizeof (FILE_ALIGNMENT_INFORMATION);
 		return (STATUS_BUFFER_TOO_SMALL);
 	}
 
-	if (IrpSp->FileObject && IrpSp->FileObject->FsContext) {
-		struct vnode *vp = IrpSp->FileObject->FsContext;
-		znode_t *zp = VTOZ(vp);
-		zfsvfs_t *zfsvfs = zp->z_zfsvfs;
-		sa_bulk_attr_t bulk[3];
-		int count = 0;
-		uint64_t mtime[2];
-		uint64_t ctime[2];
-		uint64_t crtime[2];
-		SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_MTIME(zfsvfs), NULL,
-		    &mtime, 16);
-		SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_CTIME(zfsvfs), NULL,
-		    &ctime, 16);
-		SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_CRTIME(zfsvfs), NULL,
-		    &crtime, 16);
-		sa_bulk_lookup(zp->z_sa_hdl, bulk, count);
+	fai->AlignmentRequirement = FILE_WORD_ALIGNMENT;
+	return (STATUS_SUCCESS);
+}
 
-		TIME_UNIX_TO_WINDOWS(mtime,
-		    netopen->LastWriteTime.QuadPart);
-		TIME_UNIX_TO_WINDOWS(ctime,
-		    netopen->ChangeTime.QuadPart);
-		TIME_UNIX_TO_WINDOWS(crtime,
-		    netopen->CreationTime.QuadPart);
-		TIME_UNIX_TO_WINDOWS(zp->z_atime,
-		    netopen->LastAccessTime.QuadPart);
+void
+file_network_open_information_impl(PDEVICE_OBJECT DeviceObject,
+    PFILE_OBJECT FileObject, vnode_t *vp,
+    FILE_NETWORK_OPEN_INFORMATION *netopen,
+    PIO_STATUS_BLOCK IoStatus)
+{
+	dprintf("   %s\n", __func__);
+	znode_t *zp = VTOZ(vp);
+	mount_t *zmo = DeviceObject->DeviceExtension;
+	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
+
+	if (zp != NULL) {
+		if (zp->z_is_sa) {
+			sa_bulk_attr_t bulk[3];
+			int count = 0;
+			uint64_t mtime[2];
+			uint64_t ctime[2];
+			uint64_t crtime[2];
+			SA_ADD_BULK_ATTR(bulk, count,
+			    SA_ZPL_MTIME(zfsvfs), NULL,
+			    &mtime, 16);
+			SA_ADD_BULK_ATTR(bulk, count,
+			    SA_ZPL_CTIME(zfsvfs), NULL,
+			    &ctime, 16);
+			SA_ADD_BULK_ATTR(bulk, count,
+			    SA_ZPL_CRTIME(zfsvfs), NULL,
+			    &crtime, 16);
+			sa_bulk_lookup(zp->z_sa_hdl, bulk, count);
+
+			TIME_UNIX_TO_WINDOWS(mtime,
+			    netopen->LastWriteTime.QuadPart);
+			TIME_UNIX_TO_WINDOWS(ctime,
+			    netopen->ChangeTime.QuadPart);
+			TIME_UNIX_TO_WINDOWS(crtime,
+			    netopen->CreationTime.QuadPart);
+			TIME_UNIX_TO_WINDOWS(zp->z_atime,
+			    netopen->LastAccessTime.QuadPart);
+		}
 		netopen->AllocationSize.QuadPart =
-		    P2ROUNDUP(zp->z_size, zfs_blksz(zp));
+		    allocationsize(zp);
 		netopen->EndOfFile.QuadPart = vnode_isdir(vp) ? 0 : zp->z_size;
-		netopen->FileAttributes = zfs_getwinflags(zp);
-		Irp->IoStatus.Information =
+		netopen->FileAttributes =
+		    zfs_getwinflags(zp->z_pflags, vnode_isdir(vp));
+		IoStatus->Information =
 		    sizeof (FILE_NETWORK_OPEN_INFORMATION);
-		return (STATUS_SUCCESS);
+		IoStatus->Status = STATUS_SUCCESS;
+		return;
 	}
 
-	return (STATUS_OBJECT_PATH_NOT_FOUND);
+	IoStatus->Information = 0;
+	IoStatus->Status = STATUS_INVALID_PARAMETER;
+}
+
+NTSTATUS
+file_network_open_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp, FILE_NETWORK_OPEN_INFORMATION *netopen)
+{
+	if (IrpSp->FileObject == NULL ||
+	    IrpSp->FileObject->FsContext == NULL ||
+	    IrpSp->FileObject->FsContext2 == NULL) {
+		Irp->IoStatus.Information = 0;
+		Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+		return (Irp->IoStatus.Status);
+	}
+
+	// This function relies on VN_HOLD in dispatcher.
+	file_network_open_information_impl(DeviceObject, IrpSp->FileObject,
+	    IrpSp->FileObject->FsContext, netopen, &Irp->IoStatus);
+
+	return (Irp->IoStatus.Status);
 }
 
 NTSTATUS
@@ -2928,16 +5232,35 @@ file_standard_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	}
 
 	if (IrpSp->FileObject && IrpSp->FileObject->FsContext) {
+		int error = 0;
 		struct vnode *vp = IrpSp->FileObject->FsContext;
-		zfs_dirlist_t *zccb = IrpSp->FileObject->FsContext2;
+		zfs_ccb_t *zccb = IrpSp->FileObject->FsContext2;
 
 		znode_t *zp = VTOZ(vp);
 
-		fsli->NumberOfAccessibleLinks = zp->z_links;
-		fsli->TotalNumberOfLinks = zp->z_links;
-		fsli->DeletePending = zccb &&
-		    zccb->deleteonclose ? TRUE : FALSE;
+		// If we are a steam, we need to grab the parent,
+		// either way, we hold iocount.
+		if (zccb && (zp->z_pflags & ZFS_XATTR) &&
+		    (zccb->real_file_id > 0)) {
+			error = zfs_zget(zp->z_zfsvfs, zccb->real_file_id, &zp);
+			if (!error)
+				vp = ZTOV(zp);
+			else
+				VN_HOLD(vp); // ah well, fallback
+		} else {
+			VN_HOLD(vp);
+		}
+
+		// Set it again, in case zget fails, and zp = NULL.
+		zp = VTOZ(vp);
+
+		fsli->NumberOfAccessibleLinks =
+		    vnode_unlink(vp) ? 0 : DIR_LINKS(zp);
+		fsli->TotalNumberOfLinks = DIR_LINKS(zp);
+		fsli->DeletePending = vnode_unlink(vp) ? TRUE : FALSE;
 		fsli->Directory = S_ISDIR(zp->z_mode);
+
+		VN_RELE(vp);
 	}
 
 	Irp->IoStatus.Information = sizeof (FILE_STANDARD_LINK_INFORMATION);
@@ -2987,17 +5310,17 @@ file_case_sensitive_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		return (STATUS_BUFFER_TOO_SMALL);
 	}
 
-	struct vnode *vp = FileObject->FsContext;
-
-	znode_t *zp = VTOZ(vp);
-	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
-
 	fcsi->Flags = 0;
-	if (zfsvfs->z_case == ZFS_CASE_SENSITIVE)
-		fcsi->Flags |= FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+
+	struct vnode *vp = FileObject->FsContext;
+	if (vp != NULL) {
+		znode_t *zp = VTOZ(vp);
+
+		if (zp && (zp->z_pflags & ZFS_CASESENSITIVEDIR))
+			fcsi->Flags |= FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+	}
 
 	Irp->IoStatus.Information = sizeof (FILE_CASE_SENSITIVE_INFORMATION);
-
 	return (STATUS_SUCCESS);
 }
 
@@ -3011,37 +5334,47 @@ file_stat_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 	/* vp is already help in query_information */
 	struct vnode *vp = FileObject->FsContext;
+	zfs_ccb_t *zccb = FileObject->FsContext2;
 
-	if (vp) {
+	if (vp && zccb) {
 
 		znode_t *zp = VTOZ(vp);
 		zfsvfs_t *zfsvfs = zp->z_zfsvfs;
+		if (zp->z_is_sa) {
+			sa_bulk_attr_t bulk[3];
+			int count = 0;
+			uint64_t mtime[2];
+			uint64_t ctime[2];
+			uint64_t crtime[2];
+			SA_ADD_BULK_ATTR(bulk, count,
+			    SA_ZPL_MTIME(zfsvfs), NULL,
+			    &mtime, 16);
+			SA_ADD_BULK_ATTR(bulk, count,
+			    SA_ZPL_CTIME(zfsvfs), NULL,
+			    &ctime, 16);
+			SA_ADD_BULK_ATTR(bulk, count,
+			    SA_ZPL_CRTIME(zfsvfs), NULL,
+			    &crtime, 16);
+			sa_bulk_lookup(zp->z_sa_hdl, bulk, count);
 
-		sa_bulk_attr_t bulk[3];
-		int count = 0;
-		uint64_t mtime[2];
-		uint64_t ctime[2];
-		uint64_t crtime[2];
-		SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_MTIME(zfsvfs), NULL,
-		    &mtime, 16);
-		SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_CTIME(zfsvfs), NULL,
-		    &ctime, 16);
-		SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_CRTIME(zfsvfs), NULL,
-		    &crtime, 16);
-		sa_bulk_lookup(zp->z_sa_hdl, bulk, count);
-
+			TIME_UNIX_TO_WINDOWS(crtime,
+			    fsi->CreationTime.QuadPart);
+			TIME_UNIX_TO_WINDOWS(zp->z_atime,
+			    fsi->LastAccessTime.QuadPart);
+			TIME_UNIX_TO_WINDOWS(mtime,
+			    fsi->LastWriteTime.QuadPart);
+			TIME_UNIX_TO_WINDOWS(ctime,
+			    fsi->ChangeTime.QuadPart);
+		}
 		fsi->FileId.QuadPart = zp->z_id;
-		TIME_UNIX_TO_WINDOWS(crtime, fsi->CreationTime.QuadPart);
-		TIME_UNIX_TO_WINDOWS(zp->z_atime, fsi->LastAccessTime.QuadPart);
-		TIME_UNIX_TO_WINDOWS(mtime, fsi->LastWriteTime.QuadPart);
-		TIME_UNIX_TO_WINDOWS(ctime, fsi->ChangeTime.QuadPart);
 		fsi->AllocationSize.QuadPart =
-		    P2ROUNDUP(zp->z_size, zfs_blksz(zp));
+		    allocationsize(zp);
 		fsi->EndOfFile.QuadPart = zp->z_size;
-		fsi->FileAttributes = zfs_getwinflags(zp);
-		fsi->ReparseTag = 0;
-		fsi->NumberOfLinks = zp->z_links;
-		fsi->EffectiveAccess = GENERIC_ALL;
+		fsi->FileAttributes =
+		    zfs_getwinflags(zp->z_pflags, vnode_isdir(vp));
+		fsi->ReparseTag = get_reparse_tag(zp);
+		fsi->NumberOfLinks = DIR_LINKS(zp);
+		fsi->EffectiveAccess = zccb->access;
 	}
 
 	return (STATUS_SUCCESS);
@@ -3081,41 +5414,44 @@ file_stat_lx_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 	/* vp is already help in query_information */
 	struct vnode *vp = FileObject->FsContext;
+	zfs_ccb_t *zccb = FileObject->FsContext2;
 
-	if (vp) {
+	if (vp && zccb) {
 		znode_t *zp = VTOZ(vp);
 		zfsvfs_t *zfsvfs = zp->z_zfsvfs;
+		if (zp->z_is_sa) {
+			sa_bulk_attr_t bulk[3];
+			int count = 0;
+			uint64_t mtime[2];
+			uint64_t ctime[2];
+			uint64_t crtime[2];
+			SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_MTIME(zfsvfs),
+			    NULL, &mtime, 16);
+			SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_CTIME(zfsvfs),
+			    NULL, &ctime, 16);
+			SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_CRTIME(zfsvfs),
+			    NULL, &crtime, 16);
+			sa_bulk_lookup(zp->z_sa_hdl, bulk, count);
 
-		sa_bulk_attr_t bulk[3];
-		int count = 0;
-		uint64_t mtime[2];
-		uint64_t ctime[2];
-		uint64_t crtime[2];
-		SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_MTIME(zfsvfs), NULL,
-		    &mtime, 16);
-		SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_CTIME(zfsvfs), NULL,
-		    &ctime, 16);
-		SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_CRTIME(zfsvfs), NULL,
-		    &crtime, 16);
-		sa_bulk_lookup(zp->z_sa_hdl, bulk, count);
-
+			TIME_UNIX_TO_WINDOWS(crtime,
+			    fsli->CreationTime.QuadPart);
+			TIME_UNIX_TO_WINDOWS(zp->z_atime,
+			    fsli->LastAccessTime.QuadPart);
+			TIME_UNIX_TO_WINDOWS(mtime,
+			    fsli->LastWriteTime.QuadPart);
+			TIME_UNIX_TO_WINDOWS(ctime,
+			    fsli->ChangeTime.QuadPart);
+		}
 		fsli->FileId.QuadPart = zp->z_id;
-		TIME_UNIX_TO_WINDOWS(crtime,
-		    fsli->CreationTime.QuadPart);
-		TIME_UNIX_TO_WINDOWS(zp->z_atime,
-		    fsli->LastAccessTime.QuadPart);
-		TIME_UNIX_TO_WINDOWS(mtime,
-		    fsli->LastWriteTime.QuadPart);
-		TIME_UNIX_TO_WINDOWS(ctime,
-		    fsli->ChangeTime.QuadPart);
 		fsli->AllocationSize.QuadPart =
-		    P2ROUNDUP(zp->z_size, zfs_blksz(zp));
+		    allocationsize(zp);
 		fsli->EndOfFile.QuadPart = zp->z_size;
-		fsli->FileAttributes = zfs_getwinflags(zp);
-		fsli->ReparseTag = 0;
-		fsli->NumberOfLinks = zp->z_links;
-		fsli->EffectiveAccess =
-		    SPECIFIC_RIGHTS_ALL | ACCESS_SYSTEM_SECURITY;
+		fsli->FileAttributes =
+		    zfs_getwinflags(zp->z_pflags, vnode_isdir(vp));
+		fsli->ReparseTag = get_reparse_tag(zp);
+		fsli->NumberOfLinks = DIR_LINKS(zp);
+		fsli->EffectiveAccess = zccb->access;
+
 		fsli->LxFlags = LX_FILE_METADATA_HAS_UID |
 		    LX_FILE_METADATA_HAS_GID | LX_FILE_METADATA_HAS_MODE;
 		if (zfsvfs->z_case == ZFS_CASE_SENSITIVE)
@@ -3151,14 +5487,19 @@ file_name_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	}
 
 	struct vnode *vp = FileObject->FsContext;
-	znode_t *zp = VTOZ(vp);
+	zfs_ccb_t *zccb = FileObject->FsContext2;
 	char strname[MAXPATHLEN + 2];
 	int error = 0;
 	uint64_t parent = 0;
 
-	ASSERT(zp != NULL);
+	mount_t *mp = VTOM(vp);
+	zfsvfs_t *zfsvfs = vfs_fsprivate(mp);
+	if (zfsvfs->z_unmounted || (vfs_flags(mp) & MNT_UNMOUNTING))
+		return (STATUS_VOLUME_DISMOUNTED);
 
-	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
+	znode_t *zp = VTOZ(vp);
+	if (zp == NULL)
+		return (STATUS_VOLUME_DISMOUNTED);
 	NTSTATUS Status = STATUS_SUCCESS;
 
 	VN_HOLD(vp);
@@ -3167,27 +5508,27 @@ file_name_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		strlcpy(strname, "\\", MAXPATHLEN);
 	} else {
 
-		// Should never be unset!
-		if (zp->z_name_cache == NULL) {
+		// Should never be unset, but detect renames
+		if ((zccb->z_name_cache == NULL) ||
+		    (zp->z_name_renamed > zccb->z_name_rename)) {
+
+			zccb->z_name_rename = zp->z_name_renamed;
+
 			dprintf("%s: name not set path taken\n", __func__);
-			if (zfs_build_path(zp, NULL, &zp->z_name_cache,
-			    &zp->z_name_len, &zp->z_name_offset) == -1) {
+			if (zfs_build_path(zp, NULL, &zccb->z_name_cache,
+			    &zccb->z_name_len, &zccb->z_name_offset) == -1) {
 				dprintf("%s: failed to build fullpath\n",
 				    __func__);
-				return (STATUS_OBJECT_PATH_NOT_FOUND);
+				// VN_RELE(vp);
+				// return (STATUS_OBJECT_PATH_NOT_FOUND);
 			}
 		}
 
 		// Safety
-		if (zp->z_name_cache != NULL) {
-			strlcpy(strname, zp->z_name_cache,
+		if (zccb->z_name_cache != NULL) {
+			// Full path name
+			strlcpy(strname, zccb->z_name_cache,
 			    MAXPATHLEN);
-
-			// If it is a DIR, make sure it ends with "\",
-			// except for root, that is just "\"
-			if (S_ISDIR(zp->z_mode))
-				strlcat(strname, "\\",
-				    MAXPATHLEN);
 		}
 	}
 	VN_RELE(vp);
@@ -3218,16 +5559,22 @@ file_name_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	else
 		Status = STATUS_SUCCESS;
 
+	// name->FileNameLength holds how much is actually there
+	// and usedspace how much we needed to have
+
+	// Would this go one byte too far?
+	// name->FileName[name->FileNameLength / sizeof (name->FileName)] = 0;
+
 	// Return how much of the filename we copied after the first wchar
 	// which is used with sizeof (struct) to work out how much
 	// bigger the return is.
 	if (usedspace) *usedspace = space;
 	// Space will always be 2 or more, since struct has room for 1 wchar
 
-	dprintf("* %s: %s name of '%.*S' struct size 0x%x and "
+	dprintf("* %s: %s name (namelen=%d) struct size 0x%x "
 	    "FileNameLength 0x%x Usedspace 0x%x\n", __func__,
 	    Status == STATUS_BUFFER_OVERFLOW ? "partial" : "",
-	    space / 2, name->FileName,
+	    (int)(space / 2),
 	    sizeof (FILE_NAME_INFORMATION), name->FileNameLength, space);
 
 	return (Status);
@@ -3264,9 +5611,13 @@ file_remote_protocol_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 // StreamNameLength is always the FULL name length, even when we only
 // fit partial.
 // Return 0 for OK, 1 for overflow.
+// ADS are returned as ":Zone.Identifier:$DATA".
+// EAs are returned as "Zone.Identifier".
+// OK, this should only return Streams, but keeping
+// the EA code around in case..
 int
 zfswin_insert_streamname(char *streamname, uint8_t *outbuffer,
-    DWORD **lastNextEntryOffset, uint64_t availablebytes,
+    FILE_STREAM_INFORMATION **previous_stream, uint64_t availablebytes,
     uint64_t *spaceused, uint64_t streamsize)
 {
 	/*
@@ -3282,6 +5633,16 @@ zfswin_insert_streamname(char *streamname, uint8_t *outbuffer,
 	// but further ones should be padded here.
 	FILE_STREAM_INFORMATION *stream = NULL;
 	int overflow = 0;
+	boolean_t isADS = B_FALSE;
+
+	int len = strlen(streamname);
+	if ((toupper(streamname[len - 6]) == ':') &&
+	    (toupper(streamname[len - 5]) == '$') &&
+	    (toupper(streamname[len - 4]) == 'D') &&
+	    (toupper(streamname[len - 3]) == 'A') &&
+	    (toupper(streamname[len - 2]) == 'T') &&
+	    (toupper(streamname[len - 1]) == 'A'))
+		isADS = B_TRUE;
 
 	// If not first struct, align outsize to 8 byte - 0 aligns to 0.
 	*spaceused = (((*spaceused) + 7) & ~7);
@@ -3299,12 +5660,17 @@ zfswin_insert_streamname(char *streamname, uint8_t *outbuffer,
 	// as we can.
 
 	if (*spaceused + sizeof (FILE_STREAM_INFORMATION) <= availablebytes) {
+
 		stream = (FILE_STREAM_INFORMATION *)&outbuffer[*spaceused];
 
-		// Room for one more struct, update privious's next ptr
-		if (*lastNextEntryOffset != NULL) {
+		// Room for one more struct, update previous' next ptr
+		if (*previous_stream != NULL) {
 			// Update previous structure to point to this one.
-			**lastNextEntryOffset = (DWORD)*spaceused;
+			// It is not offset from the buffer, but offset from
+			// last "stream" struct.
+			// **lastNextEntryOffset = (DWORD)*spaceused;
+			(*previous_stream)->NextEntryOffset =
+			    (uintptr_t)stream - (uintptr_t)(*previous_stream);
 		}
 
 
@@ -3313,16 +5679,19 @@ zfswin_insert_streamname(char *streamname, uint8_t *outbuffer,
 
 		// remember this struct's NextEntry, so the next one can
 		// fill it in.
-		*lastNextEntryOffset = &stream->NextEntryOffset;
+		*previous_stream = stream;
 
 		// Set all the fields now
 		stream->StreamSize.QuadPart = streamsize;
 		stream->StreamAllocationSize.QuadPart =
 		    P2ROUNDUP(streamsize, 512);
 
-		// Return the total name length
+		// Return the total name length, "needed" is in bytes,
+		// so add 2 to fit the ":"
 		stream->StreamNameLength =
-		    needed_streamnamelen + 1 * sizeof (WCHAR); // + ":"
+		    needed_streamnamelen;
+		if (isADS) // + ":"
+			stream->StreamNameLength += sizeof (WCHAR);
 
 		// Consume the space of the struct
 		*spaceused += FIELD_OFFSET(FILE_STREAM_INFORMATION, StreamName);
@@ -3341,11 +5710,16 @@ zfswin_insert_streamname(char *streamname, uint8_t *outbuffer,
 		// Now copy out as much of the filename as can fit.
 		// We need to real full length in StreamNameLength
 		// There is always room for 1 char
-		stream->StreamName[0] = L':';
-		roomforname -= sizeof (WCHAR);
+		PWSTR out = &stream->StreamName[0];
+
+		if (isADS) {
+			*out = L':';
+			out++;
+			roomforname -= sizeof (WCHAR);
+		}
 
 		// Convert as much as we can, accounting for the start ":"
-		error = RtlUTF8ToUnicodeN(&stream->StreamName[1], roomforname,
+		error = RtlUTF8ToUnicodeN(out, roomforname,
 		    NULL, streamname, strlen(streamname));
 
 		dprintf("%s: added %s streamname '%s'\n", __func__,
@@ -3363,15 +5737,15 @@ zfswin_insert_streamname(char *streamname, uint8_t *outbuffer,
 //
 NTSTATUS
 file_stream_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
-    PIO_STACK_LOCATION IrpSp, FILE_STREAM_INFORMATION *stream,
-    PULONG usedspace)
+    PIO_STACK_LOCATION IrpSp, FILE_STREAM_INFORMATION *stream)
 {
 	PFILE_OBJECT FileObject = IrpSp->FileObject;
 	NTSTATUS Status;
 	void *outbuffer = Irp->AssociatedIrp.SystemBuffer;
 	uint64_t availablebytes = IrpSp->Parameters.QueryFile.Length;
-	DWORD *lastNextEntryOffset = NULL;
+	FILE_STREAM_INFORMATION *previous_stream = NULL;
 	int overflow = 0;
+	int error = 0;
 
 	dprintf("%s: \n", __func__);
 
@@ -3385,27 +5759,50 @@ file_stream_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	}
 
 	struct vnode *vp = FileObject->FsContext;
+	zfs_ccb_t *zccb = FileObject->FsContext2;
 	znode_t *zp = VTOZ(vp), *xzp = NULL;
 	znode_t *xdzp = NULL;
 	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
 
+	if (zp == NULL)
+		return (STATUS_INVALID_PARAMETER);
+
 	// This exits when unmounting
-	ZFS_ENTER(zfsvfs);
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);
 
 	struct vnode *xdvp = NULL;
 	void *cr = NULL;
 	uint64_t spaceused = 0;
 	zap_cursor_t  zc;
 	objset_t  *os;
-	zap_attribute_t  za;
+	zap_attribute_t *za;
 
 	// Iterate the xattrs.
+	// Windows can call this on a stream zp, in this case, we
+	// need to go find the real parent, and iterate on that.
+	if (zccb && (zp->z_pflags & ZFS_XATTR) &&
+	    (zccb->real_file_id > 0)) {
+
+		error = zfs_zget(zfsvfs, zccb->real_file_id, &zp);
+		if (error)
+			goto exit;
+		vp = ZTOV(zp);
+	} else {
+		VN_HOLD(vp);
+	}
 
 	// Add a record for this name, if there is room. Keep a
 	// count of how much space would need.
 	// insert_xattrname adds first ":" and ":$DATA"
-	overflow = zfswin_insert_streamname(":$DATA", outbuffer,
-	    &lastNextEntryOffset, availablebytes, &spaceused, zp->z_size);
+	if (vnode_isdir(vp))
+		overflow = zfswin_insert_streamname("", outbuffer,
+		    &previous_stream, availablebytes, &spaceused,
+		    vnode_isdir(vp) ? 0 : zp->z_size);
+	else
+		overflow = zfswin_insert_streamname(":$DATA", outbuffer,
+		    &previous_stream, availablebytes, &spaceused,
+		    vnode_isdir(vp) ? 0 : zp->z_size);
 
 	/* Grab the hidden attribute directory vnode. */
 	if (zfs_get_xattrdir(zp, &xdzp, cr, 0) != 0) {
@@ -3415,18 +5812,21 @@ file_stream_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	xdvp = ZTOV(xdzp);
 	os = zfsvfs->z_os;
 
-	for (zap_cursor_init(&zc, os, VTOZ(xdvp)->z_id);
-	    zap_cursor_retrieve(&zc, &za) == 0; zap_cursor_advance(&zc)) {
+	stream = (FILE_STREAM_INFORMATION *)outbuffer;
+	za = zap_attribute_alloc();
 
-		if (!xattr_stream(za.za_name))
+	for (zap_cursor_init(&zc, os, xdzp->z_id);
+	    zap_cursor_retrieve(&zc, za) == 0; zap_cursor_advance(&zc)) {
+
+		if (!xattr_stream(za->za_name))
 			continue;	 /* skip */
 
 		// We need to lookup the size of the xattr.
-		int error = zfs_dirlook(VTOZ(xdvp), za.za_name, &xzp, 0,
+		int error = zfs_dirlook(xdzp, za->za_name, &xzp, 0,
 		    NULL, NULL);
 
-		overflow += zfswin_insert_streamname(za.za_name, outbuffer,
-		    &lastNextEntryOffset, availablebytes, &spaceused,
+		overflow += zfswin_insert_streamname(za->za_name, outbuffer,
+		    &previous_stream, availablebytes, &spaceused,
 		    xzp ? xzp->z_size : 0);
 
 		if (error == 0)
@@ -3435,13 +5835,17 @@ file_stream_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	}
 
 	zap_cursor_fini(&zc);
+	zap_attribute_free(za);
 
 out:
 	if (xdvp) {
 		VN_RELE(xdvp);
 	}
 
-	ZFS_EXIT(zfsvfs);
+	zrele(zp);
+
+exit:
+	zfs_exit(zfsvfs, FTAG);
 
 	if (overflow > 0)
 		Status = STATUS_BUFFER_OVERFLOW;
@@ -3454,6 +5858,92 @@ out:
 	return (Status);
 }
 
+NTSTATUS
+file_hard_link_information(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp, FILE_LINKS_INFORMATION *fhli)
+{
+	PFILE_OBJECT FileObject = IrpSp->FileObject;
+	NTSTATUS Status;
+	uint64_t availablebytes = IrpSp->Parameters.QueryFile.Length;
+	uint64_t bytes_needed;
+	mount_t *zmo;
+	int error;
+	zmo = (mount_t *)DeviceObject->DeviceExtension;
+	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
+	znode_t *zp = NULL;
+	ULONG namelenholder = 0;
+	FILE_LINK_ENTRY_INFORMATION *flei;
+
+	if (zfsvfs == NULL)
+		return (SET_ERROR(STATUS_INVALID_PARAMETER));
+
+	dprintf("%s: \n", __func__);
+
+	if (FileObject == NULL ||
+	    FileObject->FsContext == NULL ||
+	    FileObject->FsContext2 == NULL)
+		return (SET_ERROR(STATUS_INVALID_PARAMETER));
+
+	if (IrpSp->Parameters.QueryFile.Length <
+	    sizeof (FILE_LINKS_INFORMATION)) {
+		Irp->IoStatus.Information = sizeof (FILE_LINKS_INFORMATION);
+		return (SET_ERROR(STATUS_BUFFER_TOO_SMALL));
+	}
+
+	struct vnode *vp = FileObject->FsContext;
+	struct vnode *dvp = NULL;
+	zfs_ccb_t *zccb = FileObject->FsContext2;
+
+	bytes_needed = offsetof(FILE_LINKS_INFORMATION, Entry);
+
+	zp = VTOZ(vp);
+
+	if ((zp == NULL) || (zccb == NULL) || (zccb->z_name_cache == NULL))
+		return (SET_ERROR(STATUS_INVALID_PARAMETER));
+
+	// This exits when unmounting
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);
+
+	dvp = zfs_parent(vp);
+
+	char *name = &zccb->z_name_cache[zccb->z_name_offset];
+	Status = RtlUTF8ToUnicodeN(NULL, 0, &namelenholder,
+	    name,
+	    strlen(name)); /* zp->z_name_len - zp->z_name_offset */
+
+	bytes_needed += sizeof (FILE_LINK_ENTRY_INFORMATION) +
+	    namelenholder - sizeof (WCHAR);
+
+	fhli->BytesNeeded = bytes_needed;
+	Irp->IoStatus.Information = sizeof (FILE_LINKS_INFORMATION);
+
+	if (bytes_needed > availablebytes) {
+		Status = STATUS_BUFFER_OVERFLOW;
+		goto out;
+	}
+
+	flei = &fhli->Entry;
+
+	flei->NextEntryOffset = 0;
+	flei->ParentFileId = dvp && VTOZ(dvp) ? VTOZ(dvp)->z_id : 0;
+	flei->FileNameLength = namelenholder / sizeof (WCHAR);
+
+	Status = RtlUTF8ToUnicodeN(flei->FileName, namelenholder,
+	    &namelenholder, name, strlen(name));
+
+	fhli->EntriesReturned = 1;
+	Status = STATUS_SUCCESS;
+	Irp->IoStatus.Information = bytes_needed;
+
+out:
+	if (dvp != NULL)
+		VN_RELE(dvp);
+
+	zfs_exit(zfsvfs, FTAG);
+
+	return (Status);
+}
 
 /* IRP_MJ_DEVICE_CONTROL helpers */
 
@@ -3461,19 +5951,302 @@ NTSTATUS
 QueryCapabilities(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp)
 {
-	NTSTATUS				Status;
-	PDEVICE_CAPABILITIES	DeviceCapabilities;
-	DeviceCapabilities = IrpSp->Parameters.DeviceCapabilities.Capabilities;
+	NTSTATUS Status;
+	PDEVICE_CAPABILITIES DeviceCapabilities;
+	DeviceCapabilities =
+	    IrpSp->Parameters.DeviceCapabilities.Capabilities;
+	DeviceCapabilities->Version = 1;
+	DeviceCapabilities->Size = sizeof (DEVICE_CAPABILITIES);
+	DeviceCapabilities->DeviceD1 = FALSE;
+	DeviceCapabilities->DeviceD2 = FALSE;
 	DeviceCapabilities->SurpriseRemovalOK = TRUE;
-	DeviceCapabilities->LockSupported = TRUE;
-	DeviceCapabilities->EjectSupported = TRUE;
-	DeviceCapabilities->Removable = FALSE; // XX
+	DeviceCapabilities->LockSupported = FALSE;
+	DeviceCapabilities->EjectSupported = FALSE;
+	DeviceCapabilities->Removable = TRUE;
 	DeviceCapabilities->DockDevice = FALSE;
+	// DeviceCapabilities->UniqueID = FALSE;
+	// DeviceCapabilities->SilentInstall = FALSE;
+	DeviceCapabilities->UniqueID = TRUE;
+	DeviceCapabilities->SilentInstall = TRUE;
+	DeviceCapabilities->RawDeviceOK = FALSE;
+	DeviceCapabilities->SurpriseRemovalOK = FALSE;
+	DeviceCapabilities->WakeFromD0 = FALSE;
+	DeviceCapabilities->WakeFromD1 = FALSE;
+	DeviceCapabilities->WakeFromD2 = FALSE;
+	DeviceCapabilities->WakeFromD3 = FALSE;
+	DeviceCapabilities->HardwareDisabled = FALSE;
+	DeviceCapabilities->NonDynamic = FALSE;
+	DeviceCapabilities->WarmEjectSupported = FALSE;
+	DeviceCapabilities->NoDisplayInUI = FALSE;
+	DeviceCapabilities->Address = 0xffffffff;
+	DeviceCapabilities->UINumber = 0xffffffff;
+
 	DeviceCapabilities->D1Latency =
 	    DeviceCapabilities->D2Latency =
 	    DeviceCapabilities->D3Latency = 0;
-	DeviceCapabilities->NoDisplayInUI = 0;
-	Irp->IoStatus.Information = sizeof (DEVICE_CAPABILITIES);
+	DeviceCapabilities->DeviceState[PowerSystemWorking] =
+	    PowerDeviceD0;
+	DeviceCapabilities->DeviceState[PowerSystemSleeping1] =
+	    PowerDeviceD3;
+	DeviceCapabilities->DeviceState[PowerSystemSleeping2] =
+	    PowerDeviceD3;
+	DeviceCapabilities->DeviceState[PowerSystemSleeping3] =
+	    PowerDeviceD3;
+	DeviceCapabilities->DeviceState[PowerSystemHibernate] =
+	    PowerDeviceD3;
+	DeviceCapabilities->DeviceState[PowerSystemShutdown] =
+	    PowerDeviceD3;
+
+	// Irp->IoStatus.Information = sizeof (DEVICE_CAPABILITIES);
+
+	return (STATUS_SUCCESS);
+}
+
+#if 0
+NTSTATUS
+SendBusRelationsRequest(PDEVICE_OBJECT STOR_DeviceObject,
+    PDEVICE_RELATIONS *StorportRelations)
+{
+	NTSTATUS status = STATUS_SUCCESS;
+	PIRP irp;
+	PIO_STACK_LOCATION irpSp;
+	KEVENT event;
+	IO_STATUS_BLOCK ioStatus;
+
+	// Initialize event for IRP completion
+	KeInitializeEvent(&event, NotificationEvent, FALSE);
+
+	// Allocate an IRP for the BusRelations request
+	irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP,
+	    STOR_DeviceObject,
+	    NULL,
+	    0,
+	    NULL,
+	    &event,
+	    &ioStatus);
+
+	if (irp == NULL)
+		return (STATUS_INSUFFICIENT_RESOURCES);
+
+	// Set up the IRP stack location for the BusRelations query
+	irpSp = IoGetNextIrpStackLocation(irp);
+	irpSp->MajorFunction = IRP_MJ_PNP;
+	irpSp->MinorFunction = IRP_MN_QUERY_DEVICE_RELATIONS;
+	irpSp->Parameters.QueryDeviceRelations.Type = BusRelations;
+
+	// Call the target driver
+	status = IoCallDriver(STOR_DeviceObject, irp);
+
+	// If the IRP is pending, wait for it to complete
+	if (status == STATUS_PENDING) {
+		KeWaitForSingleObject(&event,
+		    Executive,
+		    KernelMode,
+		    FALSE,
+		    NULL);
+
+		// Update status with the final IRP status
+		status = ioStatus.Status;
+	}
+
+	if (NT_SUCCESS(status) && StorportRelations)
+		*StorportRelations = (ULONG_PTR) ioStatus.Information;
+
+	return (status);
+}
+#endif
+
+NTSTATUS
+QueryDeviceRelations(PDEVICE_OBJECT DeviceObject, PIRP *PIrp,
+    PIO_STACK_LOCATION IrpSp)
+{
+	NTSTATUS Status = STATUS_INVALID_DEVICE_REQUEST;
+	PIRP Irp = *PIrp;
+	mount_t *zmo;
+	PDEVICE_OBJECT ReturnDevice = NULL;
+	PDEVICE_RELATIONS DeviceRelations;
+	ZFS_DRIVER_EXTENSION(WIN_DriverObject, DriverExtension);
+
+	zmo = (mount_t *)DeviceObject->DeviceExtension;
+
+	dprintf("DeviceRelations.Type 0x%x\n",
+	    IrpSp->Parameters.QueryDeviceRelations.Type);
+
+	switch (IrpSp->Parameters.QueryDeviceRelations.Type) {
+	case TargetDeviceRelation:
+	{
+		DeviceRelations =
+		    (PDEVICE_RELATIONS)ExAllocatePool(PagedPool,
+		    sizeof (DEVICE_RELATIONS));
+		if (!DeviceRelations) {
+			dprintf("enomem DeviceRelations\n");
+			Status = STATUS_INSUFFICIENT_RESOURCES;
+			goto out;
+		}
+
+		mount_t *zmo_dcb = (mount_t *)zmo->parent_device;
+
+		if (zmo->PhysicalDeviceObject != NULL)
+			ReturnDevice = zmo->PhysicalDeviceObject;
+		else if (zmo_dcb && zmo_dcb->PhysicalDeviceObject != NULL)
+			ReturnDevice = zmo_dcb->PhysicalDeviceObject;
+		else {
+			ReturnDevice = DeviceObject; // wrong
+		}
+		ObReferenceObject(ReturnDevice);
+
+		DeviceRelations->Count = 1;
+		DeviceRelations->Objects[0] = ReturnDevice;
+		Irp->IoStatus.Information =
+		    (ULONG_PTR)DeviceRelations;
+		dprintf("ZFS TargetDeviceRelation is %p\n",
+		    ReturnDevice);
+		Status = STATUS_SUCCESS;
+		break;
+	}
+	case BusRelations:
+	{
+		int count;
+		PDEVICE_RELATIONS StorportRelations = NULL;
+
+		// Grab count here, and use only it, since list can
+		// change as we process this function.
+		count = vfs_mount_count();
+
+		DeviceRelations = ExAllocatePool(PagedPool,
+		    offsetof(DEVICE_RELATIONS, Objects[count]));
+
+		if (DeviceRelations == NULL) {
+			if (StorportRelations) // Count can be 0.
+				ExFreePool(StorportRelations);
+			return (STATUS_INSUFFICIENT_RESOURCES);
+		}
+
+		DeviceRelations->Count = 0;
+
+		if (count == 0)
+			goto out;
+
+		vfs_mount_setarray(DeviceRelations->Objects, count);
+
+		// Loop array, and grab reference and increment if valid.
+		// linked list will only leave NULL at end, not start/middle.
+		// list is of mounts, so fetch DeviceObjects.
+		// ChatGPT says returning PDO here is more proper, but I can not
+		// get AddDevice() to be called if I do. Returning FDO works.
+		for (int i = 0; i < count; i++) {
+			mount_t *mount;
+			mount = DeviceRelations->Objects[i];
+			DeviceRelations->Objects[i] = NULL;
+			if (mount != NULL && mount->FunctionalDeviceObject) {
+				dprintf("mount %p : FDO %p\n",
+				    mount, mount->FunctionalDeviceObject);
+				DeviceRelations->Objects[
+				    DeviceRelations->Count] =
+				    mount->FunctionalDeviceObject;
+//				    mount->PhysicalDeviceObject;
+				ObReferenceObject(
+				    DeviceRelations->Objects[
+				    DeviceRelations->Count]);
+				DeviceRelations->Count++;
+			}
+		}
+
+out:
+		if (StorportRelations) // Count can be 0.
+			ExFreePool(StorportRelations);
+
+		Irp->IoStatus.Information =
+		    (ULONG_PTR)DeviceRelations;
+
+		dprintf("BusRelations returning %d children in %p\n",
+		    DeviceRelations->Count,
+		    (void *)Irp->IoStatus.Information);
+
+		Status = STATUS_SUCCESS;
+		break;
+	}
+	default:
+		break;
+	}
+
+	return (Status);
+}
+
+NTSTATUS
+pnp_query_device_text(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp)
+{
+	PWCHAR deviceText = NULL;
+	ULONG length;
+	NTSTATUS status = STATUS_NOT_SUPPORTED;
+
+	switch (IrpSp->Parameters.QueryDeviceText.DeviceTextType) {
+	case DeviceTextDescription:
+		deviceText = L"ZFS Volume";
+		break;
+	case DeviceTextLocationInformation:
+		deviceText = L"ZFS Virtual Disk";
+		break;
+	default:
+		break;
+	}
+
+	if (deviceText) {
+		length = (ULONG)(wcslen(deviceText) + 1) * sizeof (WCHAR);
+		void *addr;
+
+		addr = (void *)ExAllocatePoolWithTag(PagedPool, length,
+		    'txtZ');
+		if (addr) {
+			RtlCopyMemory(addr, deviceText, length);
+			Irp->IoStatus.Information = (ULONG_PTR)addr;
+			dprintf("Replying with '%S'\n", addr);
+			status = STATUS_SUCCESS;
+		} else {
+			status = STATUS_INSUFFICIENT_RESOURCES;
+		}
+	}
+
+	return (status);
+}
+
+
+NTSTATUS
+ioctl_get_gpt_attributes(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp)
+{
+	mount_t *zmo;
+	NTSTATUS Status;
+	VOLUME_GET_GPT_ATTRIBUTES_INFORMATION *vggai;
+
+	if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength <
+	    sizeof (VOLUME_GET_GPT_ATTRIBUTES_INFORMATION)) {
+		Irp->IoStatus.Information =
+		    sizeof (VOLUME_GET_GPT_ATTRIBUTES_INFORMATION);
+		return (STATUS_BUFFER_TOO_SMALL);
+	}
+
+	zmo = (mount_t *)DeviceObject->DeviceExtension;
+	vggai = (VOLUME_GET_GPT_ATTRIBUTES_INFORMATION *)
+	    Irp->AssociatedIrp.SystemBuffer;
+
+	if (!zmo ||
+	    (zmo->type != MOUNT_TYPE_VCB &&
+	    zmo->type != MOUNT_TYPE_DCB)) {
+		return (STATUS_INVALID_PARAMETER);
+	}
+
+	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
+
+	Irp->IoStatus.Information =
+	    sizeof (VOLUME_GET_GPT_ATTRIBUTES_INFORMATION);
+
+	if (zfsvfs && zfsvfs->z_rdonly)
+		vggai->GptAttributes =
+		    GPT_BASIC_DATA_ATTRIBUTE_READ_ONLY;
+	else
+		vggai->GptAttributes = 0;
 
 	return (STATUS_SUCCESS);
 }
@@ -3489,63 +6262,74 @@ ioctl_query_device_name(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	// Return name in MOUNTDEV_NAME
 	PMOUNTDEV_NAME name;
 	mount_t *zmo;
-	NTSTATUS Status;
+	ULONG OutputBufferLength;
 
-	if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength <
-	    sizeof (MOUNTDEV_NAME)) {
+	OutputBufferLength =
+	    IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+	if (OutputBufferLength < sizeof (MOUNTDEV_NAME)) {
 		Irp->IoStatus.Information = sizeof (MOUNTDEV_NAME);
 		return (STATUS_BUFFER_TOO_SMALL);
 	}
 
 	zmo = (mount_t *)DeviceObject->DeviceExtension;
 
-	name = Irp->AssociatedIrp.SystemBuffer;
+	if (vfs_flags(zmo) & MNT_UNMOUNTING)
+		return (STATUS_VOLUME_DISMOUNTED);
 
-	int space = IrpSp->Parameters.DeviceIoControl.OutputBufferLength -
-	    sizeof (MOUNTDEV_NAME);
-#if 1
-	space = MIN(space, zmo->device_name.Length);
-	name->NameLength = zmo->device_name.Length;
-	RtlCopyMemory(name->Name, zmo->device_name.Buffer,
-	    space + sizeof (name->Name));
-	Irp->IoStatus.Information = sizeof (MOUNTDEV_NAME) + space;
 
-	if (space < zmo->device_name.Length - sizeof (name->Name))
-		Status = STATUS_BUFFER_OVERFLOW;
-	else
-		Status = STATUS_SUCCESS;
-#else
-	if (zmo->parent_device != NULL) {
-		DeviceObject = zmo->parent_device;
-		zmo = (mount_t *)DeviceObject->DeviceExtension;
+	/*
+	 * Do not restrict to root vnode.  twext.dll (Previous Versions
+	 * shell extension) opens an arbitrary file handle on the volume
+	 * and sends IOCTL_MOUNTDEV_QUERY_DEVICE_NAME to discover which
+	 * volume device hosts it.  NTFS returns the device name for any
+	 * file handle; we must do the same.
+	 *
+	 * When called from a VCB (fsDevice) context, the VCB's device_name
+	 * is the filesystem device (\Device\ZFS{uuid}).  MountManager knows
+	 * the volume by the disk device name (\Device\zfs-{uuid}, stored in
+	 * the DCB).  Return the DCB's name so that twext.dll can map it to a
+	 * Volume{} GUID and query VSS for snapshots.
+	 */
+	UNICODE_STRING *devname = &zmo->device_name;
+	if (zmo->type == MOUNT_TYPE_VCB && zmo->parent_device != NULL) {
+		mount_t *dcb = (mount_t *)zmo->parent_device;
+		if (dcb->device_name.Length > 0)
+			devname = &dcb->device_name;
 	}
 
-	space = MIN(space, zmo->device_name.Length);
-	name->NameLength = zmo->device_name.Length;
-	RtlCopyMemory(name->Name, zmo->device_name.Buffer,
-	    space + sizeof (name->Name));
-	Irp->IoStatus.Information = sizeof (MOUNTDEV_NAME) + space;
+	name = Irp->AssociatedIrp.SystemBuffer;
+	ULONG requiredSize = sizeof (MOUNTDEV_NAME) + devname->Length;
 
-	if (space < zmo->device_name.Length - sizeof (name->Name))
-		Status = STATUS_BUFFER_OVERFLOW;
-	else
-		Status = STATUS_SUCCESS;
-#endif
+	// Check if the output buffer is large enough
+	if (OutputBufferLength < requiredSize) {
+		Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+		Irp->IoStatus.Information = requiredSize;
+		return (STATUS_BUFFER_TOO_SMALL);
+	}
 
-	ASSERT(Irp->IoStatus.Information <=
-	    IrpSp->Parameters.DeviceIoControl.OutputBufferLength);
+	// Set the length of the device name
+	name->NameLength = devname->Length;
 
-	dprintf("replying with '%.*S'\n",
-	    space + sizeof (name->Name) / sizeof (WCHAR), name->Name);
+	// Copy the device name into the buffer
+	RtlCopyMemory(name->Name, devname->Buffer, devname->Length);
 
-	return (Status);
+	// Set the status and information fields
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	Irp->IoStatus.Information = requiredSize;
+
+	dprintf("replying with wstr (len=%d)\n",
+	    (int)(name->NameLength / sizeof (WCHAR)));
+
+	return (STATUS_SUCCESS);
 }
 
 NTSTATUS
 ioctl_disk_get_drive_geometry(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp)
 {
+	int error = 0;
 	dprintf("%s: \n", __func__);
+
 	if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength <
 	    sizeof (DISK_GEOMETRY)) {
 		Irp->IoStatus.Information = sizeof (DISK_GEOMETRY);
@@ -3559,24 +6343,46 @@ ioctl_disk_get_drive_geometry(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		return (STATUS_INVALID_PARAMETER);
 	}
 
+	DISK_GEOMETRY *diskGeometry = Irp->AssociatedIrp.SystemBuffer;
+	unsigned long TracksPerCylinder = 255;
+	unsigned long SectorsPerTrack = 63;
+	unsigned long BytesPerSector = 512;
+	unsigned long long Cylinders = 512;
+
 	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
-	if (zfsvfs == NULL)
-		return (STATUS_INVALID_PARAMETER);
+	if (zfsvfs != NULL) {
 
-	ZFS_ENTER(zfsvfs);  // This returns EIO if fail
+		if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+			return (error); // This returns EIO if fail
 
-	uint64_t refdbytes, availbytes, usedobjs, availobjs;
-	dmu_objset_space(zfsvfs->z_os,
-	    &refdbytes, &availbytes, &usedobjs, &availobjs);
+		uint64_t refdbytes, availbytes, usedobjs, availobjs;
+		dmu_objset_space(zfsvfs->z_os,
+		    &refdbytes, &availbytes, &usedobjs, &availobjs);
 
-	DISK_GEOMETRY *geom = Irp->AssociatedIrp.SystemBuffer;
+		uint64_t TotalSizeBytes = availbytes + refdbytes;
 
-	geom->BytesPerSector = 512;
-	geom->SectorsPerTrack = 1;
-	geom->TracksPerCylinder = 1;
-	geom->Cylinders.QuadPart = (availbytes + refdbytes) / 512;
-	geom->MediaType = FixedMedia;
-	ZFS_EXIT(zfsvfs);
+		// Calculate total sectors
+		unsigned long long TotalSectors =
+		    TotalSizeBytes / BytesPerSector;
+
+		// Calculate sectors per cylinder
+		unsigned long SectorsPerCylinder =
+		    TracksPerCylinder * SectorsPerTrack;
+
+		// Calculate number of cylinders
+		Cylinders = TotalSectors / SectorsPerCylinder;
+	}
+
+	// Populate the DISK_GEOMETRY structure
+	diskGeometry->Cylinders.QuadPart = Cylinders;
+	diskGeometry->TracksPerCylinder = TracksPerCylinder;
+	diskGeometry->SectorsPerTrack = SectorsPerTrack;
+	diskGeometry->BytesPerSector = BytesPerSector;
+	diskGeometry->MediaType = FixedMedia;
+
+	if (zfsvfs != NULL) {
+		zfs_exit(zfsvfs, FTAG);
+	}
 
 	Irp->IoStatus.Information = sizeof (DISK_GEOMETRY);
 	return (STATUS_SUCCESS);
@@ -3594,7 +6400,9 @@ NTSTATUS
 ioctl_disk_get_drive_geometry_ex(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp)
 {
+	int error = 0;
 	dprintf("%s: \n", __func__);
+
 	if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength <
 	    FIELD_OFFSET(DISK_GEOMETRY_EX, Data)) {
 		Irp->IoStatus.Information = sizeof (DISK_GEOMETRY_EX);
@@ -3608,22 +6416,33 @@ ioctl_disk_get_drive_geometry_ex(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		return (STATUS_INVALID_PARAMETER);
 	}
 
+	// DISK_GEOMETRY_EX_INTERNAL *geom = Irp->AssociatedIrp.SystemBuffer;
+	DISK_GEOMETRY_EX *geom = Irp->AssociatedIrp.SystemBuffer;
+
 	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
-	if (zfsvfs == NULL)
-		return (STATUS_INVALID_PARAMETER);
+	if (zfsvfs == NULL) {
+		geom->DiskSize.QuadPart = 1024 * 1024 * 1024;
+		geom->Geometry.BytesPerSector = 512;
+		geom->Geometry.MediaType = FixedMedia;
+	} else {
+		if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+			return (error);  // This returns EIO if fail
 
-	ZFS_ENTER(zfsvfs);  // This returns EIO if fail
+		uint64_t refdbytes, availbytes, usedobjs, availobjs;
+		dmu_objset_space(zfsvfs->z_os,
+		    &refdbytes, &availbytes, &usedobjs, &availobjs);
 
-	uint64_t refdbytes, availbytes, usedobjs, availobjs;
-	dmu_objset_space(zfsvfs->z_os,
-	    &refdbytes, &availbytes, &usedobjs, &availobjs);
+		geom->DiskSize.QuadPart = availbytes + refdbytes;
+		geom->Geometry.BytesPerSector = 512;
+		geom->Geometry.MediaType = FixedMedia; // or RemovableMedia
+		zfs_exit(zfsvfs, FTAG);
+	}
 
-
-	DISK_GEOMETRY_EX_INTERNAL *geom = Irp->AssociatedIrp.SystemBuffer;
-	geom->DiskSize.QuadPart = availbytes + refdbytes;
-	geom->Geometry.BytesPerSector = 512;
-	geom->Geometry.MediaType = FixedMedia;
-
+	geom->Geometry.Cylinders.QuadPart = 1024;
+	geom->Geometry.SectorsPerTrack = 63;
+	geom->Geometry.TracksPerCylinder = 255;
+	geom->Data[0] = 0;
+#if 0
 	if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength >=
 	    FIELD_OFFSET(DISK_GEOMETRY_EX_INTERNAL, Detection)) {
 		geom->Partition.SizeOfPartitionInfo = sizeof (geom->Partition);
@@ -3634,11 +6453,8 @@ ioctl_disk_get_drive_geometry_ex(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	    sizeof (DISK_GEOMETRY_EX_INTERNAL)) {
 		geom->Detection.SizeOfDetectInfo = sizeof (geom->Detection);
 	}
-	ZFS_EXIT(zfsvfs);
-
-	Irp->IoStatus.Information =
-	    MIN(IrpSp->Parameters.DeviceIoControl.OutputBufferLength,
-	    sizeof (DISK_GEOMETRY_EX_INTERNAL));
+#endif
+	Irp->IoStatus.Information = sizeof (DISK_GEOMETRY_EX);
 	return (STATUS_SUCCESS);
 }
 
@@ -3646,6 +6462,7 @@ NTSTATUS
 ioctl_disk_get_partition_info(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp)
 {
+	int error = 0;
 	dprintf("%s: \n", __func__);
 
 	if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength <
@@ -3665,7 +6482,8 @@ ioctl_disk_get_partition_info(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	if (zfsvfs == NULL)
 		return (STATUS_INVALID_PARAMETER);
 
-	ZFS_ENTER(zfsvfs);  // This returns EIO if fail
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);  // This returns EIO if fail
 
 	uint64_t refdbytes, availbytes, usedobjs, availobjs;
 	dmu_objset_space(zfsvfs->z_os,
@@ -3682,7 +6500,7 @@ ioctl_disk_get_partition_info(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	part->RewritePartition = FALSE;
 	part->PartitionType = 'ZFS';
 
-	ZFS_EXIT(zfsvfs);
+	zfs_exit(zfsvfs, FTAG);
 
 	Irp->IoStatus.Information = sizeof (PARTITION_INFORMATION);
 
@@ -3693,6 +6511,7 @@ NTSTATUS
 ioctl_disk_get_partition_info_ex(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp)
 {
+	int error = 0;
 	dprintf("%s: \n", __func__);
 
 	if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength <
@@ -3712,7 +6531,8 @@ ioctl_disk_get_partition_info_ex(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	if (zfsvfs == NULL)
 		return (STATUS_INVALID_PARAMETER);
 
-	ZFS_ENTER(zfsvfs);  // This returns EIO if fail
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);  // This returns EIO if fail
 
 	uint64_t refdbytes, availbytes, usedobjs, availobjs;
 	dmu_objset_space(zfsvfs->z_os,
@@ -3723,14 +6543,14 @@ ioctl_disk_get_partition_info_ex(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	part->PartitionStyle = PARTITION_STYLE_MBR;
 	part->RewritePartition = FALSE;
 	part->Mbr.RecognizedPartition = FALSE;
-	part->Mbr.PartitionType = PARTITION_ENTRY_UNUSED;
+	part->Mbr.PartitionType = PARTITION_HUGE;
 	part->Mbr.BootIndicator = FALSE;
-	part->Mbr.HiddenSectors = 0;
+	part->Mbr.HiddenSectors = 1;
 	part->StartingOffset.QuadPart = 0;
 	part->PartitionLength.QuadPart = availbytes + refdbytes;
-	part->PartitionNumber = 0;
+	part->PartitionNumber = 1;
 
-	ZFS_EXIT(zfsvfs);
+	zfs_exit(zfsvfs, FTAG);
 
 	Irp->IoStatus.Information = sizeof (PARTITION_INFORMATION_EX);
 
@@ -3741,6 +6561,7 @@ NTSTATUS
 ioctl_disk_get_length_info(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp)
 {
+	int error = 0;
 	dprintf("%s: \n", __func__);
 
 	if (IrpSp->Parameters.DeviceIoControl.OutputBufferLength <
@@ -3760,7 +6581,8 @@ ioctl_disk_get_length_info(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	if (zfsvfs == NULL)
 		return (STATUS_INVALID_PARAMETER);
 
-	ZFS_ENTER(zfsvfs);  // This returns EIO if fail
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);  // This returns EIO if fail
 
 	uint64_t refdbytes, availbytes, usedobjs, availobjs;
 	dmu_objset_space(zfsvfs->z_os,
@@ -3769,7 +6591,7 @@ ioctl_disk_get_length_info(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	GET_LENGTH_INFORMATION *gli = Irp->AssociatedIrp.SystemBuffer;
 	gli->Length.QuadPart = availbytes + refdbytes;
 
-	ZFS_EXIT(zfsvfs);
+	zfs_exit(zfsvfs, FTAG);
 
 	Irp->IoStatus.Information = sizeof (GET_LENGTH_INFORMATION);
 
@@ -3811,101 +6633,175 @@ NTSTATUS
 ioctl_storage_query_property(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PIO_STACK_LOCATION IrpSp)
 {
-	NTSTATUS status;
+	NTSTATUS status = STATUS_NOT_SUPPORTED;
 	ULONG outputLength;
 
 	dprintf("%s: \n", __func__);
 
-	outputLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
-	if (outputLength < sizeof (STORAGE_PROPERTY_QUERY)) {
-		Irp->IoStatus.Information = sizeof (STORAGE_PROPERTY_QUERY);
-		return (STATUS_BUFFER_TOO_SMALL);
-	}
-
 	STORAGE_PROPERTY_QUERY *spq = Irp->AssociatedIrp.SystemBuffer;
 
-	switch (spq->QueryType) {
+	outputLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
 
-	case PropertyExistsQuery:
+// Check Length if not Query type. If query:
+// According to MSDN, an output buffer of size 0 can be used to determine
+// if a property exists so this must be a success case with no data transferred
+	if (spq->QueryType != PropertyExistsQuery) {
+		if (outputLength < sizeof (STORAGE_DESCRIPTOR_HEADER)) {
+			Irp->IoStatus.Information =
+			    sizeof (STORAGE_DESCRIPTOR_HEADER);
+			return (STATUS_BUFFER_TOO_SMALL);
+		}
+	}
 
-		// ExistsQuery: return OK if exists.
-		Irp->IoStatus.Information = 0;
+	/*
+	 * PropertyExistsQuery:
+	 * Based on whether your driver supports the requested property,
+	 * return STATUS_SUCCESS
+	 * if the property exists, or STATUS_NOT_SUPPORTED if it does not.
+	 * PropertyStandardQuery:
+	 * Return data
+	 */
 
-		switch (spq->PropertyId) {
-		case StorageDeviceUniqueIdProperty:
-dprintf("    PropertyExistsQuery StorageDeviceUniqueIdProperty\n");
-			status = STATUS_SUCCESS;
-			break;
-		case StorageDeviceWriteCacheProperty:
-		case StorageAdapterProperty:
-dprintf("    PropertyExistsQuery Not implemented 0x%x\n", spq->PropertyId);
-			status = STATUS_NOT_IMPLEMENTED;
-			break;
-		case StorageDeviceAttributesProperty:
-dprintf("    PropertyExistsQuery StorageDeviceAttributesProperty\n");
-			status = STATUS_SUCCESS;
-			break;
-		default:
-dprintf("    PropertyExistsQuery unknown 0x%x\n", spq->PropertyId);
-			status = STATUS_NOT_IMPLEMENTED;
-			break;
-		} // switch PropertyId
+	// ExistsQuery: return OK if exists.
+	Irp->IoStatus.Information = 0;
+
+	// Might be NULL
+	PSTORAGE_DESCRIPTOR_HEADER Header =
+	    (PSTORAGE_DESCRIPTOR_HEADER) Irp->AssociatedIrp.SystemBuffer;
+	size_t hdrsize = 0;
+
+	switch (spq->PropertyId) {
+	case StorageDeviceUniqueIdProperty:
+		dprintf("    PropertyExistsQuery "
+		    "StorageDeviceUniqueIdProperty\n");
+
+		if (spq->QueryType == PropertyExistsQuery)
+			return (STATUS_SUCCESS);
+		dprintf("    PropertyStandardQuery "
+		    "StorageDeviceUniqueIdProperty\n");
 		break;
 
-	// Query property, check input buffer size.
-	case PropertyStandardQuery:
+	case StorageAccessAlignmentProperty:
+		dprintf("    PropertyExistsQuery "
+		    "StorageAccessAlignmentProperty\n");
+		if (spq->QueryType == PropertyExistsQuery)
+			return (STATUS_SUCCESS);
+		dprintf("    PropertyStandardQuery "
+		    "StorageAccessAlignmentProperty\n");
 
-		switch (spq->PropertyId) {
-		case StorageDeviceProperty:
-dprintf("    PropertyStandardQuery StorageDeviceProperty\n");
+		hdrsize = sizeof (STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR);
+		if (outputLength == sizeof (STORAGE_DESCRIPTOR_HEADER) &&
+		    Header) {
+			Header->Size = hdrsize;
+			Header->Version = hdrsize;
 			Irp->IoStatus.Information =
-			    sizeof (STORAGE_DEVICE_DESCRIPTOR);
-			if (outputLength < sizeof (STORAGE_DEVICE_DESCRIPTOR)) {
-				status = STATUS_BUFFER_TOO_SMALL;
-				break;
-			}
-			PSTORAGE_DEVICE_DESCRIPTOR storage;
-			storage = Irp->AssociatedIrp.SystemBuffer;
-			status = STATUS_SUCCESS;
-			break;
-		case StorageAdapterProperty:
-dprintf("    PropertyStandardQuery Not implemented 0x%x\n", spq->PropertyId);
-			status = STATUS_NOT_IMPLEMENTED;
-			break;
-		case StorageDeviceAttributesProperty:
-dprintf("    PropertyStandardQuery StorageDeviceAttributesProperty\n");
+			    sizeof (STORAGE_DESCRIPTOR_HEADER);
+			return (STATUS_SUCCESS);
+		}
+
+		Irp->IoStatus.Information = hdrsize;
+		if (outputLength < hdrsize)
+			return (STATUS_BUFFER_TOO_SMALL);
+
+		PSTORAGE_ACCESS_ALIGNMENT_DESCRIPTOR AlignmentDescriptor =
+		    (PSTORAGE_ACCESS_ALIGNMENT_DESCRIPTOR)
+		    Irp->AssociatedIrp.SystemBuffer;
+		RtlZeroMemory(AlignmentDescriptor, hdrsize);
+		AlignmentDescriptor->Version = hdrsize;
+		AlignmentDescriptor->Size = hdrsize;
+		AlignmentDescriptor->BytesPerCacheLine = 64; // Example value
+		AlignmentDescriptor->BytesOffsetForCacheAlignment = 0;
+		AlignmentDescriptor->BytesPerLogicalSector = 512;
+		AlignmentDescriptor->BytesPerPhysicalSector = 512;
+		AlignmentDescriptor->BytesOffsetForSectorAlignment = 0;
+		status = STATUS_SUCCESS;
+		break;
+
+	case StorageDeviceProperty:
+		dprintf("    PropertyExistsQuery "
+		    "StorageDeviceProperty\n");
+		if (spq->QueryType == PropertyExistsQuery)
+			return (STATUS_SUCCESS);
+		dprintf("    PropertyStandardQuery "
+		    "StorageDeviceProperty\n");
+
+		hdrsize = sizeof (STORAGE_DEVICE_DESCRIPTOR);
+		if (outputLength == sizeof (STORAGE_DESCRIPTOR_HEADER) &&
+		    Header) {
+			Header->Size = hdrsize;
+			Header->Version = hdrsize;
 			Irp->IoStatus.Information =
-			    sizeof (STORAGE_DEVICE_ATTRIBUTES_DESCRIPTOR);
-			if (outputLength <
-			    sizeof (STORAGE_DEVICE_ATTRIBUTES_DESCRIPTOR)) {
-				status = STATUS_BUFFER_TOO_SMALL;
-				break;
-			}
-			STORAGE_DEVICE_ATTRIBUTES_DESCRIPTOR *sdad;
-			sdad = Irp->AssociatedIrp.SystemBuffer;
-			sdad->Version = 1;
-			sdad->Size =
-			    sizeof (STORAGE_DEVICE_ATTRIBUTES_DESCRIPTOR);
-			sdad->Attributes =
-			    STORAGE_ATTRIBUTE_BYTE_ADDRESSABLE_IO;
-			status = STATUS_SUCCESS;
-			break;
-		default:
-			dprintf("    PropertyStandardQuery unknown 0x%x\n",
-			    spq->PropertyId);
-			status = STATUS_NOT_IMPLEMENTED;
-			break;
-		} // switch propertyId
+			    sizeof (STORAGE_DESCRIPTOR_HEADER);
+			return (STATUS_SUCCESS);
+		}
+
+		Irp->IoStatus.Information = hdrsize;
+		if (outputLength < hdrsize)
+			return (STATUS_BUFFER_TOO_SMALL);
+
+		PSTORAGE_DEVICE_DESCRIPTOR storage;
+		storage = Irp->AssociatedIrp.SystemBuffer;
+		storage->Version = hdrsize;
+		storage->Size = hdrsize;
+		storage->BusType = 0;
+		storage->CommandQueueing = 0;
+		storage->DeviceType = FILE_DEVICE_DISK;
+		storage->DeviceTypeModifier = 0;
+		storage->ProductIdOffset = 0;
+		storage->ProductRevisionOffset = 0;
+		// storage->RawDeviceProperties = 0;
+		storage->RawPropertiesLength = 0;
+		storage->RemovableMedia = 0;
+		storage->SerialNumberOffset = 0;
+		storage->VendorIdOffset = 0;
+		status = STATUS_SUCCESS;
+		break;
+
+	case StorageDeviceAttributesProperty:
+		dprintf("    PropertyExistsQuery "
+		    "StorageDeviceAttributesProperty\n");
+		if (spq->QueryType == PropertyExistsQuery)
+			return (STATUS_SUCCESS);
+		dprintf("    PropertyStandardQuery "
+		    "StorageDeviceAttributesProperty\n");
+
+		hdrsize = sizeof (STORAGE_DEVICE_ATTRIBUTES_DESCRIPTOR);
+		if (outputLength == sizeof (STORAGE_DESCRIPTOR_HEADER) &&
+		    Header) {
+			Header->Size = hdrsize;
+			Header->Version = hdrsize;
+			Irp->IoStatus.Information =
+			    sizeof (STORAGE_DESCRIPTOR_HEADER);
+			return (STATUS_SUCCESS);
+		}
+
+		Irp->IoStatus.Information = hdrsize;
+		if (outputLength < hdrsize)
+			return (STATUS_BUFFER_TOO_SMALL);
+
+		STORAGE_DEVICE_ATTRIBUTES_DESCRIPTOR *sdad;
+		sdad = Irp->AssociatedIrp.SystemBuffer;
+		sdad->Version = hdrsize;
+		sdad->Size = hdrsize;
+		sdad->Attributes =
+		    STORAGE_ATTRIBUTE_BYTE_ADDRESSABLE_IO;
+		status = STATUS_SUCCESS;
 		break;
 
 	default:
-		dprintf("%s: unknown Querytype: 0x%x\n",
-		    __func__, spq->QueryType);
-		status = STATUS_NOT_IMPLEMENTED;
-		break;
+		// StorageDeviceLBProvisioningProperty
+		// StorageDeviceResiliencyProperty
+		if (spq->QueryType == PropertyExistsQuery) {
+			dprintf("PropertyExistsQuery not "
+			    "supported: %d / 0x%x\n",
+			    spq->PropertyId, spq->PropertyId);
+			return (STATUS_NOT_SUPPORTED);
+		}
+		dprintf("PropertyStandardQuery failing: %d / 0x%x\n",
+		    spq->PropertyId, spq->PropertyId);
+		return (STATUS_INVALID_DEVICE_REQUEST);
 	}
 
-	Irp->IoStatus.Information = sizeof (STORAGE_PROPERTY_QUERY);
 	return (status);
 }
 
@@ -3933,7 +6829,8 @@ ioctl_query_unique_id(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		return (STATUS_BUFFER_TOO_SMALL);
 	}
 
-	RtlUnicodeToUTF8N(osname, MAXPATHLEN, &len, zmo->name.Buffer,
+#if 1
+	RtlUnicodeToUTF8N(osname, MAXPATHLEN - 1, &len, zmo->name.Buffer,
 	    zmo->name.Length);
 	osname[len] = 0;
 
@@ -3949,13 +6846,41 @@ ioctl_query_unique_id(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		Irp->IoStatus.Information =
 		    FIELD_OFFSET(MOUNTDEV_UNIQUE_ID, UniqueId[0]) +
 		    uniqueId->UniqueIdLength;
-		dprintf("replying with '%.*s'\n",
-		    uniqueId->UniqueIdLength, uniqueId->UniqueId);
+		dprintf("replying with id (len=%d)\n",
+		    uniqueId->UniqueIdLength);
 		return (STATUS_SUCCESS);
 	} else {
 		Irp->IoStatus.Information = sizeof (MOUNTDEV_UNIQUE_ID);
 		return (STATUS_BUFFER_OVERFLOW);
 	}
+
+#else
+
+//	RtlUnicodeToUTF8N(osname, MAXPATHLEN - 1, &len, zmo->uuid.Buffer,
+//	    zmo->uuid.Length);
+//	osname[len] = 0;
+
+	// uniqueId appears to be CHARS not WCHARS,
+	// so this might need correcting?
+	uniqueId = (PMOUNTDEV_UNIQUE_ID)Irp->AssociatedIrp.SystemBuffer;
+
+	uniqueId->UniqueIdLength = sizeof (zmo->rawuuid);
+
+	if (sizeof (USHORT) + uniqueId->UniqueIdLength <= bufferLength) {
+		RtlCopyMemory((PCHAR)uniqueId->UniqueId, zmo->rawuuid,
+		    uniqueId->UniqueIdLength);
+		Irp->IoStatus.Information =
+		    FIELD_OFFSET(MOUNTDEV_UNIQUE_ID, UniqueId[0]) +
+		    uniqueId->UniqueIdLength;
+		// dprintf("replying with '%.*s'\n",
+		// uniqueId->UniqueIdLength, uniqueId->UniqueId);
+		return (STATUS_SUCCESS);
+	} else {
+		Irp->IoStatus.Information = sizeof (MOUNTDEV_UNIQUE_ID);
+		return (STATUS_BUFFER_OVERFLOW);
+	}
+#endif
+
 }
 
 NTSTATUS
@@ -3976,18 +6901,18 @@ ioctl_query_stable_guid(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		return (STATUS_BUFFER_TOO_SMALL);
 	}
 
+
 	mountGuid = (PMOUNTDEV_STABLE_GUID)Irp->AssociatedIrp.SystemBuffer;
 	RtlZeroMemory(&mountGuid->StableGuid, sizeof (mountGuid->StableGuid));
 	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
 	if (zfsvfs) {
-		uint64_t guid = dmu_objset_fsid_guid(zfsvfs->z_os);
-		RtlCopyMemory(&mountGuid->StableGuid, &guid, sizeof (guid));
+		RtlCopyMemory(&mountGuid->StableGuid, zmo->rawuuid,
+		    sizeof (zmo->rawuuid));
 		Irp->IoStatus.Information = sizeof (MOUNTDEV_STABLE_GUID);
 		return (STATUS_SUCCESS);
 	}
 	return (STATUS_NOT_FOUND);
 }
-
 
 NTSTATUS
 ioctl_mountdev_query_suggested_link_name(PDEVICE_OBJECT DeviceObject,
@@ -4008,12 +6933,16 @@ ioctl_mountdev_query_suggested_link_name(PDEVICE_OBJECT DeviceObject,
 	}
 
 	// We only reply to strict driveletter mounts, not paths...
-	if (!zmo->justDriveLetter)
-		return (STATUS_NOT_FOUND);
+//	if (!zmo->justDriveLetter)
+//		return (STATUS_NOT_FOUND);
+	Irp->IoStatus.Information = 0;
+
+	if (zmo->mountpoint.Buffer == NULL)
+		return (STATUS_OBJECT_NAME_NOT_FOUND);
 
 	// If "?:" then just let windows pick drive letter
 	if (zmo->mountpoint.Buffer[4] == L'?')
-		return (STATUS_NOT_FOUND);
+		return (STATUS_OBJECT_NAME_NOT_FOUND);
 
 	// This code works, for driveletters.
 	// The mountpoint string is "\\??\\f:" so change
@@ -4042,7 +6971,8 @@ ioctl_mountdev_query_suggested_link_name(PDEVICE_OBJECT DeviceObject,
 		return (STATUS_SUCCESS);
 	}
 
-	Irp->IoStatus.Information = sizeof (MOUNTDEV_SUGGESTED_LINK_NAME);
+	Irp->IoStatus.Information = sizeof (MOUNTDEV_SUGGESTED_LINK_NAME) +
+	    MountPoint.Length;
 	return (STATUS_BUFFER_OVERFLOW);
 
 }
@@ -4062,7 +6992,7 @@ ioctl_mountdev_query_stable_guid(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		Irp->IoStatus.Information = sizeof (MOUNTDEV_STABLE_GUID);
 		return (STATUS_BUFFER_TOO_SMALL);
 	}
-
+#if 0
 	zfsvfs_t *zfsvfs = vfs_fsprivate(zmo);
 	if (zfsvfs == NULL)
 		return (STATUS_INVALID_PARAMETER);
@@ -4072,7 +7002,237 @@ ioctl_mountdev_query_stable_guid(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	// A bit naughty
 	zfs_vfs_uuid_gen(spa_name(dmu_objset_spa(zfsvfs->z_os)),
 	    (char *)&guid->StableGuid);
-
+#else
+	memcpy(&guid->StableGuid, zmo->rawuuid, sizeof (guid->StableGuid));
+#endif
 	Irp->IoStatus.Information = sizeof (MOUNTDEV_STABLE_GUID);
+	return (STATUS_SUCCESS);
+}
+
+NTSTATUS
+fsctl_zfs_volume_mountpoint(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp)
+{
+	mount_t *zmo = (mount_t *)DeviceObject->DeviceExtension;
+
+	ULONG bufferLength =
+	    IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+
+	if (bufferLength < sizeof (fsctl_zfs_volume_mountpoint_t) +
+	    zmo->mountpoint.Length) {
+		Irp->IoStatus.Information =
+		    sizeof (fsctl_zfs_volume_mountpoint_t) +
+		    zmo->mountpoint.Length;
+		return (STATUS_BUFFER_TOO_SMALL);
+	}
+
+	fsctl_zfs_volume_mountpoint_t *fzvm =
+	    (fsctl_zfs_volume_mountpoint_t *)Irp->AssociatedIrp.SystemBuffer;
+
+	fzvm->len = zmo->mountpoint.Length;
+	memcpy(fzvm->buffer, zmo->mountpoint.Buffer, fzvm->len);
+	Irp->IoStatus.Information =
+	    sizeof (fsctl_zfs_volume_mountpoint_t) +
+	    zmo->mountpoint.Length;
+	dprintf("%s: returning wstr (len=%d)\n", __func__, fzvm->len);
+	return (STATUS_SUCCESS);
+}
+
+NTSTATUS
+fsctl_set_zero_data(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp)
+{
+	FILE_ZERO_DATA_INFORMATION *fzdi = Irp->AssociatedIrp.SystemBuffer;
+	ULONG length = IrpSp->Parameters.FileSystemControl.InputBufferLength;
+	PFILE_OBJECT FileObject = IrpSp->FileObject;
+	NTSTATUS Status;
+	LARGE_INTEGER time;
+	uint64_t start, end;
+	IO_STATUS_BLOCK iosb;
+	zfs_ccb_t *zccb;
+
+	if (!fzdi || length < sizeof (FILE_ZERO_DATA_INFORMATION))
+		return (STATUS_INVALID_PARAMETER);
+
+	if (!FileObject)
+		return (STATUS_INVALID_PARAMETER);
+
+	if (fzdi->BeyondFinalZero.QuadPart <= fzdi->FileOffset.QuadPart) {
+		dprintf("BeyondFinalZero was <= to Offset (%I64x <= %I64x)\n",
+		    fzdi->BeyondFinalZero.QuadPart, fzdi->FileOffset.QuadPart);
+		return (STATUS_INVALID_PARAMETER);
+	}
+
+	struct vnode *vp = FileObject->FsContext;
+
+	if (!vp)
+		return (STATUS_INVALID_PARAMETER);
+
+	zccb = FileObject->FsContext2;
+
+	if (!zccb)
+		return (STATUS_INVALID_PARAMETER);
+
+//	if (Irp->RequestorMode == UserMode &&
+//	    !(ccb->access & FILE_WRITE_DATA)) {
+//		WARN("insufficient privileges\n");
+//		return STATUS_ACCESS_DENIED;
+//	}
+
+	// OpLocks might need preflight checks.
+	BOOLEAN needsPreflight = FALSE;
+	uint64_t skip = (uint64_t)Irp->Tail.Overlay.DriverContext[0];
+	const BOOLEAN skipZeroData =
+	    (skip == (OPLOCK_SKIP_MAGIC | OPLOCK_SKIP_ZERODATA));
+	if (!skipZeroData)
+		needsPreflight = TRUE;
+
+	if (needsPreflight) {
+
+		ExAcquireResourceExclusiveLite(vp->FileHeader.Resource, TRUE);
+
+		ZFS_OPLOCK_CREATE_CTX *ctx = ExAllocatePoolZero(NonPagedPoolNx,
+		    sizeof (*ctx), 'plkO');
+		if (!ctx) {
+			ExReleaseResourceLite(vp->FileHeader.Resource);
+			return (STATUS_INSUFFICIENT_RESOURCES);
+		}
+		ctx->DeviceObject = DeviceObject;
+		ctx->Irp = Irp;
+		ctx->SkipMask = OPLOCK_SKIP_ZERODATA;
+
+		Status = FsRtlCheckOplockEx(vp_oplock(vp), Irp, 0, ctx,
+		    ZfsOplockCreatePostBreak, NULL);
+
+		ExReleaseResourceLite(vp->FileHeader.Resource);
+
+		if (Status == STATUS_PENDING) {
+			IoMarkIrpPending(Irp);
+			return (STATUS_PENDING);
+		}
+
+		ExFreePoolWithTag(ctx, 'plkO');
+
+		if (!NT_SUCCESS(Status))
+			return (Status);
+	}
+
+
+	znode_t *zp = VTOZ(vp);
+
+	// ExAcquireResourceSharedLite(&zmo->tree_lock, true);
+	ExAcquireResourceExclusiveLite(vp->FileHeader.Resource, TRUE);
+
+	CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, &iosb);
+
+	if (!vnode_isreg(vp)) {
+		dprintf("FileObject did not point to a file\n");
+		Status = STATUS_INVALID_PARAMETER;
+		goto end;
+	}
+
+	/*
+	 * btrfs has this test, but MS "test.exe streams" tests that this
+	 * works, so we will leave it in.
+	 */
+#if 0
+	if (zp->z_pflags & ZFS_XATTR) {
+		dprintf("FileObject is stream\n");
+		Status = STATUS_INVALID_PARAMETER;
+		goto end;
+	}
+#endif
+
+	if ((uint64_t)fzdi->FileOffset.QuadPart >= zp->z_size) {
+		Status = STATUS_SUCCESS;
+		goto end;
+	}
+
+	Status = zfs_freesp(zp, fzdi->FileOffset.QuadPart,
+	    fzdi->BeyondFinalZero.QuadPart - fzdi->FileOffset.QuadPart,
+	    O_RDWR, TRUE);
+
+	CcPurgeCacheSection(FileObject->SectionObjectPointer,
+	    &fzdi->FileOffset,
+	    (ULONG)(fzdi->BeyondFinalZero.QuadPart - fzdi->FileOffset.QuadPart),
+	    FALSE);
+
+	Status = STATUS_SUCCESS;
+
+end:
+
+	ExReleaseResourceLite(vp->FileHeader.Resource);
+	// ExReleaseResourceLite(&Vcb->tree_lock);
+
+	return (Status);
+}
+
+NTSTATUS
+fsctl_get_retrieval_pointers(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp)
+{
+	STARTING_VCN_INPUT_BUFFER *in =
+	    IrpSp->Parameters.FileSystemControl.Type3InputBuffer;
+	ULONG inlen = IrpSp->Parameters.FileSystemControl.InputBufferLength;
+
+	RETRIEVAL_POINTERS_BUFFER *out = Irp->UserBuffer;
+	ULONG outlen = IrpSp->Parameters.FileSystemControl.OutputBufferLength;
+
+	PFILE_OBJECT FileObject = IrpSp->FileObject;
+	NTSTATUS Status;
+
+	if (!FileObject)
+		return (STATUS_INVALID_PARAMETER);
+
+	struct vnode *vp = FileObject->FsContext;
+
+	if (!vp)
+		return (STATUS_INVALID_PARAMETER);
+
+	if (inlen < sizeof (STARTING_VCN_INPUT_BUFFER) ||
+	    in->StartingVcn.QuadPart < 0)
+		return (STATUS_INVALID_PARAMETER);
+
+	if (!out)
+		return (STATUS_INVALID_PARAMETER);
+
+	if (outlen < offsetof(RETRIEVAL_POINTERS_BUFFER, Extents[0]))
+		return (STATUS_BUFFER_TOO_SMALL);
+
+	// Can we get away with this?
+	return (STATUS_NO_MORE_ENTRIES);
+}
+
+NTSTATUS
+volume_read(PDEVICE_OBJECT DeviceObject, PIRP Irp,
+    PIO_STACK_LOCATION IrpSp)
+{
+	dprintf("%s\n", __func__);
+
+	uint64_t bufferLength;
+	void *buffer;
+	bufferLength = IrpSp->Parameters.Read.Length;
+	LARGE_INTEGER offset = IrpSp->Parameters.Read.ByteOffset;
+	PMDL mdl = NULL;
+
+	if (offset.QuadPart < 0 || bufferLength == 0) {
+		Irp->IoStatus.Information = 0;
+		return (STATUS_INVALID_PARAMETER);
+	}
+
+	buffer = MapUserBuffer(Irp, IrpSp->Parameters.Read.Length,
+	    IoWriteAccess, &mdl);
+	if (buffer == NULL) {
+		Irp->IoStatus.Information = 0;
+		return (STATUS_INSUFFICIENT_RESOURCES);
+	}
+
+
+	memset(buffer, 0, bufferLength);
+
+	UnMapUserBuffer(mdl);
+
+	Irp->IoStatus.Information = bufferLength;
+	dprintf("%s exit (%lld bytes)\n", __func__, bufferLength);
 	return (STATUS_SUCCESS);
 }

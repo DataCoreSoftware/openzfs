@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -108,9 +109,9 @@
 
 #define	ZCP_NVLIST_MAX_DEPTH 20
 
-uint64_t zfs_lua_check_instrlimit_interval = 100;
-unsigned long zfs_lua_max_instrlimit = ZCP_MAX_INSTRLIMIT;
-unsigned long zfs_lua_max_memlimit = ZCP_MAX_MEMLIMIT;
+static const uint64_t zfs_lua_check_instrlimit_interval = 100;
+uint64_t zfs_lua_max_instrlimit = ZCP_MAX_INSTRLIMIT;
+uint64_t zfs_lua_max_memlimit = ZCP_MAX_MEMLIMIT;
 
 /*
  * Forward declarations for mutually recursive functions
@@ -544,7 +545,7 @@ zcp_nvpair_value_to_lua(lua_State *state, nvpair_t *pair,
 		    fnvpair_value_nvlist(pair), errbuf, errbuf_len);
 		break;
 	case DATA_TYPE_STRING_ARRAY: {
-		char **strarr;
+		const char **strarr;
 		uint_t nelem;
 		(void) nvpair_value_string_array(pair, &strarr, &nelem);
 		lua_newtable(state);
@@ -623,7 +624,7 @@ zcp_dataset_hold_error(lua_State *state, dsl_pool_t *dp, const char *dsname,
  */
 dsl_dataset_t *
 zcp_dataset_hold(lua_State *state, dsl_pool_t *dp, const char *dsname,
-    void *tag)
+    const void *tag)
 {
 	dsl_dataset_t *ds;
 	int error = dsl_dataset_hold(dp, dsname, tag, &ds);
@@ -632,11 +633,11 @@ zcp_dataset_hold(lua_State *state, dsl_pool_t *dp, const char *dsname,
 }
 
 static int zcp_debug(lua_State *);
-static zcp_lib_info_t zcp_debug_info = {
+static const zcp_lib_info_t zcp_debug_info = {
 	.name = "debug",
 	.func = zcp_debug,
 	.pargs = {
-	    { .za_name = "debug string", .za_lua_type = LUA_TSTRING},
+	    { .za_name = "debug string", .za_lua_type = LUA_TSTRING },
 	    {NULL, 0}
 	},
 	.kwargs = {
@@ -649,7 +650,7 @@ zcp_debug(lua_State *state)
 {
 	const char *dbgstring;
 	zcp_run_info_t *ri = zcp_run_info(state);
-	zcp_lib_info_t *libinfo = &zcp_debug_info;
+	const zcp_lib_info_t *libinfo = &zcp_debug_info;
 
 	zcp_parse_args(state, libinfo->name, libinfo->pargs, libinfo->kwargs);
 
@@ -662,11 +663,11 @@ zcp_debug(lua_State *state)
 }
 
 static int zcp_exists(lua_State *);
-static zcp_lib_info_t zcp_exists_info = {
+static const zcp_lib_info_t zcp_exists_info = {
 	.name = "exists",
 	.func = zcp_exists,
 	.pargs = {
-	    { .za_name = "dataset", .za_lua_type = LUA_TSTRING},
+	    { .za_name = "dataset", .za_lua_type = LUA_TSTRING },
 	    {NULL, 0}
 	},
 	.kwargs = {
@@ -679,7 +680,7 @@ zcp_exists(lua_State *state)
 {
 	zcp_run_info_t *ri = zcp_run_info(state);
 	dsl_pool_t *dp = ri->zri_pool;
-	zcp_lib_info_t *libinfo = &zcp_exists_info;
+	const zcp_lib_info_t *libinfo = &zcp_exists_info;
 
 	zcp_parse_args(state, libinfo->name, libinfo->pargs, libinfo->kwargs);
 
@@ -765,15 +766,15 @@ zcp_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 			return (NULL);
 		}
 		(void) memcpy(luabuf, ptr, osize);
-		VERIFY3P(zcp_lua_alloc(ud, ptr, osize, 0), ==, NULL);
+		VERIFY0P(zcp_lua_alloc(ud, ptr, osize, 0));
 		return (luabuf);
 	}
 }
 
-/* ARGSUSED */
 static void
 zcp_lua_counthook(lua_State *state, lua_Debug *ar)
 {
+	(void) ar;
 	lua_getfield(state, LUA_REGISTRYINDEX, ZCP_RUN_INFO_KEY);
 	zcp_run_info_t *ri = lua_touserdata(state, -1);
 
@@ -781,8 +782,7 @@ zcp_lua_counthook(lua_State *state, lua_Debug *ar)
 	 * Check if we were canceled while waiting for the
 	 * txg to sync or from our open context thread
 	 */
-	if (ri->zri_canceled ||
-	    (!ri->zri_sync && issig(JUSTLOOKING) && issig(FORREAL))) {
+	if (ri->zri_canceled || (!ri->zri_sync && issig())) {
 		ri->zri_canceled = B_TRUE;
 		(void) lua_pushstring(state, "Channel program was canceled.");
 		(void) lua_error(state);
@@ -959,26 +959,26 @@ zcp_eval_impl(dmu_tx_t *tx, zcp_run_info_t *ri)
 }
 
 static void
-zcp_pool_error(zcp_run_info_t *ri, const char *poolname)
+zcp_pool_error(zcp_run_info_t *ri, const char *poolname, int error)
 {
 	ri->zri_result = SET_ERROR(ECHRNG);
 	lua_settop(ri->zri_state, 0);
-	(void) lua_pushfstring(ri->zri_state, "Could not open pool: %s",
-	    poolname);
+	(void) lua_pushfstring(ri->zri_state, "Could not open pool: %s "
+	    "errno: %d", poolname, error);
 	zcp_convert_return_values(ri->zri_state, ri->zri_outnvl,
 	    ZCP_RET_ERROR, &ri->zri_result);
 
 }
 
 /*
- * This callback is called when txg_wait_synced_sig encountered a signal.
- * The txg_wait_synced_sig will continue to wait for the txg to complete
+ * This callback is called when txg_wait_synced_flags encountered a signal.
+ * The txg_wait_synced_flags will continue to wait for the txg to complete
  * after calling this callback.
  */
-/* ARGSUSED */
 static void
 zcp_eval_sig(void *arg, dmu_tx_t *tx)
 {
+	(void) tx;
 	zcp_run_info_t *ri = arg;
 
 	ri->zri_canceled = B_TRUE;
@@ -1014,7 +1014,7 @@ zcp_eval_open(zcp_run_info_t *ri, const char *poolname)
 
 	error = dsl_pool_hold(poolname, FTAG, &dp);
 	if (error != 0) {
-		zcp_pool_error(ri, poolname);
+		zcp_pool_error(ri, poolname, error);
 		return;
 	}
 
@@ -1143,12 +1143,14 @@ zcp_eval(const char *poolname, const char *program, boolean_t sync,
 	}
 	VERIFY3U(3, ==, lua_gettop(state));
 
+	cred_t *cr = CRED();
+	crhold(cr);
+
 	runinfo.zri_state = state;
 	runinfo.zri_allocargs = &allocargs;
 	runinfo.zri_outnvl = outnvl;
 	runinfo.zri_result = 0;
-	runinfo.zri_cred = CRED();
-	runinfo.zri_proc = curproc;
+	runinfo.zri_cred = cr;
 	runinfo.zri_timed_out = B_FALSE;
 	runinfo.zri_canceled = B_FALSE;
 	runinfo.zri_sync = sync;
@@ -1161,11 +1163,13 @@ zcp_eval(const char *poolname, const char *program, boolean_t sync,
 		err = dsl_sync_task_sig(poolname, NULL, zcp_eval_sync,
 		    zcp_eval_sig, &runinfo, 0, ZFS_SPACE_CHECK_ZCP_EVAL);
 		if (err != 0)
-			zcp_pool_error(&runinfo, poolname);
+			zcp_pool_error(&runinfo, poolname, err);
 	} else {
 		zcp_eval_open(&runinfo, poolname);
 	}
 	lua_close(state);
+
+	crfree(cr);
 
 	/*
 	 * Create device minor nodes for any new zvols.
@@ -1173,7 +1177,7 @@ zcp_eval(const char *poolname, const char *program, boolean_t sync,
 	for (nvpair_t *pair = nvlist_next_nvpair(runinfo.zri_new_zvols, NULL);
 	    pair != NULL;
 	    pair = nvlist_next_nvpair(runinfo.zri_new_zvols, pair)) {
-		zvol_create_minor(nvpair_name(pair));
+		zvol_create_minors(nvpair_name(pair));
 	}
 	fnvlist_free(runinfo.zri_new_zvols);
 
@@ -1445,10 +1449,8 @@ zcp_parse_args(lua_State *state, const char *fname, const zcp_arg_t *pargs,
 	}
 }
 
-/* BEGIN CSTYLED */
-ZFS_MODULE_PARAM(zfs_lua, zfs_lua_, max_instrlimit, ULONG, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs_lua, zfs_lua_, max_instrlimit, U64, ZMOD_RW,
 	"Max instruction limit that can be specified for a channel program");
 
-ZFS_MODULE_PARAM(zfs_lua, zfs_lua_, max_memlimit, ULONG, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs_lua, zfs_lua_, max_memlimit, U64, ZMOD_RW,
 	"Max memory limit that can be specified for a channel program");
-/* END CSTYLED */

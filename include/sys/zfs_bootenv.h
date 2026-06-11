@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * This file and its contents are supplied under the terms of the
  * Common Development and Distribution License ("CDDL"), version 1.0.
@@ -32,6 +33,7 @@ extern "C" {
 #define	BE_GRUB_VENDOR		"grub"
 #define	BE_LINUX_VENDOR		"linux"
 #define	BE_WINDOWS_VENDOR	"windows"
+#define	BE_POSIX_VENDOR		"posix"
 
 #include <sys/zfs_bootenv_os.h>
 

@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -52,7 +53,7 @@ LARGEFILE="$TESTDIR/largefile"
 
 # Reduce trim size to allow for tighter tolerance below when checking.
 typeset trim_extent_bytes_min=$(get_tunable TRIM_EXTENT_BYTES_MIN)
-log_must set_tunable64 TRIM_EXTENT_BYTES_MIN 4096
+log_must set_tunable64 TRIM_EXTENT_BYTES_MIN 512
 
 log_must mkdir "$TESTDIR"
 log_must truncate -s $LARGESIZE "$LARGEFILE"

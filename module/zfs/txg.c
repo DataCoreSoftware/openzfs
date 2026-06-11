@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -22,6 +23,7 @@
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Portions Copyright 2011 Martin Matuska
  * Copyright (c) 2012, 2019 by Delphix. All rights reserved.
+ * Copyright (c) 2025, Klara, Inc.
  */
 
 #include <sys/zfs_context.h>
@@ -34,7 +36,6 @@
 #include <sys/zil.h>
 #include <sys/callb.h>
 #include <sys/trace_zfs.h>
-#include<sys/kstat.h>
 
 /*
  * ZFS Transaction Groups
@@ -109,10 +110,16 @@
  * now transition to the syncing state.
  */
 
-static void txg_sync_thread(void *arg);
-static void txg_quiesce_thread(void *arg);
+static __attribute__((noreturn)) void txg_sync_thread(void *arg);
+static __attribute__((noreturn)) void txg_quiesce_thread(void *arg);
 
-int zfs_txg_timeout = 1;	/* max seconds worth of delta per txg */
+uint_t zfs_txg_timeout = 5; /* SSV-21953: default restored; ADC controller manages dirty ceiling instead */	/* max seconds worth of delta per txg */
+
+/*
+ * Prepare the txg subsystem.
+ */
+/* DataCore: Adaptive Dirty Ceiling (ADC) controller */
+/* TODO: integrate adc_update() call into txg_sync_thread() */
 
 #define DIRTY_FLOOR_BYTES       (153ULL << 20)
 kstat_t* dd_ksp;
@@ -422,7 +429,7 @@ txg_init(dsl_pool_t *dp, uint64_t txg)
 {
 	tx_state_t *tx = &dp->dp_tx;
 	int c;
-	bzero(tx, sizeof (tx_state_t));
+	memset(tx, 0, sizeof (tx_state_t));
 
 	tx->tx_cpu = vmem_zalloc(max_ncpus * sizeof (tx_cpu_t), KM_SLEEP);
 
@@ -487,7 +494,7 @@ txg_fini(dsl_pool_t *dp)
 
 	vmem_free(tx->tx_cpu, max_ncpus * sizeof (tx_cpu_t));
 
-	bzero(tx, sizeof (tx_state_t));
+	memset(tx, 0, sizeof (tx_state_t));
 }
 
 /*
@@ -514,9 +521,8 @@ txg_sync_start(dsl_pool_t *dp)
 	 * 32-bit x86.  This is due in part to nested pools and
 	 * scrub_visitbp() recursion.
 	 */
-
 	tx->tx_sync_thread = thread_create(NULL, 0, txg_sync_thread,
-	    dp, 0, &p0, TS_RUN, maxclsyspri);
+	    dp, 0, &p0, TS_RUN, defclsyspri);
 
 	mutex_exit(&tx->tx_sync_lock);
 }
@@ -731,7 +737,7 @@ txg_quiesce(dsl_pool_t *dp, uint64_t txg)
 }
 
 static void
-txg_do_callbacks(list_t *cb_list)
+txg_do_callbacks(void *cb_list)
 {
 	dmu_tx_do_callbacks(cb_list, 0);
 
@@ -781,7 +787,7 @@ txg_dispatch_callbacks(dsl_pool_t *dp, uint64_t txg)
 
 		list_move_tail(cb_list, &tc->tc_callbacks[g]);
 
-		(void) taskq_dispatch(tx->tx_commit_cb_taskq, (task_func_t *)
+		(void) taskq_dispatch(tx->tx_commit_cb_taskq,
 		    txg_do_callbacks, cb_list, TQ_SLEEP);
 	}
 }
@@ -801,14 +807,6 @@ txg_wait_callbacks(dsl_pool_t *dp)
 }
 
 static boolean_t
-txg_is_syncing(dsl_pool_t *dp)
-{
-	tx_state_t *tx = &dp->dp_tx;
-	ASSERT(MUTEX_HELD(&tx->tx_sync_lock));
-	return (tx->tx_syncing_txg != 0);
-}
-
-static boolean_t
 txg_is_quiescing(dsl_pool_t *dp)
 {
 	tx_state_t *tx = &dp->dp_tx;
@@ -824,7 +822,7 @@ txg_has_quiesced_to_sync(dsl_pool_t *dp)
 	return (tx->tx_quiesced_txg != 0);
 }
 
-static void
+static __attribute__((noreturn)) void
 txg_sync_thread(void *arg)
 {
 	dsl_pool_t *dp = arg;
@@ -832,29 +830,15 @@ txg_sync_thread(void *arg)
 	tx_state_t *tx = &dp->dp_tx;
 	callb_cpr_t cpr;
 	clock_t start, delta;
-	/* ADC: declare controller state — stack allocated,
-	* zero overhead when zfs_adc_enable == 0           */
-	txg_adc_t    adc;
 
 	(void) spl_fstrans_mark();
 	txg_thread_enter(tx, &cpr);
 
 	start = delta = 0;
-	/* ADC: compute target once; recomputed if timeout changes.
-	* target = zfs_txg_timeout × target_pct / 100            */
-	clock_t adc_target = (clock_t)(zfs_txg_timeout * hz)
-	    * zfs_adc_target_sync_pct / 100;
-
-	/* ADC: initialize controller — seeds EMA, computes bounds */
-	if (zfs_adc_enable)
-	    adc_init(&adc, adc_target);
-
 	for (;;) {
 		clock_t timeout = zfs_txg_timeout * hz;
 		clock_t timer;
 		uint64_t txg;
-		uint64_t dirty_min_bytes =
-		    zfs_dirty_data_max * zfs_dirty_data_sync_percent / 100;
 
 		/*
 		 * We sync when we're scanning, there's someone waiting
@@ -865,33 +849,44 @@ txg_sync_thread(void *arg)
 		while (!dsl_scan_active(dp->dp_scan) &&
 		    !tx->tx_exiting && timer > 0 &&
 		    tx->tx_synced_txg >= tx->tx_sync_txg_waiting &&
-		    !txg_has_quiesced_to_sync(dp) &&
-		    dp->dp_dirty_total < dirty_min_bytes) {
+		    !txg_has_quiesced_to_sync(dp)) {
+#ifndef _WIN32
 			dprintf("waiting; tx_synced=%llu waiting=%llu dp=%p\n",
 			    (u_longlong_t)tx->tx_synced_txg,
 			    (u_longlong_t)tx->tx_sync_txg_waiting, dp);
+#endif
 			txg_thread_wait(tx, &cpr, &tx->tx_sync_more_cv, timer);
 			delta = ddi_get_lbolt() - start;
 			timer = (delta > timeout ? 0 : timeout - delta);
 		}
 
 		/*
+		 * When we're suspended, nothing should be changing and for
+		 * MMP we don't want to bump anything that would make it
+		 * harder to detect if another host is changing it when
+		 * resuming after a MMP suspend.
+		 */
+		if (spa_suspended(spa))
+			continue;
+
+		/*
 		 * Wait until the quiesce thread hands off a txg to us,
 		 * prompting it to do so if necessary.
 		 */
 		while (!tx->tx_exiting && !txg_has_quiesced_to_sync(dp)) {
+			if (txg_is_quiescing(dp)) {
+				txg_thread_wait(tx, &cpr,
+				    &tx->tx_quiesce_done_cv, 0);
+				continue;
+			}
 			if (tx->tx_quiesce_txg_waiting < tx->tx_open_txg+1)
 				tx->tx_quiesce_txg_waiting = tx->tx_open_txg+1;
 			cv_broadcast(&tx->tx_quiesce_more_cv);
 			txg_thread_wait(tx, &cpr, &tx->tx_quiesce_done_cv, 0);
 		}
 
-		if (tx->tx_exiting) {
-		    /* ADC: clean up kstat before thread exits */
-		    if (zfs_adc_enable)
-			adc_fini();
-		    txg_thread_exit(tx, &cpr, &tx->tx_sync_thread);
-		}
+		if (tx->tx_exiting)
+			txg_thread_exit(tx, &cpr, &tx->tx_sync_thread);
 
 		/*
 		 * Consume the quiesced txg which has been handed off to
@@ -911,23 +906,10 @@ txg_sync_thread(void *arg)
 		mutex_exit(&tx->tx_sync_lock);
 
 		txg_stat_t *ts = spa_txg_history_init_io(spa, txg, dp);
-		uint64_t dirty_flushed = spa->spa_dsl_pool->dp_dirty_pertxg[txg & TXG_MASK];
-		uint64_t total_dirty = dp->dp_dirty_total;
 		start = ddi_get_lbolt();
 		spa_sync(spa, txg);
 		delta = ddi_get_lbolt() - start;
 		spa_txg_history_fini_io(spa, ts);
-
-		/*    ADC: feed measured delta into controller.
-		 *    This is the ONLY net-new call in the hot path.
-		 *    adc_update() is O(1), no allocation, no lock.	     
-		 *    Recompute target here to pick up runtime tunable changes
-		 *    (operator can adjust zfs_txg_timeout or target_pct live).  */
-		if (zfs_adc_enable) {
-		    adc_target = (clock_t)(zfs_txg_timeout * hz)
-			* zfs_adc_target_sync_pct / 100;
-		    adc_update(&adc, txg, delta, adc_target, dirty_flushed, total_dirty);
-		}
 
 		mutex_enter(&tx->tx_sync_lock);
 		tx->tx_synced_txg = txg;
@@ -942,7 +924,7 @@ txg_sync_thread(void *arg)
 	}
 }
 
-static void
+static __attribute__((noreturn)) void
 txg_quiesce_thread(void *arg)
 {
 	dsl_pool_t *dp = arg;
@@ -1026,11 +1008,13 @@ txg_delay(dsl_pool_t *dp, uint64_t txg, hrtime_t delay, hrtime_t resolution)
 	mutex_exit(&tx->tx_sync_lock);
 }
 
-static boolean_t
-txg_wait_synced_impl(dsl_pool_t *dp, uint64_t txg, boolean_t wait_sig)
+int
+txg_wait_synced_flags(dsl_pool_t *dp, uint64_t txg, txg_wait_flag_t flags)
 {
+	int error = 0;
 	tx_state_t *tx = &dp->dp_tx;
 
+	ASSERT0(flags & ~(TXG_WAIT_SIGNAL | TXG_WAIT_SUSPEND));
 	ASSERT(!dsl_pool_config_held(dp));
 
 	mutex_enter(&tx->tx_sync_lock);
@@ -1042,13 +1026,28 @@ txg_wait_synced_impl(dsl_pool_t *dp, uint64_t txg, boolean_t wait_sig)
 	dprintf("txg=%llu quiesce_txg=%llu sync_txg=%llu\n",
 	    (u_longlong_t)txg, (u_longlong_t)tx->tx_quiesce_txg_waiting,
 	    (u_longlong_t)tx->tx_sync_txg_waiting);
+
+	/*
+	 * Keep pushing util the pool gets to the wanted txg. If something
+	 * else interesting happens, we'll set an error and break out.
+	 */
 	while (tx->tx_synced_txg < txg) {
+		if ((flags & TXG_WAIT_SUSPEND) && spa_suspended(dp->dp_spa)) {
+			/*
+			 * Pool suspended and the caller does not want to
+			 * block; inform them immediately.
+			 */
+			error = SET_ERROR(ESHUTDOWN);
+			break;
+		}
+
 		dprintf("broadcasting sync more "
 		    "tx_synced=%llu waiting=%llu dp=%px\n",
 		    (u_longlong_t)tx->tx_synced_txg,
 		    (u_longlong_t)tx->tx_sync_txg_waiting, dp);
 		cv_broadcast(&tx->tx_sync_more_cv);
-		if (wait_sig) {
+
+		if (flags & TXG_WAIT_SIGNAL) {
 			/*
 			 * Condition wait here but stop if the thread receives a
 			 * signal. The caller may call txg_wait_synced*() again
@@ -1056,31 +1055,32 @@ txg_wait_synced_impl(dsl_pool_t *dp, uint64_t txg, boolean_t wait_sig)
 			 */
 			if (cv_wait_io_sig(&tx->tx_sync_done_cv,
 			    &tx->tx_sync_lock) == 0) {
-				mutex_exit(&tx->tx_sync_lock);
-				return (B_TRUE);
+				error = SET_ERROR(EINTR);
+				break;
 			}
 		} else {
+			/* Uninterruptable wait, until the condvar fires */
 			cv_wait_io(&tx->tx_sync_done_cv, &tx->tx_sync_lock);
 		}
 	}
+
 	mutex_exit(&tx->tx_sync_lock);
-	return (B_FALSE);
+	return (error);
 }
 
 void
 txg_wait_synced(dsl_pool_t *dp, uint64_t txg)
 {
-	VERIFY0(txg_wait_synced_impl(dp, txg, B_FALSE));
+	VERIFY0(txg_wait_synced_flags(dp, txg, TXG_WAIT_NONE));
 }
 
-/*
- * Similar to a txg_wait_synced but it can be interrupted from a signal.
- * Returns B_TRUE if the thread was signaled while waiting.
- */
-boolean_t
-txg_wait_synced_sig(dsl_pool_t *dp, uint64_t txg)
+void
+txg_wait_kick(dsl_pool_t *dp)
 {
-	return (txg_wait_synced_impl(dp, txg, B_TRUE));
+	tx_state_t *tx = &dp->dp_tx;
+	mutex_enter(&tx->tx_sync_lock);
+	cv_broadcast(&tx->tx_sync_done_cv);
+	mutex_exit(&tx->tx_sync_lock);
 }
 
 /*
@@ -1122,24 +1122,22 @@ txg_wait_open(dsl_pool_t *dp, uint64_t txg, boolean_t should_quiesce)
 }
 
 /*
- * If there isn't a txg syncing or in the pipeline, push another txg through
- * the pipeline by quiescing the open txg.
+ * Pass in the txg number that should be synced.
  */
 void
-txg_kick(dsl_pool_t *dp)
+txg_kick(dsl_pool_t *dp, uint64_t txg)
 {
 	tx_state_t *tx = &dp->dp_tx;
 
 	ASSERT(!dsl_pool_config_held(dp));
 
+	if (tx->tx_sync_txg_waiting >= txg)
+		return;
+
 	mutex_enter(&tx->tx_sync_lock);
-	if (!txg_is_syncing(dp) &&
-	    !txg_is_quiescing(dp) &&
-	    tx->tx_quiesce_txg_waiting <= tx->tx_open_txg &&
-	    tx->tx_sync_txg_waiting <= tx->tx_synced_txg &&
-	    tx->tx_quiesced_txg <= tx->tx_synced_txg) {
-		tx->tx_quiesce_txg_waiting = tx->tx_open_txg + 1;
-		cv_broadcast(&tx->tx_quiesce_more_cv);
+	if (tx->tx_sync_txg_waiting < txg) {
+		tx->tx_sync_txg_waiting = txg;
+		cv_broadcast(&tx->tx_sync_more_cv);
 	}
 	mutex_exit(&tx->tx_sync_lock);
 }
@@ -1234,15 +1232,10 @@ txg_list_destroy(txg_list_t *tl)
 boolean_t
 txg_all_lists_empty(txg_list_t *tl)
 {
-	mutex_enter(&tl->tl_lock);
-	for (int i = 0; i < TXG_SIZE; i++) {
-		if (!txg_list_empty_impl(tl, i)) {
-			mutex_exit(&tl->tl_lock);
-			return (B_FALSE);
-		}
-	}
-	mutex_exit(&tl->tl_lock);
-	return (B_TRUE);
+	boolean_t res = B_TRUE;
+	for (int i = 0; i < TXG_SIZE; i++)
+		res &= (tl->tl_head[i] == NULL);
+	return (res);
 }
 
 /*
@@ -1408,7 +1401,5 @@ EXPORT_SYMBOL(txg_wait_callbacks);
 EXPORT_SYMBOL(txg_stalled);
 EXPORT_SYMBOL(txg_sync_waiting);
 
-/* BEGIN CSTYLED */
-ZFS_MODULE_PARAM(zfs_txg, zfs_txg_, timeout, INT, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs_txg, zfs_txg_, timeout, UINT, ZMOD_RW,
 	"Max seconds worth of delta per txg");
-/* END CSTYLED */

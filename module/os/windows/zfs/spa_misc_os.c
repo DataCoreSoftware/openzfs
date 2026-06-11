@@ -42,6 +42,7 @@
 #include <sys/fs/zfs.h>
 #include <sys/kstat.h>
 #include <sys/zfs_vfsops.h>
+#include <sys/zfs_vss.h>
 
 #include "zfs_prop.h"
 
@@ -55,23 +56,25 @@ spa_history_zone(void)
 }
 
 void
-spa_create_os(void *arg)
+spa_import_os(spa_t *spa)
 {
+	zfs_vss_pool_add(spa);
 }
 
 void
-spa_export_os(void *arg)
+spa_export_os(spa_t *spa)
 {
+	zfs_vss_pool_remove(spa);
 }
 
 void
-spa_activate_os(void *arg)
+spa_activate_os(spa_t *arg)
 {
 	atomic_inc_64(&zfs_module_busy);
 }
 
 void
-spa_deactivate_os(void *arg)
+spa_deactivate_os(spa_t *arg)
 {
 	atomic_dec_64(&zfs_module_busy);
 }

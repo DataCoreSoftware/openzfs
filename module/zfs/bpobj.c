@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -156,11 +157,11 @@ bpobj_open(bpobj_t *bpo, objset_t *os, uint64_t object)
 	if (err)
 		return (err);
 
-	bzero(bpo, sizeof (*bpo));
+	memset(bpo, 0, sizeof (*bpo));
 	mutex_init(&bpo->bpo_lock, NULL, MUTEX_DEFAULT, NULL);
 
-	ASSERT(bpo->bpo_dbuf == NULL);
-	ASSERT(bpo->bpo_phys == NULL);
+	ASSERT0P(bpo->bpo_dbuf);
+	ASSERT0P(bpo->bpo_phys);
 	ASSERT(object != 0);
 	ASSERT3U(doi.doi_type, ==, DMU_OT_BPOBJ);
 	ASSERT3U(doi.doi_bonus_type, ==, DMU_OT_BPOBJ_HDR);
@@ -284,7 +285,17 @@ bpobj_iterate_blkptrs(bpobj_info_t *bpi, bpobj_itor_t func, void *arg,
 	dmu_buf_t *dbuf = NULL;
 	bpobj_t *bpo = bpi->bpi_bpo;
 
-	for (int64_t i = bpo->bpo_phys->bpo_num_blkptrs - 1; i >= start; i--) {
+	int64_t i = bpo->bpo_phys->bpo_num_blkptrs - 1;
+	uint64_t pe = P2ALIGN_TYPED(i, bpo->bpo_epb, uint64_t) *
+	    sizeof (blkptr_t);
+	uint64_t ps = start * sizeof (blkptr_t);
+	uint64_t pb = MAX((pe > dmu_prefetch_max) ? pe - dmu_prefetch_max : 0,
+	    ps);
+	if (pe > pb) {
+		dmu_prefetch(bpo->bpo_os, bpo->bpo_object, 0, pb, pe - pb,
+		    ZIO_PRIORITY_ASYNC_READ);
+	}
+	for (; i >= start; i--) {
 		uint64_t offset = i * sizeof (blkptr_t);
 		uint64_t blkoff = P2PHASE(i, bpo->bpo_epb);
 
@@ -292,9 +303,16 @@ bpobj_iterate_blkptrs(bpobj_info_t *bpi, bpobj_itor_t func, void *arg,
 			if (dbuf)
 				dmu_buf_rele(dbuf, FTAG);
 			err = dmu_buf_hold(bpo->bpo_os, bpo->bpo_object,
-			    offset, FTAG, &dbuf, 0);
+			    offset, FTAG, &dbuf, DMU_READ_NO_PREFETCH);
 			if (err)
 				break;
+			pe = pb;
+			pb = MAX((dbuf->db_offset > dmu_prefetch_max) ?
+			    dbuf->db_offset - dmu_prefetch_max : 0, ps);
+			if (pe > pb) {
+				dmu_prefetch(bpo->bpo_os, bpo->bpo_object, 0,
+				    pb, pe - pb, ZIO_PRIORITY_ASYNC_READ);
+			}
 		}
 
 		ASSERT3U(offset, >=, dbuf->db_offset);
@@ -460,28 +478,36 @@ bpobj_iterate_impl(bpobj_t *initial_bpo, bpobj_itor_t func, void *arg,
 			 * We have unprocessed subobjs. Process the next one.
 			 */
 			ASSERT(bpo->bpo_havecomp);
-			ASSERT3P(bpobj_size, ==, NULL);
+			ASSERT0P(bpobj_size);
 
 			/* Add the last subobj to stack. */
 			int64_t i = bpi->bpi_unprocessed_subobjs - 1;
 			uint64_t offset = i * sizeof (uint64_t);
 
-			uint64_t obj_from_sublist;
+			uint64_t subobj;
 			err = dmu_read(bpo->bpo_os, bpo->bpo_phys->bpo_subobjs,
-			    offset, sizeof (uint64_t), &obj_from_sublist,
-			    DMU_READ_PREFETCH);
+			    offset, sizeof (uint64_t), &subobj,
+			    DMU_READ_NO_PREFETCH);
 			if (err)
 				break;
-			bpobj_t *sublist = kmem_alloc(sizeof (bpobj_t),
+
+			bpobj_t *subbpo = kmem_alloc(sizeof (bpobj_t),
 			    KM_SLEEP);
-
-			err = bpobj_open(sublist, bpo->bpo_os,
-			    obj_from_sublist);
-			if (err)
+			err = bpobj_open(subbpo, bpo->bpo_os, subobj);
+			if (err) {
+				kmem_free(subbpo, sizeof (bpobj_t));
 				break;
+			}
 
-			list_insert_head(&stack, bpi_alloc(sublist, bpi, i));
-			mutex_enter(&sublist->bpo_lock);
+			if (subbpo->bpo_havesubobj &&
+			    subbpo->bpo_phys->bpo_subobjs != 0) {
+				dmu_prefetch(subbpo->bpo_os,
+				    subbpo->bpo_phys->bpo_subobjs, 0, 0, 0,
+				    ZIO_PRIORITY_ASYNC_READ);
+			}
+
+			list_insert_head(&stack, bpi_alloc(subbpo, bpi, i));
+			mutex_enter(&subbpo->bpo_lock);
 			bpi->bpi_unprocessed_subobjs--;
 		}
 	}
@@ -663,14 +689,13 @@ bpobj_enqueue_subobj(bpobj_t *bpo, uint64_t subobj, dmu_tx_t *tx)
 	}
 
 	VERIFY3U(0, ==, bpobj_open(&subbpo, bpo->bpo_os, subobj));
-	VERIFY3U(0, ==, bpobj_space(&subbpo, &used, &comp, &uncomp));
-
 	if (bpobj_is_empty(&subbpo)) {
 		/* No point in having an empty subobj. */
 		bpobj_close(&subbpo);
 		bpobj_free(bpo->bpo_os, subobj, tx);
 		return;
 	}
+	VERIFY3U(0, ==, bpobj_space(&subbpo, &used, &comp, &uncomp));
 
 	mutex_enter(&bpo->bpo_lock);
 	dmu_buf_will_dirty(bpo->bpo_dbuf, tx);
@@ -727,7 +752,8 @@ bpobj_enqueue_subobj(bpobj_t *bpo, uint64_t subobj, dmu_tx_t *tx)
 		}
 		dmu_write(bpo->bpo_os, bpo->bpo_phys->bpo_subobjs,
 		    bpo->bpo_phys->bpo_num_subobjs * sizeof (subobj),
-		    numsubsub * sizeof (subobj), subdb->db_data, tx);
+		    numsubsub * sizeof (subobj), subdb->db_data, tx,
+		    DMU_READ_NO_PREFETCH);
 		dmu_buf_rele(subdb, FTAG);
 		bpo->bpo_phys->bpo_num_subobjs += numsubsub;
 
@@ -752,7 +778,7 @@ bpobj_enqueue_subobj(bpobj_t *bpo, uint64_t subobj, dmu_tx_t *tx)
 		dmu_write(bpo->bpo_os, bpo->bpo_object,
 		    bpo->bpo_phys->bpo_num_blkptrs * sizeof (blkptr_t),
 		    numbps * sizeof (blkptr_t),
-		    bps->db_data, tx);
+		    bps->db_data, tx, DMU_READ_NO_PREFETCH);
 		dmu_buf_rele(bps, FTAG);
 		bpo->bpo_phys->bpo_num_blkptrs += numbps;
 
@@ -769,7 +795,7 @@ bpobj_enqueue_subobj(bpobj_t *bpo, uint64_t subobj, dmu_tx_t *tx)
 
 		dmu_write(bpo->bpo_os, bpo->bpo_phys->bpo_subobjs,
 		    bpo->bpo_phys->bpo_num_subobjs * sizeof (subobj),
-		    sizeof (subobj), &subobj, tx);
+		    sizeof (subobj), &subobj, tx, DMU_READ_NO_PREFETCH);
 		bpo->bpo_phys->bpo_num_subobjs++;
 	}
 
@@ -778,6 +804,68 @@ bpobj_enqueue_subobj(bpobj_t *bpo, uint64_t subobj, dmu_tx_t *tx)
 	bpo->bpo_phys->bpo_uncomp += uncomp;
 	mutex_exit(&bpo->bpo_lock);
 
+}
+
+/*
+ * Prefetch metadata required for bpobj_enqueue_subobj().
+ */
+void
+bpobj_prefetch_subobj(bpobj_t *bpo, uint64_t subobj)
+{
+	dmu_object_info_t doi;
+	bpobj_t subbpo;
+	uint64_t subsubobjs;
+	boolean_t copy_subsub = B_TRUE;
+	boolean_t copy_bps = B_TRUE;
+
+	ASSERT(bpobj_is_open(bpo));
+	ASSERT(subobj != 0);
+
+	if (subobj == dmu_objset_pool(bpo->bpo_os)->dp_empty_bpobj)
+		return;
+
+	if (bpobj_open(&subbpo, bpo->bpo_os, subobj) != 0)
+		return;
+	if (bpobj_is_empty(&subbpo)) {
+		bpobj_close(&subbpo);
+		return;
+	}
+	subsubobjs = subbpo.bpo_phys->bpo_subobjs;
+	bpobj_close(&subbpo);
+
+	if (subsubobjs != 0) {
+		if (dmu_object_info(bpo->bpo_os, subsubobjs, &doi) != 0)
+			return;
+		if (doi.doi_max_offset > doi.doi_data_block_size)
+			copy_subsub = B_FALSE;
+	}
+
+	if (dmu_object_info(bpo->bpo_os, subobj, &doi) != 0)
+		return;
+	if (doi.doi_max_offset > doi.doi_data_block_size || !copy_subsub)
+		copy_bps = B_FALSE;
+
+	if (copy_subsub && subsubobjs != 0) {
+		if (bpo->bpo_phys->bpo_subobjs) {
+			dmu_prefetch(bpo->bpo_os, bpo->bpo_phys->bpo_subobjs, 0,
+			    bpo->bpo_phys->bpo_num_subobjs * sizeof (subobj), 1,
+			    ZIO_PRIORITY_ASYNC_READ);
+		}
+		dmu_prefetch(bpo->bpo_os, subsubobjs, 0, 0, 1,
+		    ZIO_PRIORITY_ASYNC_READ);
+	}
+
+	if (copy_bps) {
+		dmu_prefetch(bpo->bpo_os, bpo->bpo_object, 0,
+		    bpo->bpo_phys->bpo_num_blkptrs * sizeof (blkptr_t), 1,
+		    ZIO_PRIORITY_ASYNC_READ);
+		dmu_prefetch(bpo->bpo_os, subobj, 0, 0, 1,
+		    ZIO_PRIORITY_ASYNC_READ);
+	} else if (bpo->bpo_phys->bpo_subobjs) {
+		dmu_prefetch(bpo->bpo_os, bpo->bpo_phys->bpo_subobjs, 0,
+		    bpo->bpo_phys->bpo_num_subobjs * sizeof (subobj), 1,
+		    ZIO_PRIORITY_ASYNC_READ);
+	}
 }
 
 void
@@ -805,12 +893,12 @@ bpobj_enqueue(bpobj_t *bpo, const blkptr_t *bp, boolean_t bp_freed,
 		 * set of BP's stored, and bpobj_iterate() wouldn't visit
 		 * all the space accounted for in the bpobj.
 		 */
-		bzero(&stored_bp, sizeof (stored_bp));
+		memset(&stored_bp, 0, sizeof (stored_bp));
 		stored_bp.blk_prop = bp->blk_prop;
-		stored_bp.blk_birth = bp->blk_birth;
+		BP_SET_LOGICAL_BIRTH(&stored_bp, BP_GET_LOGICAL_BIRTH(bp));
 	} else if (!BP_GET_DEDUP(bp)) {
 		/* The bpobj will compress better without the checksum */
-		bzero(&stored_bp.blk_cksum, sizeof (stored_bp.blk_cksum));
+		memset(&stored_bp.blk_cksum, 0, sizeof (stored_bp.blk_cksum));
 	}
 
 	stored_bp.blk_fill = 0;
@@ -861,13 +949,14 @@ struct space_range_arg {
 	uint64_t uncomp;
 };
 
-/* ARGSUSED */
 static int
 space_range_cb(void *arg, const blkptr_t *bp, boolean_t bp_freed, dmu_tx_t *tx)
 {
+	(void) bp_freed, (void) tx;
 	struct space_range_arg *sra = arg;
 
-	if (bp->blk_birth > sra->mintxg && bp->blk_birth <= sra->maxtxg) {
+	if (BP_GET_BIRTH(bp) > sra->mintxg &&
+	    BP_GET_BIRTH(bp) <= sra->maxtxg) {
 		if (dsl_pool_sync_context(spa_get_dsl(sra->spa)))
 			sra->used += bp_get_dsize_sync(sra->spa, bp);
 		else
@@ -899,7 +988,7 @@ bpobj_space(bpobj_t *bpo, uint64_t *usedp, uint64_t *compp, uint64_t *uncompp)
 
 /*
  * Return the amount of space in the bpobj which is:
- * mintxg < blk_birth <= maxtxg
+ * mintxg < logical birth <= maxtxg
  */
 int
 bpobj_space_range(bpobj_t *bpo, uint64_t mintxg, uint64_t maxtxg,
@@ -933,11 +1022,11 @@ bpobj_space_range(bpobj_t *bpo, uint64_t mintxg, uint64_t maxtxg,
  * bpobj are designated as free or allocated that information is not preserved
  * in bplists.
  */
-/* ARGSUSED */
 int
 bplist_append_cb(void *arg, const blkptr_t *bp, boolean_t bp_freed,
     dmu_tx_t *tx)
 {
+	(void) bp_freed, (void) tx;
 	bplist_t *bpl = arg;
 	bplist_append(bpl, bp);
 	return (0);

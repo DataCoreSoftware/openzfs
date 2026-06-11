@@ -33,11 +33,17 @@
 #ifndef _LIBSPL_SYS_W32_TYPES_H
 #define	_LIBSPL_SYS_W32_TYPES_H
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 #include <sys/types32.h>
 
 /* More #includes at end - after basic types */
 
+#ifndef  __cplusplus
 typedef enum boolean bool_t;
+#endif
 
 typedef unsigned char	uchar_t;
 typedef unsigned short	ushort_t;
@@ -65,6 +71,7 @@ typedef struct timespec	timestruc_t;
 typedef struct timespec timespec_t;
 
 typedef short		pri_t;
+typedef int32_t		clockid_t;
 
 
 
@@ -103,10 +110,6 @@ typedef int64_t ssize_t;
 // #define	MAXPATHLEN MAX_PATH
 #define	MAXPATHLEN 1024
 #define	PATH_MAX MAX_PATH
-
-typedef struct timespec			timestruc_t; /* definition per SVr4 */
-typedef struct timespec			timespec_t;
-
 
 /*
  * Definitions remaining from previous partial support for 64-bit file
@@ -163,14 +166,8 @@ typedef union {
 #define	STDIN_FILENO  HTOI(GetStdHandle(STD_INPUT_HANDLE))
 #define	STDOUT_FILENO HTOI(GetStdHandle(STD_OUTPUT_HANDLE))
 #define	STDERR_FILENO HTOI(GetStdHandle(STD_ERROR_HANDLE))
-#define	O_EXLOCK 0
-
-#define	bzero(b, len) (memset((b), '\0', (len)))
-#define	bcopy(b1, b2, len) (memmove((b2), (b1), (len)))
-#define	bcmp(b1, b2, len) (memcmp((b2), (b1), (len)))
 
 #define	alloca _alloca
-#define	posix_memalign_free _aligned_free
 int posix_memalign(void **memptr, size_t alignment, size_t size);
 
 #ifndef MIN
@@ -211,7 +208,6 @@ int nanosleep(const struct timespec *rqtp, struct timespec *rmtp);
 #include_next <sys/types.h>
 
 #include <sys/param.h> /* for NBBY */
-#include <sys/va_list.h>
 #include <sys/timer.h>
 
 #include <stdint.h>
@@ -226,6 +222,10 @@ typedef uint64_t zoff_t;
 /* Now replace POSIX calls with our versions. */
 #ifndef NOWOSIXYET
 #include <wosix.h>
+#endif
+
+#ifdef  __cplusplus
+}
 #endif
 
 #endif

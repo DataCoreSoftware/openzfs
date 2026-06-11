@@ -188,7 +188,7 @@ extern void (**_pthread_key_dest)(void *);
 
 #define	pthread_cleanup_push(F, A)\
 {\
-	const _pthread_cleanup _pthread_cup = {(F), (A), \
+	const _pthread_cleanup _pthread_cup = {(void (*)(void *))(F), (A), \
 	    pthread_self()->clean};	\
 	_ReadWriteBarrier();\
 	pthread_self()->clean = (_pthread_cleanup *) &_pthread_cup;\
@@ -557,11 +557,23 @@ static int pthread_set_concurrency(int val)
 	return (0);
 }
 
+static int pthread_getname_np(pthread_t tid, char *name, size_t size)
+{
+	*name = 0;
+	return (0);
+}
+
+static int pthread_setname_np(pthread_t tid, const char *name)
+{
+	return (0);
+}
+
 #define	pthread_getschedparam(T, P, S) ENOTSUP
 #define	pthread_setschedparam(T, P, S) ENOTSUP
 #define	pthread_getcpuclockid(T, C) ENOTSUP
 
-static int pthread_exit(void *res)
+__declspec(noreturn) static int
+pthread_exit(void *res)
 {
 	pthread_t t = pthread_self();
 
@@ -613,8 +625,10 @@ static int pthread_cancel(pthread_t t)
 
 		SuspendThread(t->h);
 		GetThreadContext(t->h, &ctxt);
-#ifdef _M_X64
+#if defined(_M_X64)
 		ctxt.Rip = (uintptr_t)_pthread_invoke_cancel;
+#elif defined(_M_ARM64)
+		ctxt.Pc = (uintptr_t)_pthread_invoke_cancel;
 #else
 		ctxt.Eip = (uintptr_t)_pthread_invoke_cancel;
 #endif
@@ -741,7 +755,7 @@ static int pthread_attr_setstack(pthread_attr_t *attr, void *stack, size_t size)
 }
 
 #define	pthread_attr_getguardsize(A, S) ENOTSUP
-#define	pthread_attr_setguardsize(A, S) ENOTSUP
+#define	pthread_attr_setguardsize(A, S) 0
 #define	pthread_attr_getschedparam(A, S) ENOTSUP
 #define	pthread_attr_setschedparam(A, S) ENOTSUP
 #define	pthread_attr_getschedpolicy(A, S) ENOTSUP

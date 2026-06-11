@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC2154
 #
 # Track changes to enumerated pools for use in early-boot
 set -ef
@@ -20,6 +21,7 @@ zed_check_cmd "${ZFS}" sort diff
 
 # We lock the output file to avoid simultaneous writes.
 # If we run into trouble, log and drop the lock
+# shellcheck disable=SC2329
 abort_alter() {
   zed_log_msg "Error updating zfs-list.cache for ${ZEVENT_POOL}!"
   zed_unlock "${FSLIST}"
@@ -72,7 +74,7 @@ PROPS="name,mountpoint,canmount,atime,relatime,devices,exec\
 ,org.openzfs.systemd:wanted-by,org.openzfs.systemd:required-by\
 ,org.openzfs.systemd:nofail,org.openzfs.systemd:ignore"
 
-"${ZFS}" list -H -t filesystem -o $PROPS -r "${ZEVENT_POOL}" > "${FSLIST_TMP}"
+"${ZFS}" list -H -t filesystem -o "${PROPS}" -r "${ZEVENT_POOL}" > "${FSLIST_TMP}"
 
 # Sort the output so that it is stable
 sort "${FSLIST_TMP}" -o "${FSLIST_TMP}"

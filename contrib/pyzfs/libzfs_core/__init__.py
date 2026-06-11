@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 #
 # Copyright 2015 ClusterHQ
 #
@@ -72,6 +73,7 @@ from ._libzfs_core import (
     lzc_receive_resumable,
     lzc_receive_with_cmdprops,
     lzc_receive_with_header,
+    lzc_receive_with_heal,
     lzc_release,
     lzc_reopen,
     lzc_rollback,
@@ -127,6 +129,7 @@ __all__ = [
     'lzc_receive_resumable',
     'lzc_receive_with_cmdprops',
     'lzc_receive_with_header',
+    'lzc_receive_with_heal',
     'lzc_release',
     'lzc_reopen',
     'lzc_rollback',

@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -86,7 +87,8 @@ set -A perms	create		true		false	\
 		clone		true		true	\
 		promote		true		true	\
 		xattr		true		false	\
-		receive		true		false
+		receive		true		false	\
+		receive:append	true		false
 
 elif is_freebsd; then
 #				Results in	Results in
@@ -126,6 +128,7 @@ set -A perms	create		true		false	\
 		rename		true		true	\
 		promote		true		true	\
 		receive		true		false   \
+		receive:append	true		false	\
 		destroy		true		true
 
 else
@@ -160,6 +163,7 @@ set -A perms	create		true		false	\
 		zoned		true		false	\
 		xattr		true		false	\
 		receive		true		false	\
+		receive:append	true		false	\
 		destroy		true		true
 
 if is_global_zone; then

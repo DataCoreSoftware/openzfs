@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -41,7 +42,7 @@ function cleanup
 	    log_must zpool detach $TESTPOOL $DISK2
 	get_disklist $TESTPOOL | grep $DISK3 >/dev/null && \
 	    log_must zpool detach $TESTPOOL $DISK3
-	log_must zpool sync $TESTPOOL
+	sync_pool $TESTPOOL
 }
 
 typeset pid

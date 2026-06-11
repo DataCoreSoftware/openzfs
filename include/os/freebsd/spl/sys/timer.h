@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2020 iXsystems, Inc.
  * All rights reserved.
@@ -33,6 +34,4 @@
 #define	usleep_range(wakeup, wakeupepsilon)				   \
 	pause_sbt("usleep_range", ustosbt(wakeup), \
 	ustosbt(wakeupepsilon - wakeup), 0)
-
-#define	schedule() pause("schedule", 1)
 #endif

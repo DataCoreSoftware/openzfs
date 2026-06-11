@@ -1,4 +1,5 @@
 #! /bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -26,6 +27,7 @@
 
 #
 # Copyright (c) 2013, 2016 by Delphix. All rights reserved.
+# Copyright (c) 2022 Hewlett Packard Enterprise Development LP.
 #
 
 . $STF_SUITE/include/libtest.shlib
@@ -332,14 +334,12 @@ function scan_state { #state-file
 					log_note "No operation specified"
 				else
 					export __ZFS_POOL_RESTRICT="TESTPOOL"
-					log_must zfs unmount -a
+					log_must_busy zfs unmount -a
 					unset __ZFS_POOL_RESTRICT
 
 					for p in ${prop[i]} ${prop[((i+1))]}; do
 						zfs $op $p $target
-						ret=$?
-						check_failure $ret "zfs $op $p \
-						    $target"
+						check_failure $? "zfs $op $p $target"
 					done
 				fi
 				for check_obj in $list; do
@@ -349,16 +349,14 @@ function scan_state { #state-file
 					# check_failure to keep journal small
 						verify_prop_src $check_obj $p \
 						    $final_src
-						ret=$?
-						check_failure $ret "verify" \
+						check_failure $? "verify" \
 						    "_prop_src $check_obj $p" \
 						    "$final_src"
 
 					# Again, to keep journal size down.
 						verify_prop_val $p $check_obj \
 						    $final_src $j
-						ret=$?
-						check_failure $ret "verify" \
+						check_failure $? "verify" \
 						    "_prop_val $check_obj $p" \
 						    "$final_src"
 					done
@@ -380,7 +378,8 @@ set -A prop "checksum" "" \
 	"sharenfs" "" \
 	"recordsize" "recsize" \
 	"snapdir" "" \
-	"readonly" ""
+	"readonly" "" \
+	"redundant_metadata" ""
 
 #
 # Note except for the mountpoint default value (which is handled in
@@ -388,15 +387,17 @@ set -A prop "checksum" "" \
 # above must have a corresponding entry in the two arrays below.
 #
 
-set -A def_val "on" "off" "on" \
+set -A def_val "on" "on" "on" \
 	"off" "" \
 	"hidden" \
-	"off"
+	"off" \
+	"all"
 
-set -A local_val "off" "on" "off" \
+set -A local_val "off" "off" "off" \
 	"on" "" \
 	"visible" \
-	"off"
+	"off" \
+	"none"
 
 #
 # Add system specific values

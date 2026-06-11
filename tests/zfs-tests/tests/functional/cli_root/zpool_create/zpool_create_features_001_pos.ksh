@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -49,7 +50,7 @@ function cleanup
 
 function check_features
 {
-	for state in $(zpool get all $TESTPOOL | \
+	for state in $(zpool get all $TESTPOOL | grep -v "dynamic_gang_header" | \
 	    awk '$2 ~ /feature@/ { print $3 }'); do
 		if [[ "$state" != "enabled" && "$state" != "active" ]]; then
 			log_fail "some features are not enabled on new pool"

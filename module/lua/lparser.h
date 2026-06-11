@@ -1,4 +1,4 @@
-/* BEGIN CSTYLED */
+// SPDX-License-Identifier: MIT
 /*
 ** $Id: lparser.h,v 1.70.1.1 2013/04/12 18:48:47 roberto Exp $
 ** Lua Parser
@@ -118,4 +118,3 @@ LUAI_FUNC Closure *luaY_parser (lua_State *L, ZIO *z, Mbuffer *buff,
 
 
 #endif
-/* END CSTYLED */

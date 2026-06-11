@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -53,12 +54,10 @@ function cleanup
 	typeset bkup
 
 	for snap in $init_snap $inc_snap; do
-		snapexists $snap && \
-			log_must zfs destroy -f $snap
+		snapexists $snap && destroy_dataset $snap -f
 	done
 
-	datasetexists $rst_root && \
-		log_must zfs destroy -Rf $rst_root
+	datasetexists $rst_root && destroy_dataset $rst_root -Rf
 
 	for bkup in $full_bkup $inc_bkup; do
 		[[ -e $bkup ]] && \
@@ -82,8 +81,8 @@ log_must zfs snapshot $init_snap
 log_must eval "zfs send $init_snap > $full_bkup"
 
 log_note "'zfs receive' fails with invalid send streams."
-log_mustnot eval "cat </dev/zero | zfs receive $rst_init_snap"
-log_mustnot eval "cat </dev/zero | zfs receive -d $rst_root"
+log_mustnot eval "cat /dev/zero | zfs receive $rst_init_snap"
+log_mustnot eval "cat /dev/zero | zfs receive -d $rst_root"
 
 log_must eval "zfs receive $rst_init_snap < $full_bkup"
 

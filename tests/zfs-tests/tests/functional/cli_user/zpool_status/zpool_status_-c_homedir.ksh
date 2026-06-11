@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -29,9 +30,9 @@
 #	home directory.
 #
 # STRATEGY:
-#	1. Change HOME to /var/tmp
+#	1. Change HOME to /var/tmp (TEST_BASE_DIR)
 #	2. Make a simple script that echoes a key value pair
-#	   in /var/tmp/.zpool.d
+#	   in $HOME/.zpool.d
 #	3. Make sure it can be run with -c
 #	4. Remove the script we created
 

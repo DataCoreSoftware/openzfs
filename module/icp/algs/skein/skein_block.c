@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LicenseRef-OpenZFS-ThirdParty-PublicDomain
 /*
  * Implementation of the Skein block functions.
  * Source code author: Doug Whiting, 2008.
@@ -30,7 +31,9 @@
  * the #pragma here to ignore the warning.
  */
 #if defined(_ILP32) || defined(__powerpc)	/* Assume small stack */
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wframe-larger-than="
+#endif
 /*
  * We're running on 32-bit, don't unroll loops to save stack frame space
  *

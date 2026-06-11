@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 
 #
 # This file and its contents are supplied under the terms of the
@@ -30,6 +31,7 @@ for f in /proc/spl/kstat/zfs/*/multihost; do
 	echo "================================================================="
 
 	sudo tail -n $lines $f
+	sudo sh -c "echo > $f"
 done
 
 echo "================================================================="

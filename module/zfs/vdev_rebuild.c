@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -22,6 +23,8 @@
  *
  * Copyright (c) 2018, Intel Corporation.
  * Copyright (c) 2020 by Lawrence Livermore National Security, LLC.
+ * Copyright (c) 2022 Hewlett Packard Enterprise Development LP.
+ * Copyright (c) 2024 by Delphix. All rights reserved.
  */
 
 #include <sys/vdev_impl.h>
@@ -33,6 +36,7 @@
 #include <sys/zio.h>
 #include <sys/dmu_tx.h>
 #include <sys/arc.h>
+#include <sys/arc_impl.h>
 #include <sys/zap.h>
 
 /*
@@ -103,7 +107,7 @@
  * Size of rebuild reads; defaults to 1MiB per data disk and is capped at
  * SPA_MAXBLOCKSIZE.
  */
-unsigned long zfs_rebuild_max_segment = 1024 * 1024;
+static uint64_t zfs_rebuild_max_segment = 1024 * 1024;
 
 /*
  * Maximum number of parallelly executed bytes per leaf vdev caused by a
@@ -115,25 +119,25 @@ unsigned long zfs_rebuild_max_segment = 1024 * 1024;
  * segment size is also large (zfs_rebuild_max_segment=1M).  This helps keep
  * the queue depth short.
  *
- * 32MB was selected as the default value to achieve good performance with
- * a large 90-drive dRAID HDD configuration (draid2:8d:90c:2s). A sequential
- * rebuild was unable to saturate all of the drives using smaller values.
- * With a value of 32MB the sequential resilver write rate was measured at
- * 800MB/s sustained while rebuilding to a distributed spare.
+ * 64MB was observed to deliver the best performance and set as the default.
+ * Testing was performed with a 106-drive dRAID HDD pool (draid2:11d:106c)
+ * and a rebuild rate of 1.2GB/s was measured to the distribute spare.
+ * Smaller values were unable to fully saturate the available pool I/O.
  */
-unsigned long zfs_rebuild_vdev_limit = 32 << 20;
+static uint64_t zfs_rebuild_vdev_limit = 64 << 20;
 
 /*
  * Automatically start a pool scrub when the last active sequential resilver
  * completes in order to verify the checksums of all blocks which have been
  * resilvered. This option is enabled by default and is strongly recommended.
  */
-int zfs_rebuild_scrub_enabled = 1;
+static int zfs_rebuild_scrub_enabled = 1;
 
 /*
  * For vdev_rebuild_initiate_sync() and vdev_rebuild_reset_sync().
  */
-static void vdev_rebuild_thread(void *arg);
+static __attribute__((noreturn)) void vdev_rebuild_thread(void *arg);
+static void vdev_rebuild_reset_sync(void *arg, dmu_tx_t *tx);
 
 /*
  * Clear the per-vdev rebuild bytes value for a vdev tree.
@@ -227,7 +231,7 @@ vdev_rebuild_initiate_sync(void *arg, dmu_tx_t *tx)
 	spa_feature_incr(vd->vdev_spa, SPA_FEATURE_DEVICE_REBUILD, tx);
 
 	mutex_enter(&vd->vdev_rebuild_lock);
-	bzero(vrp, sizeof (uint64_t) * REBUILD_PHYS_ENTRIES);
+	memset(vrp, 0, sizeof (uint64_t) * REBUILD_PHYS_ENTRIES);
 	vrp->vrp_rebuild_state = VDEV_REBUILD_ACTIVE;
 	vrp->vrp_min_txg = 0;
 	vrp->vrp_max_txg = dmu_tx_get_txg(tx);
@@ -252,7 +256,7 @@ vdev_rebuild_initiate_sync(void *arg, dmu_tx_t *tx)
 	    "vdev_id=%llu vdev_guid=%llu started",
 	    (u_longlong_t)vd->vdev_id, (u_longlong_t)vd->vdev_guid);
 
-	ASSERT3P(vd->vdev_rebuild_thread, ==, NULL);
+	ASSERT0P(vd->vdev_rebuild_thread);
 	vd->vdev_rebuild_thread = thread_create(NULL, 0,
 	    vdev_rebuild_thread, vd, 0, &p0, TS_RUN, maxclsyspri);
 
@@ -260,7 +264,7 @@ vdev_rebuild_initiate_sync(void *arg, dmu_tx_t *tx)
 }
 
 static void
-vdev_rebuild_log_notify(spa_t *spa, vdev_t *vd, char *name)
+vdev_rebuild_log_notify(spa_t *spa, vdev_t *vd, const char *name)
 {
 	nvlist_t *aux = fnvlist_alloc();
 
@@ -283,7 +287,7 @@ vdev_rebuild_initiate(vdev_t *vd)
 	ASSERT(!vd->vdev_rebuilding);
 
 	dmu_tx_t *tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
-	VERIFY0(dmu_tx_assign(tx, TXG_WAIT));
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT | DMU_TX_SUSPEND));
 
 	vd->vdev_rebuilding = B_TRUE;
 
@@ -307,6 +311,17 @@ vdev_rebuild_complete_sync(void *arg, dmu_tx_t *tx)
 	vdev_rebuild_phys_t *vrp = &vr->vr_rebuild_phys;
 
 	mutex_enter(&vd->vdev_rebuild_lock);
+
+	/*
+	 * Handle a second device failure if it occurs after all rebuild I/O
+	 * has completed but before this sync task has been executed.
+	 */
+	if (vd->vdev_rebuild_reset_wanted) {
+		mutex_exit(&vd->vdev_rebuild_lock);
+		vdev_rebuild_reset_sync(arg, tx);
+		return;
+	}
+
 	vrp->vrp_rebuild_state = VDEV_REBUILD_COMPLETE;
 	vrp->vrp_end_time = gethrestime_sec();
 
@@ -331,10 +346,14 @@ vdev_rebuild_complete_sync(void *arg, dmu_tx_t *tx)
 	 * While we're in syncing context take the opportunity to
 	 * setup the scrub when there are no more active rebuilds.
 	 */
-	pool_scan_func_t func = POOL_SCAN_SCRUB;
-	if (dsl_scan_setup_check(&func, tx) == 0 &&
+	setup_sync_arg_t setup_sync_arg = {
+		.func = POOL_SCAN_SCRUB,
+		.txgstart = 0,
+		.txgend = 0,
+	};
+	if (dsl_scan_setup_check(&setup_sync_arg.func, tx) == 0 &&
 	    zfs_rebuild_scrub_enabled) {
-		dsl_scan_setup_sync(&func, tx);
+		dsl_scan_setup_sync(&setup_sync_arg, tx);
 	}
 
 	cv_broadcast(&vd->vdev_rebuild_cv);
@@ -394,7 +413,7 @@ vdev_rebuild_reset_sync(void *arg, dmu_tx_t *tx)
 	mutex_enter(&vd->vdev_rebuild_lock);
 
 	ASSERT(vrp->vrp_rebuild_state == VDEV_REBUILD_ACTIVE);
-	ASSERT3P(vd->vdev_rebuild_thread, ==, NULL);
+	ASSERT0P(vd->vdev_rebuild_thread);
 
 	vrp->vrp_last_offset = 0;
 	vrp->vrp_min_txg = 0;
@@ -448,7 +467,7 @@ vdev_rebuild_clear_sync(void *arg, dmu_tx_t *tx)
 	}
 
 	clear_rebuild_bytes(vd);
-	bzero(vrp, sizeof (uint64_t) * REBUILD_PHYS_ENTRIES);
+	memset(vrp, 0, sizeof (uint64_t) * REBUILD_PHYS_ENTRIES);
 
 	if (vd->vdev_top_zap != 0 && zap_contains(mos, vd->vdev_top_zap,
 	    VDEV_TOP_ZAP_VDEV_REBUILD_PHYS) == 0) {
@@ -510,7 +529,7 @@ vdev_rebuild_blkptr_init(blkptr_t *bp, vdev_t *vd, uint64_t start,
 	    vd->vdev_ops == &vdev_spare_ops);
 
 	uint64_t psize = vd->vdev_ops == &vdev_draid_ops ?
-	    vdev_draid_asize_to_psize(vd, asize) : asize;
+	    vdev_draid_asize_to_psize(vd, asize, 0) : asize;
 
 	BP_ZERO(bp);
 
@@ -558,8 +577,10 @@ vdev_rebuild_range(vdev_rebuild_t *vr, uint64_t start, uint64_t size)
 	vdev_rebuild_blkptr_init(&blk, vd, start, size);
 	uint64_t psize = BP_GET_PSIZE(&blk);
 
-	if (!vdev_dtl_need_resilver(vd, &blk.blk_dva[0], psize, TXG_UNKNOWN))
+	if (!vdev_dtl_need_resilver(vd, &blk.blk_dva[0], psize, TXG_UNKNOWN)) {
+		vr->vr_pass_bytes_skipped += size;
 		return (0);
+	}
 
 	mutex_enter(&vr->vr_io_lock);
 
@@ -571,7 +592,7 @@ vdev_rebuild_range(vdev_rebuild_t *vr, uint64_t start, uint64_t size)
 	mutex_exit(&vr->vr_io_lock);
 
 	dmu_tx_t *tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
-	VERIFY0(dmu_tx_assign(tx, TXG_WAIT));
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT | DMU_TX_SUSPEND));
 	uint64_t txg = dmu_tx_get_txg(tx);
 
 	spa_config_enter(spa, SCL_STATE_ALL, vd, RW_READER);
@@ -621,10 +642,10 @@ vdev_rebuild_ranges(vdev_rebuild_t *vr)
 	zfs_btree_index_t idx;
 	int error;
 
-	for (range_seg_t *rs = zfs_btree_first(t, &idx); rs != NULL;
+	for (zfs_range_seg_t *rs = zfs_btree_first(t, &idx); rs != NULL;
 	    rs = zfs_btree_next(t, &idx, &idx)) {
-		uint64_t start = rs_get_start(rs, vr->vr_scan_tree);
-		uint64_t size = rs_get_end(rs, vr->vr_scan_tree) - start;
+		uint64_t start = zfs_rs_get_start(rs, vr->vr_scan_tree);
+		uint64_t size = zfs_rs_get_end(rs, vr->vr_scan_tree) - start;
 
 		/*
 		 * zfs_scan_suspend_progress can be set to disable rebuild
@@ -701,7 +722,7 @@ vdev_rebuild_load(vdev_t *vd)
 	vd->vdev_rebuilding = B_FALSE;
 
 	if (!spa_feature_is_enabled(spa, SPA_FEATURE_DEVICE_REBUILD)) {
-		bzero(vrp, sizeof (uint64_t) * REBUILD_PHYS_ENTRIES);
+		memset(vrp, 0, sizeof (uint64_t) * REBUILD_PHYS_ENTRIES);
 		mutex_exit(&vd->vdev_rebuild_lock);
 		return (SET_ERROR(ENOTSUP));
 	}
@@ -718,7 +739,7 @@ vdev_rebuild_load(vdev_t *vd)
 	 * status allowing a new resilver/rebuild to be started.
 	 */
 	if (err == ENOENT || err == EOVERFLOW || err == ECKSUM) {
-		bzero(vrp, sizeof (uint64_t) * REBUILD_PHYS_ENTRIES);
+		memset(vrp, 0, sizeof (uint64_t) * REBUILD_PHYS_ENTRIES);
 	} else if (err) {
 		mutex_exit(&vd->vdev_rebuild_lock);
 		return (err);
@@ -736,11 +757,12 @@ vdev_rebuild_load(vdev_t *vd)
  * Each scan thread is responsible for rebuilding a top-level vdev.  The
  * rebuild progress in tracked on-disk in VDEV_TOP_ZAP_VDEV_REBUILD_PHYS.
  */
-static void
+static __attribute__((noreturn)) void
 vdev_rebuild_thread(void *arg)
 {
 	vdev_t *vd = arg;
 	spa_t *spa = vd->vdev_spa;
+	vdev_t *rvd = spa->spa_root_vdev;
 	int error = 0;
 
 	/*
@@ -760,22 +782,21 @@ vdev_rebuild_thread(void *arg)
 	ASSERT(vd->vdev_rebuilding);
 	ASSERT(spa_feature_is_active(spa, SPA_FEATURE_DEVICE_REBUILD));
 	ASSERT3B(vd->vdev_rebuild_cancel_wanted, ==, B_FALSE);
-	ASSERT3B(vd->vdev_rebuild_reset_wanted, ==, B_FALSE);
 
 	vdev_rebuild_t *vr = &vd->vdev_rebuild_config;
 	vdev_rebuild_phys_t *vrp = &vr->vr_rebuild_phys;
 	vr->vr_top_vdev = vd;
 	vr->vr_scan_msp = NULL;
-	vr->vr_scan_tree = range_tree_create(NULL, RANGE_SEG64, NULL, 0, 0);
+	vr->vr_scan_tree = zfs_range_tree_create_flags(
+	    NULL, ZFS_RANGE_SEG64, NULL, 0, 0,
+	    ZFS_RT_F_DYN_NAME, vdev_rt_name(vd, "vr_scan_tree"));
 	mutex_init(&vr->vr_io_lock, NULL, MUTEX_DEFAULT, NULL);
 	cv_init(&vr->vr_io_cv, NULL, CV_DEFAULT, NULL);
 
 	vr->vr_pass_start_time = gethrtime();
 	vr->vr_pass_bytes_scanned = 0;
 	vr->vr_pass_bytes_issued = 0;
-
-	vr->vr_bytes_inflight_max = MAX(1ULL << 20,
-	    zfs_rebuild_vdev_limit * vd->vdev_children);
+	vr->vr_pass_bytes_skipped = 0;
 
 	uint64_t update_est_time = gethrtime();
 	vdev_rebuild_update_bytes_est(vd, 0);
@@ -793,6 +814,17 @@ vdev_rebuild_thread(void *arg)
 		vr->vr_scan_msp = msp;
 
 		/*
+		 * Calculate the max number of in-flight bytes for top-level
+		 * vdev scanning operations (minimum 1MB, maximum 1/2 of
+		 * arc_c_max shared by all top-level vdevs).  Limits for the
+		 * issuing phase are done per top-level vdev and are handled
+		 * separately.
+		 */
+		uint64_t limit = (arc_c_max / 2) / MAX(rvd->vdev_children, 1);
+		vr->vr_bytes_inflight_max = MIN(limit, MAX(1ULL << 20,
+		    zfs_rebuild_vdev_limit * vd->vdev_children));
+
+		/*
 		 * Removal of vdevs from the vdev tree may eliminate the need
 		 * for the rebuild, in which case it should be canceled.  The
 		 * vdev_rebuild_cancel_wanted flag is set until the sync task
@@ -804,7 +836,7 @@ vdev_rebuild_thread(void *arg)
 			break;
 		}
 
-		ASSERT0(range_tree_space(vr->vr_scan_tree));
+		ASSERT0(zfs_range_tree_space(vr->vr_scan_tree));
 
 		/* Disable any new allocations to this metaslab */
 		spa_config_exit(spa, SCL_CONFIG, FTAG);
@@ -819,7 +851,7 @@ vdev_rebuild_thread(void *arg)
 		 * on disk and therefore will be rebuilt.
 		 */
 		for (int j = 0; j < TXG_SIZE; j++) {
-			if (range_tree_space(msp->ms_allocating[j])) {
+			if (zfs_range_tree_space(msp->ms_allocating[j])) {
 				mutex_exit(&msp->ms_lock);
 				mutex_exit(&msp->ms_sync_lock);
 				txg_wait_synced(dsl, 0);
@@ -840,21 +872,21 @@ vdev_rebuild_thread(void *arg)
 			    vr->vr_scan_tree, SM_ALLOC));
 
 			for (int i = 0; i < TXG_SIZE; i++) {
-				ASSERT0(range_tree_space(
+				ASSERT0(zfs_range_tree_space(
 				    msp->ms_allocating[i]));
 			}
 
-			range_tree_walk(msp->ms_unflushed_allocs,
-			    range_tree_add, vr->vr_scan_tree);
-			range_tree_walk(msp->ms_unflushed_frees,
-			    range_tree_remove, vr->vr_scan_tree);
+			zfs_range_tree_walk(msp->ms_unflushed_allocs,
+			    zfs_range_tree_add, vr->vr_scan_tree);
+			zfs_range_tree_walk(msp->ms_unflushed_frees,
+			    zfs_range_tree_remove, vr->vr_scan_tree);
 
 			/*
 			 * Remove ranges which have already been rebuilt based
 			 * on the last offset.  This can happen when restarting
 			 * a scan after exporting and re-importing the pool.
 			 */
-			range_tree_clear(vr->vr_scan_tree, 0,
+			zfs_range_tree_clear(vr->vr_scan_tree, 0,
 			    vrp->vrp_last_offset);
 		}
 
@@ -875,7 +907,7 @@ vdev_rebuild_thread(void *arg)
 		 * Walk the allocated space map and issue the rebuild I/O.
 		 */
 		error = vdev_rebuild_ranges(vr);
-		range_tree_vacate(vr->vr_scan_tree, NULL, NULL);
+		zfs_range_tree_vacate(vr->vr_scan_tree, NULL, NULL);
 
 		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
 		metaslab_enable(msp, B_FALSE, B_FALSE);
@@ -884,7 +916,7 @@ vdev_rebuild_thread(void *arg)
 			break;
 	}
 
-	range_tree_destroy(vr->vr_scan_tree);
+	zfs_range_tree_destroy(vr->vr_scan_tree);
 	spa_config_exit(spa, SCL_CONFIG, FTAG);
 
 	/* Wait for any remaining rebuild I/O to complete */
@@ -901,7 +933,7 @@ vdev_rebuild_thread(void *arg)
 
 	dsl_pool_t *dp = spa_get_dsl(spa);
 	dmu_tx_t *tx = dmu_tx_create_dd(dp->dp_mos_dir);
-	VERIFY0(dmu_tx_assign(tx, TXG_WAIT));
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT | DMU_TX_SUSPEND));
 
 	mutex_enter(&vd->vdev_rebuild_lock);
 	if (error == 0) {
@@ -1047,7 +1079,8 @@ vdev_rebuild_restart_impl(vdev_t *vd)
 void
 vdev_rebuild_restart(spa_t *spa)
 {
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held() ||
+	    spa->spa_load_thread == curthread);
 
 	vdev_rebuild_restart_impl(spa->spa_root_vdev);
 }
@@ -1061,7 +1094,8 @@ vdev_rebuild_stop_wait(vdev_t *vd)
 {
 	spa_t *spa = vd->vdev_spa;
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_namespace_held() ||
+	    spa->spa_export_thread == curthread);
 
 	if (vd == spa->spa_root_vdev) {
 		for (uint64_t i = 0; i < vd->vdev_children; i++)
@@ -1111,7 +1145,7 @@ vdev_rebuild_get_stats(vdev_t *tvd, vdev_rebuild_stat_t *vrs)
 	    tvd->vdev_top_zap, VDEV_TOP_ZAP_VDEV_REBUILD_PHYS);
 
 	if (error == ENOENT) {
-		bzero(vrs, sizeof (vdev_rebuild_stat_t));
+		memset(vrs, 0, sizeof (vdev_rebuild_stat_t));
 		vrs->vrs_state = VDEV_REBUILD_NONE;
 		error = 0;
 	} else if (error == 0) {
@@ -1132,19 +1166,18 @@ vdev_rebuild_get_stats(vdev_t *tvd, vdev_rebuild_stat_t *vrs)
 		    vr->vr_pass_start_time);
 		vrs->vrs_pass_bytes_scanned = vr->vr_pass_bytes_scanned;
 		vrs->vrs_pass_bytes_issued = vr->vr_pass_bytes_issued;
+		vrs->vrs_pass_bytes_skipped = vr->vr_pass_bytes_skipped;
 		mutex_exit(&tvd->vdev_rebuild_lock);
 	}
 
 	return (error);
 }
 
-/* BEGIN CSTYLED */
-ZFS_MODULE_PARAM(zfs, zfs_, rebuild_max_segment, ULONG, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs, zfs_, rebuild_max_segment, U64, ZMOD_RW,
 	"Max segment size in bytes of rebuild reads");
 
-ZFS_MODULE_PARAM(zfs, zfs_, rebuild_vdev_limit, ULONG, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs, zfs_, rebuild_vdev_limit, U64, ZMOD_RW,
 	"Max bytes in flight per leaf vdev for sequential resilvers");
 
 ZFS_MODULE_PARAM(zfs, zfs_, rebuild_scrub_enabled, INT, ZMOD_RW,
 	"Automatically scrub after sequential resilver completes");
-/* END CSTYLED */

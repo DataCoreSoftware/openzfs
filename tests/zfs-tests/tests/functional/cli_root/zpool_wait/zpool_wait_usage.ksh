@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -43,5 +44,7 @@ zpool wait -t scrub fakepool 2>&1 | grep -i 'no such pool' || \
     log_fail "Error message did not contain phrase 'no such pool'."
 zpool wait -t foo $TESTPOOL 2>&1 | grep -i 'invalid activity' || \
     log_fail "Error message did not contain phrase 'invalid activity'."
+zpool wait -t scrub=getsubopt $TESTPOOL 2>&1 | grep -i 'invalid activity' || \
+    log_fail "getsubopt(3) error message did not contain phrase 'invalid activity'."
 
 log_pass "'zpool wait' behaves sensibly when invoked incorrectly."

@@ -485,7 +485,7 @@
  *    TASKQ_STATISTIC	- If set will enable bucket statistic (default).
  *
  * DELAY DISPATCH --------------------------------------------------------------
- * 
+ *
  * taskq_delay_dispatch():
  *     Create a tqd_delay node containing the dispatch information, and
  * expire time. It is inserted sorted by time. The "tqd_delay" pointer is
@@ -804,19 +804,19 @@ uint_t taskq_smtbf = UINT_MAX;    /* mean time between injected failures */
 /*
  * Do-nothing task which may be used to prepopulate thread caches.
  */
-/*ARGSUSED*/
+
 void
 nulltask(void *unused)
 {
 }
 
-/*ARGSUSED*/
+
 static int
 taskq_constructor(void *buf, void *cdrarg, int kmflags)
 {
 	taskq_t *tq = buf;
 
-	bzero(tq, sizeof (taskq_t));
+	memset(tq, 0, sizeof (taskq_t));
 
 	mutex_init(&tq->tq_lock, NULL, MUTEX_DEFAULT, NULL);
 	rw_init(&tq->tq_threadlock, NULL, RW_DEFAULT, NULL);
@@ -831,7 +831,7 @@ taskq_constructor(void *buf, void *cdrarg, int kmflags)
 	return (0);
 }
 
-/*ARGSUSED*/
+
 static void
 taskq_destructor(void *buf, void *cdrarg)
 {
@@ -850,7 +850,7 @@ taskq_destructor(void *buf, void *cdrarg)
 	cv_destroy(&tq->tq_maxalloc_cv);
 }
 
-/*ARGSUSED*/
+
 static int
 taskq_ent_constructor(void *buf, void *cdrarg, int kmflags)
 {
@@ -866,7 +866,7 @@ taskq_ent_constructor(void *buf, void *cdrarg, int kmflags)
 	return (0);
 }
 
-/*ARGSUSED*/
+
 static void
 taskq_ent_destructor(void *buf, void *cdrarg)
 {
@@ -1013,7 +1013,7 @@ taskq_dispatch_delay(taskq_t *tq, task_func_t func, void *arg, uint_t tqflags,
 }
 
 int
-taskq_cancel_id(taskq_t *tq, taskqid_t id)
+taskq_cancel_id(taskq_t *tq, taskqid_t id, boolean_t wait)
 {
 	tqdelay_t *task = (tqdelay_t *)id;
 	tqdelay_t *tqdnode;
@@ -1032,7 +1032,7 @@ again:
 			if (tqdnode == task) {
 				/*
 				 * First check if it has already started
-				 * executing, if so, we want for signal
+				 * executing, if so, we wait for signal
 				 * that it has finished and restart the loop.
 				 */
 				if (tqdnode->tqd_ent != TASKQID_INVALID) {
@@ -1204,7 +1204,7 @@ taskq_cpupct_remove(taskq_t *tq)
 	mutex_exit(&cpu_lock);
 }
 
-/*ARGSUSED*/
+
 static int
 taskq_cpu_setup(cpu_setup_t what, int id, void *arg)
 {
@@ -1663,21 +1663,6 @@ taskq_dispatch_ent(taskq_t *tq, task_func_t func, void *arg, uint_t flags,
 		TQ_ENQUEUE(tq, tqe, func, arg);
 	}
 	mutex_exit(&tq->tq_lock);
-}
-
-/*
- * Allow our caller to ask if there are tasks pending on the queue.
- */
-boolean_t
-taskq_empty(taskq_t *tq)
-{
-	boolean_t rv;
-
-	mutex_enter(&tq->tq_lock);
-	rv = (tq->tq_task.tqent_next == &tq->tq_task) && (tq->tq_active == 0);
-	mutex_exit(&tq->tq_lock);
-
-	return (rv);
 }
 
 int
@@ -2458,8 +2443,8 @@ taskq_create_common(const char *name, int instance, int nthreads, pri_t pri,
 	 * Make sure the name is 0-terminated, and conforms to the rules for
 	 * C indentifiers
 	 */
-	(void) strncpy(tq->tq_name, name, TASKQ_NAMELEN + 1);
-	strident_canon(tq->tq_name, TASKQ_NAMELEN + 1);
+	(void) strlcpy(tq->tq_name, name, sizeof (tq->tq_name));
+	strident_canon(tq->tq_name, sizeof (tq->tq_name));
 
 	tq->tq_flags = flags | TASKQ_CHANGING;
 	tq->tq_active = 0;
@@ -2532,7 +2517,8 @@ taskq_create_common(const char *name, int instance, int nthreads, pri_t pri,
 	 */
 	if (flags & TASKQ_NOINSTANCE) {
 		instance = tq->tq_instance =
-		    (int)(uintptr_t)vmem_alloc(taskq_id_arena, 1, VM_SLEEP);
+		    (int)(uintptr_t)vmem_alloc_impl(taskq_id_arena, 1,
+		    VM_SLEEP);
 	}
 
 	if (flags & TASKQ_DYNAMIC) {
@@ -2588,8 +2574,8 @@ taskq_destroy(taskq_t *tq)
 	 * Destroy instance if needed.
 	 */
 	if (tq->tq_flags & TASKQ_NOINSTANCE) {
-		vmem_free(taskq_id_arena, (void *)(uintptr_t)(tq->tq_instance),
-		    1);
+		vmem_free_impl(taskq_id_arena,
+		    (void *)(uintptr_t)(tq->tq_instance), 1);
 		tq->tq_instance = 0;
 	}
 

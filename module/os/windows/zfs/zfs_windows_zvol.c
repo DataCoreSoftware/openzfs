@@ -33,6 +33,7 @@
 
 extern PDRIVER_OBJECT WIN_DriverObject;
 static pHW_HBA_EXT STOR_HBAExt = NULL;
+wzvolDriverInfo STOR_wzvolDriverInfo;
 
 
 // Verbose

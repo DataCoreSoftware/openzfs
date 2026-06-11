@@ -1,4 +1,4 @@
-/* BEGIN CSTYLED */
+// SPDX-License-Identifier: MIT
 /*
 ** $Id: lapi.c,v 2.171.1.1 2013/04/12 18:48:47 roberto Exp $
 ** Lua API
@@ -251,6 +251,8 @@ LUA_API int lua_type (lua_State *L, int idx) {
 
 LUA_API const char *lua_typename (lua_State *L, int t) {
   UNUSED(L);
+  if (t > 8 || t < 0)
+    return "internal_type_error";
   return ttypename(t);
 }
 
@@ -443,7 +445,7 @@ LUA_API const void *lua_topointer (lua_State *L, int idx) {
     case LUA_TTABLE: return hvalue(o);
     case LUA_TLCL: return clLvalue(o);
     case LUA_TCCL: return clCvalue(o);
-    case LUA_TLCF: return cast(void *, cast(size_t, fvalue(o)));
+    case LUA_TLCF: return cast(void *, cast(uintptr_t, fvalue(o)));
     case LUA_TTHREAD: return thvalue(o);
     case LUA_TUSERDATA:
     case LUA_TLIGHTUSERDATA:
@@ -1278,30 +1280,6 @@ LUA_API void lua_upvaluejoin (lua_State *L, int fidx1, int n1,
   *up1 = *up2;
   luaC_objbarrier(L, f1, *up2);
 }
-
-#if defined(_KERNEL)
-
-static int __init
-lua_init(void)
-{
-        return (0);
-}
-
-static void __exit
-lua_fini(void)
-{
-}
-
-module_init(lua_init);
-module_exit(lua_fini);
-
-#endif
-/* END CSTYLED */
-
-ZFS_MODULE_DESCRIPTION("Lua Interpreter for ZFS");
-ZFS_MODULE_AUTHOR("Lua.org");
-ZFS_MODULE_LICENSE("Dual MIT/GPL");
-ZFS_MODULE_VERSION(ZFS_META_VERSION "-" ZFS_META_RELEASE);
 
 EXPORT_SYMBOL(lua_absindex);
 EXPORT_SYMBOL(lua_atpanic);

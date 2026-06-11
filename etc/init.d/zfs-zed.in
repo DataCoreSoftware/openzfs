@@ -1,4 +1,6 @@
 #!@DEFAULT_INIT_SHELL@
+# SPDX-License-Identifier: BSD-2-Clause
+# shellcheck disable=SC2154
 #
 # zfs-zed
 #
@@ -68,8 +70,7 @@ do_stop()
 	then
 		# No pools imported, it is/should be safe/possible to
 		# unload modules.
-		zfs_action "Unloading modules" rmmod zfs zunicode \
-		    zavl zcommon znvpair zlua spl
+		zfs_action "Unloading modules" rmmod zfs spl
 		return "$?"
 	fi
 }
@@ -93,7 +94,8 @@ do_reload()
 
 # ----------------------------------------------------
 
-if [ ! -e /sbin/openrc-run ]; then
+if @IS_SYSV_RC@
+then
 	case "$1" in
 		start)
 			do_start

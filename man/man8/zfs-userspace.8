@@ -1,3 +1,4 @@
+.\" SPDX-License-Identifier: CDDL-1.0
 .\"
 .\" CDDL HEADER START
 .\"
@@ -6,7 +7,7 @@
 .\" You may not use this file except in compliance with the License.
 .\"
 .\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or http://www.opensolaris.org/os/licensing.
+.\" or https://opensource.org/licenses/CDDL-1.0.
 .\" See the License for the specific language governing permissions
 .\" and limitations under the License.
 .\"
@@ -29,7 +30,7 @@
 .\" Copyright 2018 Nexenta Systems, Inc.
 .\" Copyright 2019 Joyent, Inc.
 .\"
-.Dd June 30, 2019
+.Dd July 11, 2022
 .Dt ZFS-USERSPACE 8
 .Os
 .
@@ -73,7 +74,8 @@
 .Oo Fl t Ar type Ns Oo , Ns Ar type Oc Ns … Oc
 .Ar filesystem Ns | Ns Ar snapshot Ns | Ns Ar path
 .Xc
-Displays space consumed by, and quotas on, each user in the specified filesystem,
+Displays space consumed by, and quotas on, each user in the specified
+filesystem,
 snapshot, or path.
 If a path is given, the filesystem that contains that path will be used.
 This corresponds to the

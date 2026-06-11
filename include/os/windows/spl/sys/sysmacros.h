@@ -51,7 +51,8 @@
 #define	DEV_BSHIFT			9 /* log2(DEV_BSIZE) */
 
 #define	proc_pageout			NULL
-#define	curproc			(struct proc *)PsGetCurrentProcess()
+// #define	curproc		(struct proc *)PsGetCurrentProcess()
+#define	curproc		(proc_t *)PsGetCurrentProcess()
 
 extern uint32_t cpu_number(void);
 #define	CPU_SEQID		(cpu_number())
@@ -82,8 +83,9 @@ extern unsigned int num_ecores;
  * stay below this, but kmem_reap needs to be higher.
  */
 #define	minclsyspri  8 /* BASEPRI_KERNEL */
-#define	defclsyspri  8 /* BASEPRI_KERNEL */
-#define	maxclsyspri  12
+#define	defclsyspri  60
+#define	maxclsyspri  99
+#define	wtqclsyspri  defclsyspri
 
 #define	NICE_TO_PRIO(nice)		(MAX_RT_PRIO + (nice) + 20)
 #define	PRIO_TO_NICE(prio)		((prio) - MAX_RT_PRIO - 20)
@@ -247,6 +249,7 @@ extern void spl_cleanup(void);
 #define	IS_INDEXABLE(arg) (sizeof (arg[0]))
 #define	IS_ARRAY(arg) \
 	(IS_INDEXABLE(arg) && (((void *) &arg) == ((void *) arg)))
-#define	ARRAY_SIZE(arr) (IS_ARRAY(arr) ? (sizeof (arr) / sizeof (arr[0])) : 0)
+
+#define	ARRAY_SIZE(a) (sizeof (a) / sizeof (a[0]))
 
 #endif  /* _SPL_SYSMACROS_H */

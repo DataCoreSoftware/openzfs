@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -27,15 +28,14 @@
 #
 # STRATEGY:
 #	1. Create pool with a cache device.
-#	2. Export and re-import pool without writing any data.
-#	3. Create a random file in that pool and random read for 10 sec.
-#	4. Export pool.
-#	5. Read the amount of log blocks written from the header of the
+#	2. Create a random file in that pool and random read for 10 sec.
+#	3. Export pool.
+#	4. Read the amount of log blocks written from the header of the
 #		L2ARC device.
-#	6. Import pool.
-#	7. Read the amount of log blocks rebuilt in arcstats and compare to
+#	5. Import pool.
+#	6. Read the amount of log blocks rebuilt in arcstats and compare to
 #		(5).
-#	8. Check if the labels of the L2ARC device are intact.
+#	7. Check if the labels of the L2ARC device are intact.
 #
 #	* We can predict the minimum bytes of L2ARC restored if we subtract
 #	from the effective size of the cache device the bytes l2arc_evict()
@@ -48,6 +48,8 @@
 #
 
 verify_runnable "global"
+
+command -v fio > /dev/null || log_unsupported "fio missing"
 
 log_assert "Persistent L2ARC with an unencrypted ZFS file system succeeds."
 
@@ -75,10 +77,8 @@ export FILE_SIZE=$(( floor($fill_mb / $NUMJOBS) ))M
 
 log_must truncate -s ${cache_sz}M $VDEV_CACHE
 
-log_must zpool create -f $TESTPOOL $VDEV cache $VDEV_CACHE
-
-log_must zpool export $TESTPOOL
-log_must zpool import -d $VDIR $TESTPOOL
+log_must zpool create -f -o ashift=12 $TESTPOOL $VDEV
+log_must zpool add $TESTPOOL cache $VDEV_CACHE
 
 log_must fio $FIO_SCRIPTS/mkfiles.fio
 log_must fio $FIO_SCRIPTS/random_reads.fio
@@ -87,10 +87,9 @@ arcstat_quiescence_noecho l2_size
 log_must zpool export $TESTPOOL
 arcstat_quiescence_noecho l2_feeds
 
-typeset l2_dh_log_blk=$(zdb -l $VDEV_CACHE | grep log_blk_count | \
-	awk '{print $2}')
+typeset l2_dh_log_blk=$(zdb -l $VDEV_CACHE | awk '/log_blk_count/ {print $2}')
 
-typeset l2_rebuild_log_blk_start=$(get_arcstat l2_rebuild_log_blks)
+typeset l2_rebuild_log_blk_start=$(kstat arcstats.l2_rebuild_log_blks)
 
 log_must zpool import -d $VDIR $TESTPOOL
 arcstat_quiescence_noecho l2_size

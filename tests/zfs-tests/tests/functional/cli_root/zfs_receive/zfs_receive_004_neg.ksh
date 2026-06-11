@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -49,8 +50,7 @@ function cleanup
 	typeset bkup
 
 	for snap in $init_snap $inc_snap $init_topsnap $inc_topsnap ; do
-		snapexists $snap && \
-			log_must zfs destroy -Rf $snap
+		snapexists $snap && destroy_dataset $snap -Rf
 	done
 
 	for bkup in $full_bkup $inc_bkup $full_topbkup $inc_topbkup; do
@@ -88,7 +88,7 @@ log_must zfs snapshot $inc_snap
 log_must eval "zfs send -i $init_snap $inc_snap > $inc_bkup"
 log_must touch /$TESTDIR/bar
 
-sync
+sync_all_pools
 
 set -A badargs \
     "" "nonexistent-snap" "blah@blah" "-d" "-d nonexistent-dataset" \

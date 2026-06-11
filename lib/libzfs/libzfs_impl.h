@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -35,21 +36,22 @@
 #include <sys/zfs_ioctl.h>
 #include <regex.h>
 
-#include <libuutil.h>
 #include <libzfs.h>
-#include <libshare.h>
 #include <libzfs_core.h>
+
+#include "libzfs_share.h"
 
 #ifdef	__cplusplus
 extern "C" {
 #endif
 
+#define	ERRBUFLEN 1024
+
 struct libzfs_handle {
 	int libzfs_error;
 	int libzfs_fd;
 	zpool_handle_t *libzfs_pool_handles;
-	uu_avl_pool_t *libzfs_ns_avlpool;
-	uu_avl_t *libzfs_ns_avl;
+	avl_tree_t libzfs_ns_avl;
 	uint64_t libzfs_ns_gen;
 	int libzfs_desc_active;
 	char libzfs_action[1024];
@@ -92,34 +94,21 @@ struct zfs_handle {
  * snapshots of volumes.
  */
 #define	ZFS_IS_VOLUME(zhp) ((zhp)->zfs_head_type == ZFS_TYPE_VOLUME)
+#define	ZHP_MAX_PROPNAMES 4
 
 struct zpool_handle {
 	libzfs_handle_t *zpool_hdl;
 	zpool_handle_t *zpool_next;
 	char zpool_name[ZFS_MAX_DATASET_NAME_LEN];
 	int zpool_state;
+	unsigned int zpool_n_propnames;
+	const char *zpool_propnames[ZHP_MAX_PROPNAMES];
 	size_t zpool_config_size;
 	nvlist_t *zpool_config;
 	nvlist_t *zpool_old_config;
 	nvlist_t *zpool_props;
 	diskaddr_t zpool_start_block;
 };
-
-typedef enum {
-	PROTO_NFS = 0,
-	PROTO_SMB = 1,
-	PROTO_END = 2
-} zfs_share_proto_t;
-
-/*
- * The following can be used as a bitmask and any new values
- * added must preserve that capability.
- */
-typedef enum {
-	SHARED_NOT_SHARED = 0x0,
-	SHARED_NFS = 0x2,
-	SHARED_SMB = 0x4
-} zfs_share_type_t;
 
 typedef int (*zfs_uri_handler_fn_t)(struct libzfs_handle *, const char *,
     const char *, zfs_keyformat_t, boolean_t, uint8_t **, size_t *);
@@ -154,7 +143,7 @@ extern zfs_handle_t *make_dataset_handle_zc(libzfs_handle_t *, zfs_cmd_t *);
 extern zfs_handle_t *make_dataset_simple_handle_zc(zfs_handle_t *, zfs_cmd_t *);
 
 extern int zprop_parse_value(libzfs_handle_t *, nvpair_t *, int, zfs_type_t,
-    nvlist_t *, char **, uint64_t *, const char *);
+    nvlist_t *, const char **, uint64_t *, const char *);
 extern int zprop_expand_list(libzfs_handle_t *hdl, zprop_list_t **plp,
     zfs_type_t type);
 
@@ -175,10 +164,10 @@ extern int zprop_expand_list(libzfs_handle_t *hdl, zprop_list_t **plp,
 
 typedef struct prop_changelist prop_changelist_t;
 
-extern int zcmd_alloc_dst_nvlist(libzfs_handle_t *, zfs_cmd_t *, size_t);
-extern int zcmd_write_src_nvlist(libzfs_handle_t *, zfs_cmd_t *, nvlist_t *);
-extern int zcmd_write_conf_nvlist(libzfs_handle_t *, zfs_cmd_t *, nvlist_t *);
-extern int zcmd_expand_dst_nvlist(libzfs_handle_t *, zfs_cmd_t *);
+extern void zcmd_alloc_dst_nvlist(libzfs_handle_t *, zfs_cmd_t *, size_t);
+extern void zcmd_write_src_nvlist(libzfs_handle_t *, zfs_cmd_t *, nvlist_t *);
+extern void zcmd_write_conf_nvlist(libzfs_handle_t *, zfs_cmd_t *, nvlist_t *);
+extern void zcmd_expand_dst_nvlist(libzfs_handle_t *, zfs_cmd_t *);
 extern int zcmd_read_dst_nvlist(libzfs_handle_t *, zfs_cmd_t *, nvlist_t **);
 extern void zcmd_free_nvlists(zfs_cmd_t *);
 
@@ -189,7 +178,7 @@ extern void changelist_remove(prop_changelist_t *, const char *);
 extern void changelist_free(prop_changelist_t *);
 extern prop_changelist_t *changelist_gather(zfs_handle_t *, zfs_prop_t, int,
     int);
-extern int changelist_unshare(prop_changelist_t *, zfs_share_proto_t *);
+extern int changelist_unshare(prop_changelist_t *, const enum sa_protocol *);
 extern int changelist_haszonedchild(prop_changelist_t *);
 
 extern void remove_mountpoint(zfs_handle_t *);
@@ -209,11 +198,8 @@ extern int zfs_validate_name(libzfs_handle_t *hdl, const char *path, int type,
 
 extern void namespace_clear(libzfs_handle_t *);
 
-extern int zfs_parse_options(char *, zfs_share_proto_t);
-
 typedef struct {
 	zfs_prop_t p_prop;
-	char *p_name;
 	int p_share_err;
 	int p_unshare_err;
 } proto_table_t;
@@ -227,11 +213,12 @@ typedef struct differ_info {
 	char *ds;
 	char *dsmnt;
 	char *tmpsnap;
-	char errbuf[1024];
+	char errbuf[ERRBUFLEN];
 	boolean_t isclone;
 	boolean_t scripted;
 	boolean_t classify;
 	boolean_t timestamped;
+	boolean_t no_mangle;
 	uint64_t shares;
 	int zerr;
 	int cleanupfd;
@@ -239,25 +226,13 @@ typedef struct differ_info {
 	int datafd;
 } differ_info_t;
 
-extern proto_table_t proto_table[PROTO_END];
-
-extern int do_mount(zfs_handle_t *zhp, const char *mntpt, char *opts,
+extern int do_mount(zfs_handle_t *zhp, const char *mntpt, const char *opts,
     int flags);
 extern int do_unmount(zfs_handle_t *zhp, const char *mntpt, int flags);
-extern int zfs_share_proto(zfs_handle_t *zhp, zfs_share_proto_t *proto);
-extern int zfs_unshare_proto(zfs_handle_t *, const char *, zfs_share_proto_t *);
-extern int unshare_one(libzfs_handle_t *hdl, const char *name,
-    const char *mountpoint, zfs_share_proto_t proto);
-extern boolean_t zfs_is_mountable(zfs_handle_t *zhp, char *buf, size_t buflen,
-    zprop_source_t *source, int flags);
-extern zfs_share_type_t is_shared(const char *mountpoint,
-    zfs_share_proto_t proto);
 extern int libzfs_load_module(void);
 extern int zpool_relabel_disk(libzfs_handle_t *hdl, const char *path,
     const char *msg);
 extern int find_shares_object(differ_info_t *di);
-extern void libzfs_set_pipe_max(int infd);
-extern void zfs_commit_proto(zfs_share_proto_t *);
 
 #ifdef	__cplusplus
 }

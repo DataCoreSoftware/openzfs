@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -239,11 +240,14 @@ extern "C" {
 #define	DEV_INSTANCE		"instance"
 #define	DEV_PROP_PREFIX		"prop-"
 
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN32)
 #define	DEV_IDENTIFIER		"devid"
 #define	DEV_PATH		"path"
 #define	DEV_IS_PART		"is_slice"
 #define	DEV_SIZE		"dev_size"
+
+/* Size of the whole parent block device (if dev is a partition) */
+#define	DEV_PARENT_SIZE		"dev_parent_size"
 #endif /* __linux__ */
 
 #define	EV_V1			1

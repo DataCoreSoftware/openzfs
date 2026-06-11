@@ -1,3 +1,4 @@
+.\" SPDX-License-Identifier: MIT
 .\"
 .\" Copyright 2018 Antonio Russo <antonio.e.russo@gmail.com>
 .\" Copyright 2019 Kjeld Schouten-Lebbing <kjeld@schouten-lebbing.nl>
@@ -22,7 +23,7 @@
 .\" OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 .\" WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 .\"
-.Dd May 31, 2021
+.Dd November 30, 2021
 .Dt ZFS-MOUNT-GENERATOR 8
 .Os
 .
@@ -49,7 +50,7 @@ units for configured ZFS datasets.
 .No Skipped if Sy off .
 .No Skipped if only Sy noauto
 datasets exist for a given mountpoint and there's more than one.
-.No Datasets with Sy yes No take precedence over ones with Sy noauto No for the same mountpoint.
+.No Datasets with Sy yes No take precedence over ones with Sy noauto No for the same mountpoint .
 .No Sets logical Em noauto No flag if Sy noauto .
 Encryption roots always generate
 .Sy zfs-load-key@ Ns Ar root Ns Sy .service ,
@@ -94,14 +95,15 @@ as the mount unit.
 .No Sets Sy After Ns = for the mount unit.
 .
 .It Sy org.openzfs.systemd:wanted-by Ns = Ns Pa unit Ns Oo " " Ns Pa unit Oc Ns …
-.No Sets logical Em noauto No flag (see below).
+.No Sets logical Em noauto No flag (see below) .
 .No If not Sy none , No sets Sy WantedBy Ns = for the mount unit.
 .It Sy org.openzfs.systemd:required-by Ns = Ns Pa unit Ns Oo " " Ns Pa unit Oc Ns …
-.No Sets logical Em noauto No flag (see below).
+.No Sets logical Em noauto No flag (see below) .
 .No If not Sy none , No sets Sy RequiredBy Ns = for the mount unit.
 .
 .It Sy org.openzfs.systemd:nofail Ns = Ns (unset) Ns | Ns Sy on Ns | Ns Sy off
-Waxes or wanes strength of default reverse dependencies of the mount unit, see below.
+Waxes or wanes strength of default reverse dependencies of the mount unit, see
+below.
 .
 .It Sy org.openzfs.systemd:ignore Ns = Ns Sy on Ns | Ns Sy off
 .No Skip if Sy on .
@@ -142,22 +144,11 @@ ZEDLET, if enabled
 .Pq see Xr zed 8 .
 .
 .Sh ENVIRONMENT
-The
+If the
 .Sy ZFS_DEBUG
-environment variable can either be
-.Sy 0
-(default),
-.Sy 1
-(print summary accounting information at the end), or at least
-.Sy 2
-(print accounting information for each subprocess as it finishes).
-.
-If not present,
-.Pa /proc/cmdline
-is additionally checked for
-.Qq debug ,
-in which case the debug level is set to
-.Sy 2 .
+environment variable is nonzero
+.Pq or unset and Pa /proc/cmdline No contains Qq Sy debug ,
+print summary accounting information at the end.
 .
 .Sh EXAMPLES
 To begin, enable tracking for the pool:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -25,10 +26,6 @@
 
 #include <sys/types.h>
 #include <sys/simd.h>
-
-#ifdef __linux__
-#define	__asm __asm__ __volatile__
-#endif
 
 #define	_REG_CNT(_0, _1, _2, _3, _4, _5, _6, _7, N, ...) N
 #define	REG_CNT(r...) _REG_CNT(r, 8, 7, 6, 5, 4, 3, 2, 1)
@@ -142,7 +139,7 @@ typedef struct v {
 {								\
 	switch (REG_CNT(r)) {					\
 	case 8:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"lvx 21,0,%[SRC0]\n"				\
 		"lvx 20,0,%[SRC1]\n"				\
 		"lvx 19,0,%[SRC2]\n"				\
@@ -172,7 +169,7 @@ typedef struct v {
 		:	"v18", "v19", "v20", "v21");		\
 		break;						\
 	case 4:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"lvx 21,0,%[SRC0]\n"				\
 		"lvx 20,0,%[SRC1]\n"				\
 		"lvx 19,0,%[SRC2]\n"				\
@@ -189,7 +186,7 @@ typedef struct v {
 		:	"v18", "v19", "v20", "v21");		\
 		break;						\
 	case 2:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"lvx 21,0,%[SRC0]\n"				\
 		"lvx 20,0,%[SRC1]\n"				\
 		"vxor " VR0(r) "," VR0(r) ",21\n"		\
@@ -208,7 +205,7 @@ typedef struct v {
 {								\
 	switch (REG_CNT(r)) {					\
 	case 8:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"vxor " VR4(r) "," VR4(r) "," VR0(r) "\n"	\
 		"vxor " VR5(r) "," VR5(r) "," VR1(r) "\n"	\
 		"vxor " VR6(r) "," VR6(r) "," VR2(r) "\n"	\
@@ -217,7 +214,7 @@ typedef struct v {
 		:	RVR0(r), RVR1(r), RVR2(r), RVR3(r));	\
 		break;						\
 	case 4:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"vxor " VR2(r) "," VR2(r) "," VR0(r) "\n"	\
 		"vxor " VR3(r) "," VR3(r) "," VR1(r) "\n"	\
 		:	UVR2(r), UVR3(r)			\
@@ -232,7 +229,7 @@ typedef struct v {
 {								\
 	switch (REG_CNT(r)) {					\
 	case 8:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"vxor " VR0(r) "," VR0(r) "," VR0(r) "\n"	\
 		"vxor " VR1(r) "," VR1(r) "," VR1(r) "\n"	\
 		"vxor " VR2(r) "," VR2(r) "," VR2(r) "\n"	\
@@ -245,7 +242,7 @@ typedef struct v {
 			WVR4(r), WVR5(r), WVR6(r), WVR7(r));	\
 		break;						\
 	case 4:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"vxor " VR0(r) "," VR0(r) "," VR0(r) "\n"	\
 		"vxor " VR1(r) "," VR1(r) "," VR1(r) "\n"	\
 		"vxor " VR2(r) "," VR2(r) "," VR2(r) "\n"	\
@@ -253,7 +250,7 @@ typedef struct v {
 		:	WVR0(r), WVR1(r), WVR2(r), WVR3(r));	\
 		break;						\
 	case 2:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"vxor " VR0(r) "," VR0(r) "," VR0(r) "\n"	\
 		"vxor " VR1(r) "," VR1(r) "," VR1(r) "\n"	\
 		:	WVR0(r), WVR1(r));			\
@@ -267,7 +264,7 @@ typedef struct v {
 {								\
 	switch (REG_CNT(r)) {					\
 	case 8:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"vor " VR4(r) "," VR0(r) "," VR0(r) "\n"	\
 		"vor " VR5(r) "," VR1(r) "," VR1(r) "\n"	\
 		"vor " VR6(r) "," VR2(r) "," VR2(r) "\n"	\
@@ -276,7 +273,7 @@ typedef struct v {
 		:	RVR0(r), RVR1(r), RVR2(r), RVR3(r));	\
 		break;						\
 	case 4:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"vor " VR2(r) "," VR0(r) "," VR0(r) "\n"	\
 		"vor " VR3(r) "," VR1(r) "," VR1(r) "\n"	\
 		:	WVR2(r), WVR3(r)			\
@@ -291,7 +288,7 @@ typedef struct v {
 {								\
 	switch (REG_CNT(r)) {					\
 	case 8:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"lvx " VR0(r) " ,0,%[SRC0]\n"			\
 		"lvx " VR1(r) " ,0,%[SRC1]\n"			\
 		"lvx " VR2(r) " ,0,%[SRC2]\n"			\
@@ -312,7 +309,7 @@ typedef struct v {
 		[SRC7] "r" ((OFFSET(src, 112))));		\
 		break;						\
 	case 4:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"lvx " VR0(r) " ,0,%[SRC0]\n"			\
 		"lvx " VR1(r) " ,0,%[SRC1]\n"			\
 		"lvx " VR2(r) " ,0,%[SRC2]\n"			\
@@ -324,7 +321,7 @@ typedef struct v {
 		[SRC3] "r" ((OFFSET(src, 48))));		\
 		break;						\
 	case 2:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"lvx " VR0(r) " ,0,%[SRC0]\n"			\
 		"lvx " VR1(r) " ,0,%[SRC1]\n"			\
 		:	WVR0(r), WVR1(r)			\
@@ -340,7 +337,7 @@ typedef struct v {
 {								\
 	switch (REG_CNT(r)) {					\
 	case 8:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"stvx " VR0(r) " ,0,%[DST0]\n"			\
 		"stvx " VR1(r) " ,0,%[DST1]\n"			\
 		"stvx " VR2(r) " ,0,%[DST2]\n"			\
@@ -362,7 +359,7 @@ typedef struct v {
 		:	"memory");				\
 		break;						\
 	case 4:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"stvx " VR0(r) " ,0,%[DST0]\n"			\
 		"stvx " VR1(r) " ,0,%[DST1]\n"			\
 		"stvx " VR2(r) " ,0,%[DST2]\n"			\
@@ -375,7 +372,7 @@ typedef struct v {
 		: "memory");					\
 		break;						\
 	case 2:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"stvx " VR0(r) " ,0,%[DST0]\n"			\
 		"stvx " VR1(r) " ,0,%[DST1]\n"			\
 		: :	[DST0] "r" ((OFFSET(dst, 0))),		\
@@ -400,7 +397,7 @@ typedef struct v {
 
 #define	MUL2_SETUP()						\
 {								\
-	__asm(							\
+	__asm__ __volatile__(					\
 		"vspltisb " VR(16) ",14\n"			\
 		"vspltisb " VR(17) ",15\n"			\
 		"vaddubm " VR(16) "," VR(17) "," VR(16) "\n"	\
@@ -412,7 +409,7 @@ typedef struct v {
 {								\
 	switch (REG_CNT(r)) {					\
 	case 4:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"vcmpgtsb 19," VR(17) "," VR0(r) "\n"		\
 		"vcmpgtsb 18," VR(17) "," VR1(r) "\n"		\
 		"vcmpgtsb 21," VR(17) "," VR2(r) "\n"		\
@@ -434,7 +431,7 @@ typedef struct v {
 		:	"v18", "v19", "v20", "v21");		\
 		break;						\
 	case 2:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		"vcmpgtsb 19," VR(17) "," VR0(r) "\n"		\
 		"vcmpgtsb 18," VR(17) "," VR1(r) "\n"		\
 		"vand 19,19," VR(16) "\n"			\
@@ -478,7 +475,7 @@ typedef struct v {
 {								\
 	switch (REG_CNT(r)) {					\
 	case 2:							\
-		__asm(						\
+		__asm__ __volatile__(				\
 		/* lts for upper part */			\
 		"vspltisb 15,15\n"				\
 		"lvx 10,0,%[lt0]\n"				\

@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -46,19 +47,18 @@ verify_runnable "both"
 
 function additional_cleanup
 {
-	if datasetexists $TESTPOOL/notexist ; then
-		log_must zfs destroy -Rf $TESTPOOL/notexist
-	fi
+	datasetexists $TESTPOOL/notexist && \
+		destroy_dataset $TESTPOOL/notexist -Rf
 
-	if datasetexists $TESTPOOL/$TESTFS ; then
-		log_must zfs destroy -Rf $TESTPOOL/$TESTFS
-	fi
+	datasetexists $TESTPOOL/$TESTFS && \
+		destroy_dataset $TESTPOOL/$TESTFS -Rf
+
 	log_must zfs create $TESTPOOL/$TESTFS
 
 	if is_global_zone ; then
-		if datasetexists $TESTPOOL/$TESTVOL ; then
-			log_must zfs destroy -Rf $TESTPOOL/$TESTVOL
-		fi
+		datasetexists $TESTPOOL/$TESTVOL && \
+			destroy_dataset $TESTPOOL/$TESTVOL -Rf
+
 		log_must zfs create -V $VOLSIZE $TESTPOOL/$TESTVOL
 	fi
 }

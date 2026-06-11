@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -76,25 +77,20 @@ function cleanup
 	ds=$TESTPOOL/$TESTCLONE
 	if datasetexists $ds; then
 		mntp=$(get_prop mountpoint $ds)
-		log_must zfs destroy $ds
-		if [[ -d $mntp ]]; then
-			rm -fr $mntp
-		fi
+		destroy_dataset $ds
+		[ -d $mntp ] && rm -fr $mntp
 	fi
 
-	if snapexists $TESTPOOL/$TESTFS@$TESTSNAP ; then
-		log_must zfs destroy -R $TESTPOOL/$TESTFS@$TESTSNAP
-	fi
-	if snapexists $TESTPOOL/$TESTVOL@$TESTSNAP ; then
-		log_must zfs destroy -R $TESTPOOL/$TESTVOL@$TESTSNAP
-	fi
+	snapexists $TESTPOOL/$TESTFS@$TESTSNAP && \
+		destroy_dataset $TESTPOOL/$TESTFS@$TESTSNAP -R
+
+	snapexists $TESTPOOL/$TESTVOL@$TESTSNAP && \
+		destroy_dataset $TESTPOOL/$TESTVOL@$TESTSNAP -R
 
 	zfs unmount -a > /dev/null 2>&1
 	log_must zfs mount -a
 
-	if [[ -d $tmpmnt ]]; then
-		rm -fr $tmpmnt
-	fi
+	[ -d $tmpmnt ] && rm -fr $tmpmnt
 }
 
 log_assert "Setting canmount=noauto to file system, it must be successful."
@@ -126,7 +122,7 @@ while (( i < ${#dataset_pos[*]} )) ; do
 	set_n_check_prop "noauto" "canmount" "$dataset"
 	log_must zfs set mountpoint=$tmpmnt $dataset
 	log_must zfs set sharenfs=on $dataset
-	if  ismounted $dataset; then
+	if ismounted $dataset; then
 		zfs unmount -a > /dev/null 2>&1
 		log_must mounted $dataset
 		log_must zfs unmount $dataset

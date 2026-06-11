@@ -110,4 +110,18 @@
 
 #define	_LITTLE_ENDIAN
 
+
+/*
+ * CPU and scheduling constants for Windows userland (libzpool/libzutil/zdb).
+ * In the kernel build these come from include/os/windows/spl/sys/sysmacros.h.
+ */
+#define	max_ncpus		64
+#define	boot_ncpus		64
+#define	minclsyspri		19
+#define	defclsyspri		60
+#define	maxclsyspri		99
+#define	wtqclsyspri		defclsyspri
+#define	CPU_SEQID		0
+#define	CPU_SEQID_UNSTABLE	0
+
 #endif /* _LIBSPL_SYS_SYSMACROS_H */

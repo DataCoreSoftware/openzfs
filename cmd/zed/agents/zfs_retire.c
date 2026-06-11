@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -41,6 +42,7 @@
 #include <libzutil.h>
 #include <libzfs.h>
 #include <string.h>
+#include <libgen.h>
 
 #include "zfs_agents.h"
 #include "fmd_api.h"
@@ -75,6 +77,8 @@ typedef struct find_cbdata {
 	uint64_t	cb_guid;
 	zpool_handle_t	*cb_zhp;
 	nvlist_t	*cb_vdev;
+	uint64_t	cb_vdev_guid;
+	uint64_t	cb_num_spares;
 } find_cbdata_t;
 
 static int
@@ -138,6 +142,64 @@ find_vdev(libzfs_handle_t *zhdl, nvlist_t *nv, uint64_t search_guid)
 	}
 
 	return (NULL);
+}
+
+static int
+remove_spares(zpool_handle_t *zhp, void *data)
+{
+	nvlist_t *config, *nvroot;
+	nvlist_t **spares;
+	uint_t nspares;
+	char *devname;
+	find_cbdata_t *cbp = data;
+	uint64_t spareguid = 0;
+	vdev_stat_t *vs;
+	unsigned int c;
+
+	config = zpool_get_config(zhp, NULL);
+	if (nvlist_lookup_nvlist(config,
+	    ZPOOL_CONFIG_VDEV_TREE, &nvroot) != 0) {
+		zpool_close(zhp);
+		return (0);
+	}
+
+	if (nvlist_lookup_nvlist_array(nvroot, ZPOOL_CONFIG_SPARES,
+	    &spares, &nspares) != 0) {
+		zpool_close(zhp);
+		return (0);
+	}
+
+	for (int i = 0; i < nspares; i++) {
+		if (nvlist_lookup_uint64(spares[i], ZPOOL_CONFIG_GUID,
+		    &spareguid) == 0 && spareguid == cbp->cb_vdev_guid) {
+			devname = zpool_vdev_name(NULL, zhp, spares[i],
+			    B_FALSE);
+			nvlist_lookup_uint64_array(spares[i],
+			    ZPOOL_CONFIG_VDEV_STATS, (uint64_t **)&vs, &c);
+			if (vs->vs_state != VDEV_STATE_REMOVED &&
+			    zpool_vdev_remove_wanted(zhp, devname) == 0)
+				cbp->cb_num_spares++;
+			break;
+		}
+	}
+
+	zpool_close(zhp);
+	return (0);
+}
+
+/*
+ * Given a vdev guid, find and remove all spares associated with it.
+ */
+static int
+find_and_remove_spares(libzfs_handle_t *zhdl, uint64_t vdev_guid)
+{
+	find_cbdata_t cb;
+
+	cb.cb_num_spares = 0;
+	cb.cb_vdev_guid = vdev_guid;
+	zpool_iter(zhdl, remove_spares, &cb);
+
+	return (cb.cb_num_spares);
 }
 
 /*
@@ -221,7 +283,7 @@ replace_with_spare(fmd_hdl_t *hdl, zpool_handle_t *zhp, nvlist_t *vdev)
 	 */
 	for (s = 0; s < nspares; s++) {
 		boolean_t rebuild = B_FALSE;
-		char *spare_name, *type;
+		const char *spare_name, *type;
 
 		if (nvlist_lookup_string(spares[s], ZPOOL_CONFIG_PATH,
 		    &spare_name) != 0)
@@ -238,7 +300,7 @@ replace_with_spare(fmd_hdl_t *hdl, zpool_handle_t *zhp, nvlist_t *vdev)
 			    ZPOOL_CONFIG_ASHIFT, ashift);
 
 		(void) nvlist_add_nvlist_array(replacement,
-		    ZPOOL_CONFIG_CHILDREN, &spares[s], 1);
+		    ZPOOL_CONFIG_CHILDREN, (const nvlist_t **)&spares[s], 1);
 
 		fmd_hdl_debug(hdl, "zpool_vdev_replace '%s' with spare '%s'",
 		    dev_name, zfs_basename(spare_name));
@@ -262,7 +324,6 @@ replace_with_spare(fmd_hdl_t *hdl, zpool_handle_t *zhp, nvlist_t *vdev)
  * ASRU is now usable.  ZFS has found the device to be present and
  * functioning.
  */
-/*ARGSUSED*/
 static void
 zfs_vdev_repair(fmd_hdl_t *hdl, nvlist_t *nvl)
 {
@@ -301,11 +362,11 @@ zfs_vdev_repair(fmd_hdl_t *hdl, nvlist_t *nvl)
 	    vdev_guid, pool_guid);
 }
 
-/*ARGSUSED*/
 static void
 zfs_retire_recv(fmd_hdl_t *hdl, fmd_event_t *ep, nvlist_t *nvl,
     const char *class)
 {
+	(void) ep;
 	uint64_t pool_guid, vdev_guid;
 	zpool_handle_t *zhp;
 	nvlist_t *resource, *fault;
@@ -315,18 +376,23 @@ zfs_retire_recv(fmd_hdl_t *hdl, fmd_event_t *ep, nvlist_t *nvl,
 	libzfs_handle_t *zhdl = zdp->zrd_hdl;
 	boolean_t fault_device, degrade_device;
 	boolean_t is_repair;
-	char *scheme;
+	boolean_t l2arc = B_FALSE;
+	boolean_t spare = B_FALSE;
+	const char *scheme;
 	nvlist_t *vdev = NULL;
-	char *uuid;
+	const char *uuid;
 	int repair_done = 0;
 	boolean_t retire;
 	boolean_t is_disk;
 	vdev_aux_t aux;
 	uint64_t state = 0;
+	vdev_stat_t *vs;
+	unsigned int c;
 
 	fmd_hdl_debug(hdl, "zfs_retire_recv: '%s'", class);
 
-	nvlist_lookup_uint64(nvl, FM_EREPORT_PAYLOAD_ZFS_VDEV_STATE, &state);
+	(void) nvlist_lookup_uint64(nvl, FM_EREPORT_PAYLOAD_ZFS_VDEV_STATE,
+	    &state);
 
 	/*
 	 * If this is a resource notifying us of device removal then simply
@@ -336,13 +402,35 @@ zfs_retire_recv(fmd_hdl_t *hdl, fmd_event_t *ep, nvlist_t *nvl,
 	if (strcmp(class, "resource.fs.zfs.removed") == 0 ||
 	    (strcmp(class, "resource.fs.zfs.statechange") == 0 &&
 	    (state == VDEV_STATE_REMOVED || state == VDEV_STATE_FAULTED))) {
-		char *devtype;
+		const char *devtype;
 		char *devname;
+		boolean_t skip_removal = B_FALSE;
+
+		if (nvlist_lookup_string(nvl, FM_EREPORT_PAYLOAD_ZFS_VDEV_TYPE,
+		    &devtype) == 0) {
+			if (strcmp(devtype, VDEV_TYPE_SPARE) == 0)
+				spare = B_TRUE;
+			else if (strcmp(devtype, VDEV_TYPE_L2CACHE) == 0)
+				l2arc = B_TRUE;
+		}
+
+		if (nvlist_lookup_uint64(nvl,
+		    FM_EREPORT_PAYLOAD_ZFS_VDEV_GUID, &vdev_guid) != 0)
+			return;
+
+		if (vdev_guid == 0) {
+			fmd_hdl_debug(hdl, "Got a zero GUID");
+			return;
+		}
+
+		if (spare) {
+			int nspares = find_and_remove_spares(zhdl, vdev_guid);
+			fmd_hdl_debug(hdl, "%d spares removed", nspares);
+			return;
+		}
 
 		if (nvlist_lookup_uint64(nvl, FM_EREPORT_PAYLOAD_ZFS_POOL_GUID,
-		    &pool_guid) != 0 ||
-		    nvlist_lookup_uint64(nvl, FM_EREPORT_PAYLOAD_ZFS_VDEV_GUID,
-		    &vdev_guid) != 0)
+		    &pool_guid) != 0)
 			return;
 
 		if ((zhp = find_by_guid(zhdl, pool_guid, vdev_guid,
@@ -351,13 +439,40 @@ zfs_retire_recv(fmd_hdl_t *hdl, fmd_event_t *ep, nvlist_t *nvl,
 
 		devname = zpool_vdev_name(NULL, zhp, vdev, B_FALSE);
 
-		/* Can't replace l2arc with a spare: offline the device */
-		if (nvlist_lookup_string(nvl, FM_EREPORT_PAYLOAD_ZFS_VDEV_TYPE,
-		    &devtype) == 0 && strcmp(devtype, VDEV_TYPE_L2CACHE) == 0) {
-			fmd_hdl_debug(hdl, "zpool_vdev_offline '%s'", devname);
-			zpool_vdev_offline(zhp, devname, B_TRUE);
-		} else if (!fmd_prop_get_int32(hdl, "spare_on_remove") ||
-		    replace_with_spare(hdl, zhp, vdev) == B_FALSE) {
+		nvlist_lookup_uint64_array(vdev, ZPOOL_CONFIG_VDEV_STATS,
+		    (uint64_t **)&vs, &c);
+
+		if (vs->vs_state == VDEV_STATE_OFFLINE)
+			return;
+
+		/*
+		 * If state removed is requested for already removed vdev,
+		 * its a loopback event from spa_async_remove(). Just
+		 * ignore it.
+		 */
+		if ((vs->vs_state == VDEV_STATE_REMOVED &&
+		    state == VDEV_STATE_REMOVED)) {
+			if (strcmp(class, "resource.fs.zfs.removed") == 0 &&
+			    nvlist_exists(nvl, "by_kernel")) {
+				skip_removal = B_TRUE;
+			} else {
+				return;
+			}
+		}
+
+		/* Remove the vdev since device is unplugged */
+		int remove_status = 0;
+		if (!skip_removal && (l2arc ||
+		    (strcmp(class, "resource.fs.zfs.removed") == 0))) {
+			remove_status = zpool_vdev_remove_wanted(zhp, devname);
+			fmd_hdl_debug(hdl, "zpool_vdev_remove_wanted '%s'"
+			    ", err:%d", devname, libzfs_errno(zhdl));
+		}
+
+		/* Replace the vdev with a spare if its not a l2arc */
+		if (!l2arc && !remove_status &&
+		    (!fmd_prop_get_int32(hdl, "spare_on_remove") ||
+		    replace_with_spare(hdl, zhp, vdev) == B_FALSE)) {
 			/* Could not handle with spare */
 			fmd_hdl_debug(hdl, "no spare for '%s'", devname);
 		}
@@ -419,6 +534,9 @@ zfs_retire_recv(fmd_hdl_t *hdl, fmd_event_t *ep, nvlist_t *nvl,
 			fault_device = B_TRUE;
 		} else if (fmd_nvl_class_match(hdl, fault,
 		    "fault.fs.zfs.vdev.checksum")) {
+			degrade_device = B_TRUE;
+		} else if (fmd_nvl_class_match(hdl, fault,
+		    "fault.fs.zfs.vdev.slow_io")) {
 			degrade_device = B_TRUE;
 		} else if (fmd_nvl_class_match(hdl, fault,
 		    "fault.fs.zfs.device")) {

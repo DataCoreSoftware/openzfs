@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -23,9 +24,9 @@
  */
 
 #include <sys/list.h>
-#include <sys/mutex.h>
 #include <sys/procfs_list.h>
 #include <linux/proc_fs.h>
+#include <sys/mutex.h>
 
 /*
  * A procfs_list is a wrapper around a linked list which implements the seq_file
@@ -158,7 +159,7 @@ procfs_list_seq_stop(struct seq_file *f, void *p)
 	mutex_exit(&procfs_list->pl_lock);
 }
 
-static struct seq_operations procfs_list_seq_ops = {
+static const struct seq_operations procfs_list_seq_ops = {
 	.show  = procfs_list_seq_show,
 	.start = procfs_list_seq_start,
 	.next  = procfs_list_seq_next,
@@ -175,7 +176,7 @@ procfs_list_open(struct inode *inode, struct file *filp)
 
 	struct seq_file *f = filp->private_data;
 	procfs_list_cursor_t *cursor = f->private;
-	cursor->procfs_list = PDE_DATA(inode);
+	cursor->procfs_list = SPL_PDE_DATA(inode);
 	cursor->cached_node = NULL;
 	cursor->cached_pos = 0;
 
@@ -234,7 +235,7 @@ procfs_list_install(const char *module,
 		modulestr = kmem_asprintf("%s/%s", module, submodule);
 	else
 		modulestr = kmem_asprintf("%s", module);
-	mutex_init(&procfs_list->pl_lock, NULL, MUTEX_DEFAULT, NULL);
+	mutex_init(&procfs_list->pl_lock, NULL, MUTEX_NOLOCKDEP, NULL);
 	list_create(&procfs_list->pl_list,
 	    procfs_list_node_off + sizeof (procfs_list_node_t),
 	    procfs_list_node_off + offsetof(procfs_list_node_t, pln_link));

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * This file and its contents are supplied under the terms of the
  * Common Development and Distribution License ("CDDL"), version 1.0.
@@ -293,7 +294,8 @@ lzbe_add_pair(void *ptr, const char *key, const char *type, void *value,
 		break;
 
 	case DATA_TYPE_NVLIST_ARRAY:
-		rv = nvlist_add_nvlist_array(nv, key, value, size);
+		rv = nvlist_add_nvlist_array(nv, key, (const nvlist_t **)value,
+		    size);
 		break;
 
 	case DATA_TYPE_BOOLEAN_VALUE:

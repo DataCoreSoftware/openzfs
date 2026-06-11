@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2006-2007 Pawel Jakub Dawidek <pjd@FreeBSD.org>
  * All rights reserved.
@@ -23,9 +24,6 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-
-#include <sys/cdefs.h>
-__FBSDID("$FreeBSD$");
 
 #include <sys/types.h>
 #include <sys/param.h>
@@ -85,7 +83,7 @@ vfs_setmntopt(vfs_t *vfsp, const char *name, const char *arg,
 	} else {
 		opt->len = strlen(arg) + 1;
 		opt->value = malloc(opt->len, M_MOUNT, M_WAITOK);
-		bcopy(arg, opt->value, opt->len);
+		memcpy(opt->value, arg, opt->len);
 	}
 
 	MNT_ILOCK(vfsp);
@@ -120,12 +118,11 @@ vfs_optionisset(const vfs_t *vfsp, const char *opt, char **argp)
 
 int
 mount_snapshot(kthread_t *td, vnode_t **vpp, const char *fstype, char *fspath,
-    char *fspec, int fsflags)
+    char *fspec, int fsflags, vfs_t *parent_vfsp)
 {
 	struct vfsconf *vfsp;
 	struct mount *mp;
 	vnode_t *vp, *mvp;
-	struct ucred *cr;
 	int error;
 
 	ASSERT_VOP_ELOCKED(*vpp, "mount_snapshot");
@@ -162,7 +159,7 @@ mount_snapshot(kthread_t *td, vnode_t **vpp, const char *fstype, char *fspath,
 		return (error);
 	}
 	vn_seqc_write_begin(vp);
-	VOP_UNLOCK1(vp);
+	VOP_UNLOCK(vp);
 
 	/*
 	 * Allocate and initialize the filesystem.
@@ -194,15 +191,8 @@ mount_snapshot(kthread_t *td, vnode_t **vpp, const char *fstype, char *fspath,
 	 * mount(8) and df(1) output.
 	 */
 	mp->mnt_flag |= MNT_IGNORE;
-	/*
-	 * XXX: This is evil, but we can't mount a snapshot as a regular user.
-	 * XXX: Is is safe when snapshot is mounted from within a jail?
-	 */
-	cr = td->td_ucred;
-	td->td_ucred = kcred;
-	error = VFS_MOUNT(mp);
-	td->td_ucred = cr;
 
+	error = VFS_MOUNT(mp);
 	if (error != 0) {
 		/*
 		 * Clear VI_MOUNT and decrement the use count "atomically",
@@ -227,6 +217,13 @@ mount_snapshot(kthread_t *td, vnode_t **vpp, const char *fstype, char *fspath,
 		vfs_freeopts(mp->mnt_opt);
 	mp->mnt_opt = mp->mnt_optnew;
 	(void) VFS_STATFS(mp, &mp->mnt_stat);
+
+#ifdef VFS_SUPPORTS_EXJAIL_CLONE
+	/*
+	 * Clone the mnt_exjail credentials of the parent, as required.
+	 */
+	vfs_exjail_clone(parent_vfsp, mp);
+#endif
 
 	/*
 	 * Prevent external consumers of mount options from reading
@@ -253,13 +250,17 @@ mount_snapshot(kthread_t *td, vnode_t **vpp, const char *fstype, char *fspath,
 	if (VFS_ROOT(mp, LK_EXCLUSIVE, &mvp))
 		panic("mount: lost mount");
 	vn_seqc_write_end(vp);
-	VOP_UNLOCK1(vp);
-#if __FreeBSD_version >= 1300048
+	VOP_UNLOCK(vp);
 	vfs_op_exit(mp);
-#endif
 	vfs_unbusy(mp);
 	*vpp = mvp;
 	return (0);
+}
+
+static void
+vrele_task_runner(void *vp)
+{
+	vrele((vnode_t *)vp);
 }
 
 /*
@@ -276,12 +277,8 @@ void
 vn_rele_async(vnode_t *vp, taskq_t *taskq)
 {
 	VERIFY3U(vp->v_usecount, >, 0);
-	if (refcount_release_if_not_last(&vp->v_usecount)) {
-#if __FreeBSD_version < 1300045
-		vdrop(vp);
-#endif
+	if (refcount_release_if_not_last(&vp->v_usecount))
 		return;
-	}
-	VERIFY3U(taskq_dispatch((taskq_t *)taskq,
-	    (task_func_t *)vrele, vp, TQ_SLEEP), !=, 0);
+	VERIFY3U(taskq_dispatch((taskq_t *)taskq, vrele_task_runner, vp,
+	    TQ_SLEEP), !=, 0);
 }

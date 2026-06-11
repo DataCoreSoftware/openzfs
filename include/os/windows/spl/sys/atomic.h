@@ -21,7 +21,7 @@
 
 /*
  *
- * OSX Atomic functions using GCC builtins.
+ * Windows Atomic functions using GCC builtins.
  *
  * Jorgen Lundman <lundman@lundman.net>
  * Portions Copyright 2022 Andrew Innes <andrew.c12@gmail.com>
@@ -32,20 +32,51 @@
 #define	_SPL_ATOMIC_H
 
 #include <sys/types.h>
+#include <ntifs.h>
+
+#ifdef __aarch64__
+#include <arm64intr.h>
+#endif
 
 #ifdef	__cplusplus
 extern "C" {
 #endif
 
-
-/*
- *
- * GCC atomic versions. These are preferrable once we sort out compatibility
- * issues with GCC versions?
- */
+#ifndef InterlockedIncrement
+#define	InterlockedIncrement _InterlockedIncrement
+#endif
+#ifndef InterlockedIncrement64
+#define	InterlockedIncrement64 _InterlockedIncrement64
+#endif
+#ifndef InterlockedDecrement
+#define	InterlockedDecrement _InterlockedDecrement
+#endif
+#ifndef InterlockedDecrement64
+#define	InterlockedDecrement64 _InterlockedDecrement64
+#endif
+#ifndef InterlockedExchange
+#define	InterlockedExchange _InterlockedExchange
+#endif
+#ifndef InterlockedExchange64
+#define	InterlockedExchange64 _InterlockedExchange64
+#endif
+#ifndef InterlockedExchangeAdd
+#define	InterlockedExchangeAdd _InterlockedExchangeAdd
+#endif
+#ifndef InterlockedExchangeAdd64
+#define	InterlockedExchangeAdd64 _InterlockedExchangeAdd64
+#endif
+#ifndef InterlockedCompareExchange
+#define	InterlockedCompareExchange _InterlockedCompareExchange
+#endif
+#ifndef InterlockedCompareExchange64
+#define	InterlockedCompareExchange64 _InterlockedCompareExchange64
+#endif
+#ifndef InterlockedCompareExchangePointer
+#define	InterlockedCompareExchangePointer _InterlockedCompareExchangePointer
+#endif
 
 /* The _nv variants return the NewValue */
-
 /*
  * Increment target
  */
@@ -172,6 +203,20 @@ atomic_swap_32(volatile uint32_t *_target, uint32_t _new)
 	return (InterlockedExchange((volatile LONG *)_target, _new));
 }
 
+#if defined(__clang__)
+static inline uint32_t
+atomic_load_32(volatile uint32_t *target)
+{
+	return (__atomic_load_n(target, __ATOMIC_RELAXED));
+}
+
+static inline void
+atomic_store_32(volatile uint32_t *target, uint32_t bits)
+{
+	return (__atomic_store_n(target, bits, __ATOMIC_RELAXED));
+}
+#endif
+
 static inline uint64_t
 atomic_swap_64(volatile uint64_t *_target, uint64_t _new)
 {
@@ -197,7 +242,31 @@ atomic_store_64(volatile uint64_t *target, uint64_t bits)
 static inline void
 membar_producer(void)
 {
+#ifdef __aarch64__
+	__dmb(_ARM64_BARRIER_ISHST);
+#else
+	_mm_sfence();
+#endif
+}
+
+static inline void
+membar_consumer(void)
+{
+#ifdef __aarch64__
+	__dmb(_ARM64_BARRIER_ISHLD);
+#else
+	_mm_lfence();
+#endif
+}
+
+static inline void
+membar_sync(void)
+{
+#ifdef __aarch64__
+	__dmb(_ARM64_BARRIER_SY);
+#else
 	_mm_mfence();
+#endif
 }
 
 #ifdef	__cplusplus

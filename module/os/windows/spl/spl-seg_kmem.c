@@ -83,36 +83,45 @@
  * Rough stubbed Port for XNU.
  *
  * Copyright (c) 2014 Brendon Humphrey (brendon.humphrey@mac.com)
+ * Copyright (c) 2023 Jorgen Lundman (lundman@lundman.net)
  */
 
 
 #ifdef _KERNEL
-#define	XNU_KERNEL_PRIVATE
-
 #include <Trace.h>
-
+#include <sys/mod.h>
 #endif /* _KERNEL */
 
 typedef int page_t;
 
 void *segkmem_alloc(vmem_t *vmp, size_t size, int vmflag);
-void segkmem_free(vmem_t *vmp, void *inaddr, size_t size);
+void segkmem_free(vmem_t *vmp, const void *inaddr, size_t size);
 
 /* Total memory held allocated */
 uint64_t segkmem_total_mem_allocated = 0;
+ZFS_MODULE_RAW(spl, segkmem_total_mem_allocated, segkmem_total_mem_allocated,
+    U64, ZMOD_RD, 0, "Total memory allocated.");
 
 /* primary kernel heap arena */
 vmem_t *heap_arena;
 
 /* qcaches abd */
 vmem_t *abd_arena;
+vmem_t *abd_subpage_arena;
 
 #ifdef _KERNEL
 extern uint64_t total_memory;
 uint64_t stat_osif_malloc_success = 0;
+uint64_t stat_osif_malloc_fail = 0;
 uint64_t stat_osif_free = 0;
 uint64_t stat_osif_malloc_bytes = 0;
 uint64_t stat_osif_free_bytes = 0;
+uint64_t stat_osif_malloc_sub128k = 0;
+uint64_t stat_osif_malloc_sub64k = 0;
+uint64_t stat_osif_malloc_sub32k = 0;
+uint64_t stat_osif_malloc_page = 0;
+uint64_t stat_osif_malloc_subpage = 0;
+void spl_free_set_emergency_pressure(int64_t new_p);
 #endif
 
 void *
@@ -120,6 +129,17 @@ osif_malloc(uint64_t size)
 {
 #ifdef _KERNEL
 	void *tr = NULL;
+
+	if (size < PAGESIZE)
+		atomic_inc_64(&stat_osif_malloc_subpage);
+	else if (size == PAGESIZE)
+		atomic_inc_64(&stat_osif_malloc_page);
+	else if (size < 32768)
+		atomic_inc_64(&stat_osif_malloc_sub32k);
+	else if (size < 65536)
+		atomic_inc_64(&stat_osif_malloc_sub64k);
+	else if (size < 131072)
+		atomic_inc_64(&stat_osif_malloc_sub128k);
 
 	tr = ExAllocatePoolWithTag(NonPagedPoolNx, size, '!SFZ');
 	ASSERT(P2PHASE(tr, PAGE_SIZE) == 0);
@@ -131,11 +151,8 @@ osif_malloc(uint64_t size)
 	} else {
 		dprintf("%s:%d: ExAllocatePoolWithTag failed (memusage: %llu)"
 		    "\n", __func__, __LINE__, segkmem_total_mem_allocated);
-		ASSERT(0);
-		extern volatile unsigned int vm_page_free_wanted;
-		extern volatile unsigned int vm_page_free_min;
-		spl_free_set_pressure(vm_page_free_min);
-		vm_page_free_wanted = vm_page_free_min;
+
+		atomic_inc_64(&stat_osif_malloc_fail);
 		return (NULL);
 	}
 #else
@@ -144,7 +161,7 @@ osif_malloc(uint64_t size)
 }
 
 void
-osif_free(void *buf, uint64_t size)
+osif_free(const void *buf, uint64_t size)
 {
 #ifdef _KERNEL
 	ExFreePoolWithTag(buf, '!SFZ');
@@ -163,7 +180,13 @@ osif_free(void *buf, uint64_t size)
 void
 kernelheap_init()
 {
-	heap_arena = vmem_init("heap", NULL, 0, PAGESIZE, segkmem_alloc,
+	heap_arena = vmem_init("heap", NULL, 0,
+#if defined(__arm64__)
+	    4096,
+#else
+	    PAGESIZE,
+#endif
+	    segkmem_alloc,
 	    segkmem_free);
 }
 
@@ -181,7 +204,7 @@ segkmem_alloc(vmem_t *vmp, size_t size, int maybe_unmasked_vmflag)
 }
 
 void
-segkmem_free(vmem_t *vmp, void *inaddr, size_t size)
+segkmem_free(vmem_t *vmp, const void *inaddr, size_t size)
 {
 	osif_free(inaddr, size);
 	// since this is mainly called by spl_root_arena and free_arena,
@@ -207,24 +230,64 @@ segkmem_abd_init()
 	/*
 	 * OpenZFS does not segregate the abd kmem cache out of the general
 	 * heap, leading to large numbers of short-lived slabs exchanged
-	 * between the kmem cache and it's parent.  XNU absorbs this with a
-	 * qcache, following its history of absorbing the pre-ABD zio file and
-	 * metadata caches being qcached (which raises the exchanges with the
-	 * general heap from PAGESIZE to 256k).
+	 * between the kmem cache and it's parent.  XNU absorbs this with a a
+	 * large minimum request to the parent vmem_caches on large-memory
+	 * MacOS systems.
 	 */
 
 	extern vmem_t *spl_heap_arena;
 
-	abd_arena = vmem_create("abd_cache", NULL, 0,
-	    PAGESIZE, vmem_alloc, vmem_free, spl_heap_arena,
-	    131072, VM_SLEEP | VMC_NO_QCACHE | VM_FIRSTFIT);
+#define	BIG_SLAB (PAGESIZE * 16)
 
-	ASSERT(abd_arena != NULL);
+#define	SMALL_RAM_MACHINE (4ULL * 1024ULL * 1024ULL * 1024ULL)
+
+	if (total_memory >= SMALL_RAM_MACHINE) {
+		abd_arena = vmem_create("abd_cache", NULL, 0,
+		    sizeof (void *),
+		    vmem_alloc_impl, vmem_free_impl, spl_heap_arena,
+		    BIG_SLAB, VM_SLEEP | VMC_NO_QCACHE);
+	} else {
+		abd_arena = vmem_create("abd_cache", NULL, 0,
+		    sizeof (void *),
+		    vmem_alloc_impl, vmem_free_impl, spl_heap_arena,
+		    PAGESIZE, VM_SLEEP | VMC_NO_QCACHE);
+	}
+
+	VERIFY3P(abd_arena, !=, NULL);
+
+	/*
+	 * We also have a sub-arena for sub-page allocations, so as to avoid
+	 * memory waste, while segregating ABDs for visibility and
+	 * fragmentation control.
+	 *
+	 * This approach presently assumes SPA_MINBLOCKSIZE is 512 and that
+	 * PAGESIZE is an even multiple of at least several SPA_MINBLOCKSIZE.
+	 * This will be _Static_assert-ed in abd_os.c.
+	 */
+
+	if (total_memory >= SMALL_RAM_MACHINE) {
+		abd_subpage_arena = vmem_create("abd_subpage_cache", NULL, 0,
+		    sizeof (void *),
+		    vmem_alloc_impl, vmem_free_impl,
+		    spl_heap_arena,
+		    BIG_SLAB, VM_SLEEP | VMC_NO_QCACHE);
+	} else {
+		abd_subpage_arena = vmem_create("abd_subpage_cache", NULL, 0,
+		    sizeof (void *),
+		    vmem_alloc_impl, vmem_free_impl, abd_arena,
+		    PAGESIZE, VM_SLEEP | VMC_NO_QCACHE);
+	}
+
+	VERIFY3P(abd_subpage_arena, !=, NULL);
 }
 
 void
 segkmem_abd_fini(void)
 {
+	if (abd_subpage_arena) {
+		vmem_destroy(abd_subpage_arena);
+	}
+
 	if (abd_arena) {
 		vmem_destroy(abd_arena);
 	}

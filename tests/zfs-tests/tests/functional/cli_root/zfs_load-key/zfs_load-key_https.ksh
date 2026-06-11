@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -40,7 +41,7 @@ function cleanup
 {
 	for fs in "$TESTFS1" "$TESTFS2" "$TESTFS3"; do
 		datasetexists $TESTPOOL/$fs && \
-			log_must zfs destroy $TESTPOOL/$fs
+			destroy_dataset $TESTPOOL/$fs
 	done
 }
 log_onexit cleanup

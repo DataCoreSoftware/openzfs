@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (C) 2010 Lawrence Livermore National Security, LLC.
  *  Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
@@ -160,7 +161,7 @@ tsd_hash_add(tsd_hash_table_t *table, uint_t key, pid_t pid, void *value)
 	ulong_t hash;
 	int rc = 0;
 
-	ASSERT3P(tsd_hash_search(table, key, pid), ==, NULL);
+	ASSERT0P(tsd_hash_search(table, key, pid));
 
 	/* New entry allocate structure, set value, and add to hash */
 	entry = kmem_alloc(sizeof (tsd_hash_entry_t), KM_PUSHPAGE);
@@ -706,7 +707,7 @@ spl_tsd_init(void)
 {
 	tsd_hash_table = tsd_hash_table_init(TSD_HASH_TABLE_BITS_DEFAULT);
 	if (tsd_hash_table == NULL)
-		return (1);
+		return (-ENOMEM);
 
 	return (0);
 }

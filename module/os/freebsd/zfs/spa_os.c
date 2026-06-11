@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -58,7 +59,6 @@
 #include <sys/fs/zfs.h>
 #include <sys/arc.h>
 #include <sys/callb.h>
-#include <sys/spa_boot.h>
 #include <sys/zfs_ioctl.h>
 #include <sys/dsl_scan.h>
 #include <sys/dmu_send.h>
@@ -95,6 +95,8 @@ spa_generate_rootconf(const char *name)
 	for (i = 0; i < count; i++) {
 		uint64_t txg;
 
+		if (configs[i] == NULL)
+			continue;
 		txg = fnvlist_lookup_uint64(configs[i], ZPOOL_CONFIG_POOL_TXG);
 		if (txg > best_txg) {
 			best_txg = txg;
@@ -152,8 +154,8 @@ spa_generate_rootconf(const char *name)
 	fnvlist_add_string(nvroot, ZPOOL_CONFIG_TYPE, VDEV_TYPE_ROOT);
 	fnvlist_add_uint64(nvroot, ZPOOL_CONFIG_ID, 0ULL);
 	fnvlist_add_uint64(nvroot, ZPOOL_CONFIG_GUID, pgid);
-	fnvlist_add_nvlist_array(nvroot, ZPOOL_CONFIG_CHILDREN, tops,
-	    nchildren);
+	fnvlist_add_nvlist_array(nvroot, ZPOOL_CONFIG_CHILDREN,
+	    (const nvlist_t * const *)tops, nchildren);
 
 	/*
 	 * Replace the existing vdev_tree with the new root vdev in
@@ -183,8 +185,7 @@ spa_import_rootpool(const char *name, bool checkpointrewind)
 	spa_t *spa;
 	vdev_t *rvd;
 	nvlist_t *config, *nvtop;
-	uint64_t txg;
-	char *pname;
+	const char *pname;
 	int error;
 
 	/*
@@ -192,11 +193,10 @@ spa_import_rootpool(const char *name, bool checkpointrewind)
 	 */
 	config = spa_generate_rootconf(name);
 
-	mutex_enter(&spa_namespace_lock);
+	spa_namespace_enter(FTAG);
 	if (config != NULL) {
 		pname = fnvlist_lookup_string(config, ZPOOL_CONFIG_POOL_NAME);
 		VERIFY0(strcmp(name, pname));
-		txg = fnvlist_lookup_uint64(config, ZPOOL_CONFIG_POOL_TXG);
 
 		if ((spa = spa_lookup(pname)) != NULL) {
 			/*
@@ -204,7 +204,7 @@ spa_import_rootpool(const char *name, bool checkpointrewind)
 			 * e.g., after reboot -r.
 			 */
 			if (spa->spa_state == POOL_STATE_ACTIVE) {
-				mutex_exit(&spa_namespace_lock);
+				spa_namespace_exit(FTAG);
 				fnvlist_free(config);
 				return (0);
 			}
@@ -226,7 +226,7 @@ spa_import_rootpool(const char *name, bool checkpointrewind)
 		    &spa->spa_ubsync.ub_version) != 0)
 			spa->spa_ubsync.ub_version = SPA_VERSION_INITIAL;
 	} else if ((spa = spa_lookup(name)) == NULL) {
-		mutex_exit(&spa_namespace_lock);
+		spa_namespace_exit(FTAG);
 		fnvlist_free(config);
 		cmn_err(CE_NOTE, "Cannot find the pool label for '%s'",
 		    name);
@@ -249,17 +249,17 @@ spa_import_rootpool(const char *name, bool checkpointrewind)
 	    VDEV_ALLOC_ROOTPOOL);
 	spa_config_exit(spa, SCL_ALL, FTAG);
 	if (error) {
-		mutex_exit(&spa_namespace_lock);
+		spa_namespace_exit(FTAG);
 		fnvlist_free(config);
 		cmn_err(CE_NOTE, "Can not parse the config for pool '%s'",
-		    pname);
+		    name);
 		return (error);
 	}
 
 	spa_config_enter(spa, SCL_ALL, FTAG, RW_WRITER);
 	vdev_free(rvd);
 	spa_config_exit(spa, SCL_ALL, FTAG);
-	mutex_exit(&spa_namespace_lock);
+	spa_namespace_exit(FTAG);
 
 	fnvlist_free(config);
 	return (0);
@@ -269,4 +269,28 @@ const char *
 spa_history_zone(void)
 {
 	return ("freebsd");
+}
+
+void
+spa_import_os(spa_t *spa)
+{
+	(void) spa;
+}
+
+void
+spa_export_os(spa_t *spa)
+{
+	(void) spa;
+}
+
+void
+spa_activate_os(spa_t *spa)
+{
+	(void) spa;
+}
+
+void
+spa_deactivate_os(spa_t *spa)
+{
+	(void) spa;
 }

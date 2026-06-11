@@ -23,11 +23,12 @@
  * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
  * Copyright (c) 2014 Integros [integros.com]
  * Copyright 2016 Nexenta Systems, Inc. All rights reserved.
+ * Copyright (c) 2015 Jorgen Lundman <lundman@lundman.net>
  * Portions Copyright 2022 Andrew Innes <andrew.c12@gmail.com>
  */
 
-#ifndef	_MACOS_ZFS_SYS_ZNODE_IMPL_H
-#define	_MACOS_ZFS_SYS_ZNODE_IMPL_H
+#ifndef	_WIN_ZFS_SYS_ZNODE_IMPL_H
+#define	_WIN_ZFS_SYS_ZNODE_IMPL_H
 
 #include <sys/list.h>
 #include <sys/dmu.h>
@@ -57,6 +58,8 @@ extern "C" {
 #define	ZFS_SIMMUTABLE	0x0040000000000000ull
 #define	ZFS_SAPPENDONLY	0x0080000000000000ull
 
+#define	ZFS_CASESENSITIVEDIR	0x0100000000000000ull
+
 #define	SA_ZPL_ADDTIME(z)	z->z_attr_table[ZPL_ADDTIME]
 #define	SA_ZPL_DOCUMENTID(z)	z->z_attr_table[ZPL_DOCUMENTID]
 
@@ -81,15 +84,14 @@ extern int zfs_zget_ext(zfsvfs_t *zfsvfs, uint64_t obj_num,
 	uint64_t		z_atime[2];	\
 	uint64_t		z_links;	\
 	uint32_t		z_vid;	\
+	boolean_t		z_is_mapped;	\
 	taskq_ent_t		z_attach_taskq;	\
 	kcondvar_t		z_attach_cv;	\
 	kmutex_t		z_attach_lock;	\
 	hrtime_t		z_snap_mount_time;	\
 	krwlock_t		z_map_lock; \
 	boolean_t		z_fastpath; \
-	uint32_t		z_name_len; \
-	uint32_t		z_name_offset; \
-	char			*z_name_cache;
+	uint64_t		z_name_renamed;
 
 #define	ZFS_LINK_MAX	UINT64_MAX
 
@@ -135,39 +137,30 @@ extern minor_t zfsdev_minor_alloc(void);
 #define	Z_ISLNK(type)	((type) == VLNK)
 #define	Z_ISDIR(type)	((type) == VDIR)
 
-#define	zn_has_cached_data(zp)	((zp)->z_is_mapped)
-#define	zn_rlimit_fsize(zp, uio)	(0)
+#define	zn_has_cached_data(zp, start, end)	(zp->z_is_mapped)
+#define	zn_flush_cached_data(zp, sync)	/* find solution */
+
+#define	zn_rlimit_fsize(size)		(0)
+#define	zn_rlimit_fsize_uio(zp, uio)	(0)
 
 /* Called on entry to each ZFS inode and vfs operation. */
-#define	ZFS_ENTER_ERROR(zfsvfs, error)				\
-do {								\
-	ZFS_TEARDOWN_ENTER_READ(zfsvfs, FTAG);			\
-	if (unlikely((zfsvfs)->z_unmounted)) {			\
-		ZFS_TEARDOWN_EXIT_READ(zfsvfs, FTAG);		\
-		return (error);					\
-	}							\
-} while (0)
-#define	ZFS_ENTER(zfsvfs)	ZFS_ENTER_ERROR(zfsvfs, EIO)
-#define	ZPL_ENTER(zfsvfs)	ZFS_ENTER_ERROR(zfsvfs, -EIO)
+static inline int
+zfs_enter(zfsvfs_t *zfsvfs, const char *tag)
+{
+	ZFS_TEARDOWN_ENTER_READ(zfsvfs, tag);
+	if (unlikely(zfsvfs->z_unmounted)) {
+		ZFS_TEARDOWN_EXIT_READ(zfsvfs, tag);
+		return (SET_ERROR(EIO));
+	}
+	return (0);
+}
 
 /* Must be called before exiting the operation. */
-#define	ZFS_EXIT(zfsvfs) ZFS_TEARDOWN_EXIT_READ(zfsvfs, FTAG)
-
-#define	ZPL_EXIT(zfsvfs)					\
-do {								\
-	rrm_exit(&(zfsvfs)->z_teardown_lock, FTAG);		\
-} while (0)
-
-/* Verifies the znode is valid. */
-#define	ZFS_VERIFY_ZP_ERROR(zp, error)				\
-do {								\
-	if (unlikely((zp)->z_sa_hdl == NULL)) {			\
-		ZFS_EXIT(ZTOZSB(zp));				\
-		return (error);					\
-	}							\
-} while (0)
-#define	ZFS_VERIFY_ZP(zp)	ZFS_VERIFY_ZP_ERROR(zp, EIO)
-#define	ZPL_VERIFY_ZP(zp)	ZFS_VERIFY_ZP_ERROR(zp, -EIO)
+static inline void
+zfs_exit(zfsvfs_t *zfsvfs, const char *tag)
+{
+	ZFS_TEARDOWN_EXIT_READ(zfsvfs, tag);
+}
 
 /*
  * Macros for dealing with dmu_buf_hold
@@ -203,7 +196,7 @@ extern void	zfs_tstamp_update_setup(struct znode *,
 extern void zfs_znode_free(struct znode *);
 
 extern zil_get_data_t zfs_get_data;
-extern zil_replay_func_t *zfs_replay_vector[TX_MAX_TYPE];
+extern zil_replay_func_t *const zfs_replay_vector[TX_MAX_TYPE];
 extern int zfsfstype;
 
 extern int zfs_znode_parent_and_name(struct znode *zp, struct znode **dzpp,
@@ -222,3 +215,35 @@ uint32_t zfs_getbsdflags(struct znode *zp);
 #endif
 
 #endif	/* _MACOS_SYS_FS_ZFS_ZNODE_H */
+
+
+/* DataCore: zn_has_cached_data(zp,start,end) defined above; zn_rlimit_fsize(size) defined above */
+
+#define	ZFS_ENTER_ERROR(zfsvfs, error)						\
+do {										\
+	ZFS_TEARDOWN_ENTER_READ(zfsvfs, FTAG);				\
+	if (unlikely((zfsvfs)->z_unmounted)) {				\
+		ZFS_TEARDOWN_EXIT_READ(zfsvfs, FTAG);			\
+		return (error);						\
+	}									\
+} while (0)
+#define	ZFS_ENTER(zfsvfs)	ZFS_ENTER_ERROR(zfsvfs, EIO)
+#define	ZPL_ENTER(zfsvfs)	ZFS_ENTER_ERROR(zfsvfs, -EIO)
+#define	ZFS_EXIT(zfsvfs) ZFS_TEARDOWN_EXIT_READ(zfsvfs, FTAG)
+
+#define	ZPL_EXIT(zfsvfs)							\
+do {										\
+	rrm_exit(&(zfsvfs)->z_teardown_lock, FTAG);			\
+} while (0)
+
+/* Verifies the znode is valid. */
+#define	ZFS_VERIFY_ZP_ERROR(zp, error)					\
+do {										\
+	if (unlikely((zp)->z_sa_hdl == NULL)) {			\
+		ZFS_EXIT(ZTOZSB(zp));					\
+		return (error);						\
+	}									\
+} while (0)
+#define	ZFS_VERIFY_ZP(zp)	ZFS_VERIFY_ZP_ERROR(zp, EIO)
+#define	ZPL_VERIFY_ZP(zp)	ZFS_VERIFY_ZP_ERROR(zp, -EIO)
+

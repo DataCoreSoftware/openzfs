@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -7,7 +8,7 @@
  * with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -97,11 +98,20 @@ gethrestime_sec(void)
 }
 
 static inline hrtime_t
+getlrtime(void)
+{
+	struct timeval tv;
+	(void) gettimeofday(&tv, NULL);
+	return ((((uint64_t)tv.tv_sec) * NANOSEC) +
+	    ((uint64_t)tv.tv_usec * NSEC_PER_USEC));
+}
+
+static inline hrtime_t
 gethrtime(void)
 {
 	struct timespec ts;
 	(void) clock_gettime(CLOCK_MONOTONIC, &ts);
-	return ((((u_int64_t)ts.tv_sec) * NANOSEC) + ts.tv_nsec);
+	return ((((uint64_t)ts.tv_sec) * NANOSEC) + ts.tv_nsec);
 }
 
 #endif /* _LIBSPL_SYS_TIME_H */

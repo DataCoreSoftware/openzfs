@@ -1,3 +1,4 @@
+dnl # SPDX-License-Identifier: CDDL-1.0
 dnl #
 dnl # Linux 3.3 API
 dnl #
@@ -5,7 +6,7 @@ AC_DEFUN([ZFS_AC_KERNEL_SRC_SHOW_OPTIONS], [
 	ZFS_LINUX_TEST_SRC([super_operations_show_options], [
 		#include <linux/fs.h>
 
-		int show_options(struct seq_file * x, struct dentry * y) {
+		static int show_options(struct seq_file * x, struct dentry * y) {
 			return 0;
 		};
 

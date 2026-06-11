@@ -1,4 +1,5 @@
 #!/bin/ksh
+# SPDX-License-Identifier: CDDL-1.0
 
 #
 # This file and its contents are supplied under the terms of the
@@ -35,13 +36,14 @@ log_must zpool create -f $TESTPOOL $DISK
 
 # Make the pool.
 conf="$TESTDIR/vz005"
-log_must zdb -PC $TESTPOOL > $conf
+log_must eval "zdb -PC $TESTPOOL > $conf"
 assert_has_sentinel "$conf"
+assert_root_zap $TESTPOOL "$conf"
 orig_top=$(get_top_vd_zap $DISK $conf)
 orig_leaf=$(get_leaf_vd_zap $DISK $conf)
 assert_zap_common $TESTPOOL $DISK "top" $orig_top
 assert_zap_common $TESTPOOL $DISK "leaf" $orig_leaf
-log_must zpool sync
+sync_all_pools
 
 # Export the pool.
 log_must zpool export $TESTPOOL
@@ -50,7 +52,7 @@ log_must zpool export $TESTPOOL
 log_must zpool import $TESTPOOL
 
 # Verify that ZAPs persisted.
-log_must zdb -PC $TESTPOOL > $conf
+log_must eval "zdb -PC $TESTPOOL > $conf"
 
 new_top=$(get_top_vd_zap $DISK $conf)
 new_leaf=$(get_leaf_vd_zap $DISK $conf)

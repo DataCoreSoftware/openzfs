@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -52,7 +53,7 @@ log_must eval "bzcat <$sendfile_compressed >$sendfile"
 log_must eval "zstream redup $sendfile | zfs recv $TESTPOOL/recv"
 
 log_must zfs load-key $TESTPOOL/recv
-block_device_wait
+block_device_wait $volfile
 
 log_must eval "bzcat <$volfile_compressed >$volfile"
 log_must diff $volfile $recvdev

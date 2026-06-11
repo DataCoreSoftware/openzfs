@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -156,7 +157,7 @@
  * vary with the I/O load and this observed value is the ub_mmp_delay which is
  * stored in the uberblock.  The minimum allowed value is 100 ms.
  */
-ulong_t zfs_multihost_interval = MMP_DEFAULT_INTERVAL;
+uint64_t zfs_multihost_interval = MMP_DEFAULT_INTERVAL;
 
 /*
  * Used to control the duration of the activity test on import.  Smaller values
@@ -186,8 +187,8 @@ uint_t zfs_multihost_import_intervals = MMP_DEFAULT_IMPORT_INTERVALS;
  */
 uint_t zfs_multihost_fail_intervals = MMP_DEFAULT_FAIL_INTERVALS;
 
-char *mmp_tag = "mmp_write_uberblock";
-static void mmp_thread(void *arg);
+static const void *const mmp_tag = "mmp_write_uberblock";
+static __attribute__((noreturn)) void mmp_thread(void *arg);
 
 void
 mmp_init(spa_t *spa)
@@ -224,7 +225,6 @@ mmp_thread_exit(mmp_thread_t *mmp, kthread_t **mpp, callb_cpr_t *cpr)
 	*mpp = NULL;
 	cv_broadcast(&mmp->mmp_thread_cv);
 	CALLB_CPR_EXIT(cpr);		/* drops &mmp->mmp_thread_lock */
-	thread_exit();
 }
 
 void
@@ -260,7 +260,7 @@ mmp_thread_stop(spa_t *spa)
 	zfs_dbgmsg("MMP thread stopped pool '%s' gethrtime %llu",
 	    spa_name(spa), gethrtime());
 
-	ASSERT(mmp->mmp_thread == NULL);
+	ASSERT0P(mmp->mmp_thread);
 	mmp->mmp_thread_exiting = 0;
 }
 
@@ -446,7 +446,7 @@ mmp_write_uberblock(spa_t *spa)
 	uint64_t offset;
 
 	hrtime_t lock_acquire_time = gethrtime();
-	spa_config_enter(spa, SCL_STATE, mmp_tag, RW_READER);
+	spa_config_enter_priority(spa, SCL_STATE, mmp_tag, RW_READER);
 	lock_acquire_time = gethrtime() - lock_acquire_time;
 	if (lock_acquire_time > (MSEC2NSEC(MMP_MIN_INTERVAL) / 10))
 		zfs_dbgmsg("MMP SCL_STATE acquisition pool '%s' took %llu ns "
@@ -518,8 +518,9 @@ mmp_write_uberblock(spa_t *spa)
 
 	zio_t *zio  = zio_null(mmp->mmp_zio_root, spa, NULL, NULL, NULL, flags);
 	abd_t *ub_abd = abd_alloc_for_io(VDEV_UBERBLOCK_SIZE(vd), B_TRUE);
-	abd_zero(ub_abd, VDEV_UBERBLOCK_SIZE(vd));
 	abd_copy_from_buf(ub_abd, ub, sizeof (uberblock_t));
+	abd_zero_off(ub_abd, sizeof (uberblock_t),
+	    VDEV_UBERBLOCK_SIZE(vd) - sizeof (uberblock_t));
 
 	mmp->mmp_seq++;
 	mmp->mmp_kstat_id++;
@@ -539,7 +540,7 @@ mmp_write_uberblock(spa_t *spa)
 	zio_nowait(zio);
 }
 
-static void
+static __attribute__((noreturn)) void
 mmp_thread(void *arg)
 {
 	spa_t *spa = (spa_t *)arg;
@@ -551,11 +552,11 @@ mmp_thread(void *arg)
 	uint32_t mmp_fail_intervals = MMP_FAIL_INTVS_OK(
 	    zfs_multihost_fail_intervals);
 	hrtime_t mmp_fail_ns = mmp_fail_intervals * mmp_interval;
-	boolean_t last_spa_suspended = suspended;
-	boolean_t last_spa_multihost = multihost;
-	uint64_t last_mmp_interval = mmp_interval;
-	uint32_t last_mmp_fail_intervals = mmp_fail_intervals;
-	hrtime_t last_mmp_fail_ns = mmp_fail_ns;
+	boolean_t last_spa_suspended;
+	boolean_t last_spa_multihost;
+	uint64_t last_mmp_interval;
+	uint32_t last_mmp_fail_intervals;
+	hrtime_t last_mmp_fail_ns;
 	callb_cpr_t cpr;
 	int skip_wait = 0;
 
@@ -664,12 +665,13 @@ mmp_thread(void *arg)
 		    (gethrtime() - mmp->mmp_last_write) > mmp_fail_ns) {
 			zfs_dbgmsg("MMP suspending pool '%s': gethrtime %llu "
 			    "mmp_last_write %llu mmp_interval %llu "
-			    "mmp_fail_intervals %llu mmp_fail_ns %llu",
+			    "mmp_fail_intervals %llu mmp_fail_ns %llu txg %llu",
 			    spa_name(spa), (u_longlong_t)gethrtime(),
 			    (u_longlong_t)mmp->mmp_last_write,
 			    (u_longlong_t)mmp_interval,
 			    (u_longlong_t)mmp_fail_intervals,
-			    (u_longlong_t)mmp_fail_ns);
+			    (u_longlong_t)mmp_fail_ns,
+			    (u_longlong_t)spa->spa_uberblock.ub_txg);
 			cmn_err(CE_WARN, "MMP writes to pool '%s' have not "
 			    "succeeded in over %llu ms; suspending pool. "
 			    "Hrtime %llu",
@@ -700,6 +702,8 @@ mmp_thread(void *arg)
 
 	mmp->mmp_zio_root = NULL;
 	mmp_thread_exit(mmp, &mmp->mmp_thread, &cpr);
+
+	thread_exit();
 }
 
 /*
@@ -725,19 +729,17 @@ mmp_signal_all_threads(void)
 {
 	spa_t *spa = NULL;
 
-	mutex_enter(&spa_namespace_lock);
+	spa_namespace_enter(FTAG);
 	while ((spa = spa_next(spa))) {
 		if (spa->spa_state == POOL_STATE_ACTIVE)
 			mmp_signal_thread(spa);
 	}
-	mutex_exit(&spa_namespace_lock);
+	spa_namespace_exit(FTAG);
 }
 
-/* BEGIN CSTYLED */
 ZFS_MODULE_PARAM_CALL(zfs_multihost, zfs_multihost_, interval,
-	param_set_multihost_interval, param_get_ulong, ZMOD_RW,
+	param_set_multihost_interval, spl_param_get_u64, ZMOD_RW,
 	"Milliseconds between mmp writes to each leaf");
-/* END CSTYLED */
 
 ZFS_MODULE_PARAM(zfs_multihost, zfs_multihost_, fail_intervals, UINT, ZMOD_RW,
 	"Max allowed period without a successful mmp write");

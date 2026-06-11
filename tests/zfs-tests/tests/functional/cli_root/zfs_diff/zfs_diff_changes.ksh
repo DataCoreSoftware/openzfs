@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -47,7 +48,7 @@ function verify_object_change # <path> <change>
 	change="$2"
 
 	log_must eval "zfs diff -F $TESTSNAP1 $TESTSNAP2 > $FILEDIFF"
-	diffchg="$(awk -v path="$path" '$NF == path { print $1 }' < $FILEDIFF)"
+	diffchg="$(awk -v path="$path" '$NF == path { print $1 }' $FILEDIFF)"
 	if [[ "$diffchg" != "$change" ]]; then
 		log_fail "Unexpected change for $path ('$diffchg' != '$change')"
 	else

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -30,27 +31,15 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 
-/* Grsecurity kernel API change */
-#ifdef MODULE_PARAM_CALL_CONST
 typedef const struct kernel_param zfs_kernel_param_t;
-#else
-typedef struct kernel_param zfs_kernel_param_t;
-#endif
 
 #define	ZMOD_RW 0644
 #define	ZMOD_RD 0444
 
-/* BEGIN CSTYLED */
-#define	INT int
-#define	UINT uint
-#define	ULONG ulong
-#define	LONG long
-#define	STRING charp
-/* END CSTYLED */
-
 enum scope_prefix_types {
 	zfs,
 	zfs_arc,
+	zfs_brt,
 	zfs_condense,
 	zfs_dbuf,
 	zfs_dbuf_cache,
@@ -71,14 +60,34 @@ enum scope_prefix_types {
 	zfs_trim,
 	zfs_txg,
 	zfs_vdev,
-	zfs_vdev_cache,
+	zfs_vdev_disk,
 	zfs_vdev_file,
 	zfs_vdev_mirror,
+	zfs_vol,
 	zfs_vnops,
 	zfs_zevent,
 	zfs_zio,
 	zfs_zil
 };
+
+/*
+ * Our uint64 params are called U64 in part because we had them before Linux
+ * provided ULLONG param ops. Now it does, and we use them, but we retain the
+ * U64 name to keep many existing tunables working without issue.
+ */
+#define	spl_param_set_u64	param_set_ullong
+#define	spl_param_get_u64	param_get_ullong
+#define	spl_param_ops_U64	param_ops_ullong
+
+/*
+ * We keep our own names for param ops to make expanding them in
+ * ZFS_MODULE_PARAM easy.
+ */
+#define	spl_param_ops_INT	param_ops_int
+#define	spl_param_ops_LONG	param_ops_long
+#define	spl_param_ops_UINT	param_ops_uint
+#define	spl_param_ops_ULONG	param_ops_ulong
+#define	spl_param_ops_STRING	param_ops_charp
 
 /*
  * Declare a module parameter / sysctl node
@@ -108,12 +117,13 @@ enum scope_prefix_types {
  * on Linux:
  *   dmu_prefetch_max
  */
-/* BEGIN CSTYLED */
 #define	ZFS_MODULE_PARAM(scope_prefix, name_prefix, name, type, perm, desc) \
-	CTASSERT_GLOBAL((sizeof (scope_prefix) == sizeof (enum scope_prefix_types))); \
-	module_param(name_prefix ## name, type, perm); \
+	_Static_assert( \
+	    sizeof (scope_prefix) == sizeof (enum scope_prefix_types), \
+	    "" #scope_prefix " size mismatch with enum scope_prefix_types"); \
+	module_param_cb(name_prefix ## name, &spl_param_ops_ ## type, \
+	    &name_prefix ## name, perm); \
 	MODULE_PARM_DESC(name_prefix ## name, desc)
-/* END CSTYLED */
 
 /*
  * Declare a module parameter / sysctl node
@@ -137,31 +147,27 @@ enum scope_prefix_types {
  * on Linux:
  *   spa_slop_shift
  */
-/* BEGIN CSTYLED */
-#define	ZFS_MODULE_PARAM_CALL(scope_prefix, name_prefix, name, setfunc, getfunc, perm, desc) \
-	CTASSERT_GLOBAL((sizeof (scope_prefix) == sizeof (enum scope_prefix_types))); \
-	module_param_call(name_prefix ## name, setfunc, getfunc, &name_prefix ## name, perm); \
+#define	ZFS_MODULE_PARAM_CALL( \
+    scope_prefix, name_prefix, name, setfunc, getfunc, perm, desc) \
+	_Static_assert( \
+	    sizeof (scope_prefix) == sizeof (enum scope_prefix_types), \
+	    "" #scope_prefix " size mismatch with enum scope_prefix_types"); \
+	module_param_call(name_prefix ## name, setfunc, getfunc, \
+	    &name_prefix ## name, perm); \
 	MODULE_PARM_DESC(name_prefix ## name, desc)
-/* END CSTYLED */
 
 /*
  * As above, but there is no variable with the name name_prefix ## name,
  * so NULL is passed to module_param_call instead.
  */
-/* BEGIN CSTYLED */
-#define	ZFS_MODULE_VIRTUAL_PARAM_CALL(scope_prefix, name_prefix, name, setfunc, getfunc, perm, desc) \
-	CTASSERT_GLOBAL((sizeof (scope_prefix) == sizeof (enum scope_prefix_types))); \
+#define	ZFS_MODULE_VIRTUAL_PARAM_CALL( \
+    scope_prefix, name_prefix, name, setfunc, getfunc, perm, desc) \
+	_Static_assert( \
+	    sizeof (scope_prefix) == sizeof (enum scope_prefix_types), \
+	    "" #scope_prefix " size mismatch with enum scope_prefix_types"); \
 	module_param_call(name_prefix ## name, setfunc, getfunc, NULL, perm); \
 	MODULE_PARM_DESC(name_prefix ## name, desc)
-/* END CSTYLED */
 
 #define	ZFS_MODULE_PARAM_ARGS	const char *buf, zfs_kernel_param_t *kp
-
-#define	ZFS_MODULE_DESCRIPTION(s) MODULE_DESCRIPTION(s)
-#define	ZFS_MODULE_AUTHOR(s) MODULE_AUTHOR(s)
-#define	ZFS_MODULE_LICENSE(s) MODULE_LICENSE(s)
-#define	ZFS_MODULE_VERSION(s) MODULE_VERSION(s)
-
-#define	module_init_early(fn) module_init(fn)
 
 #endif	/* _MOD_COMPAT_H */

@@ -1,4 +1,5 @@
 #! /bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -55,15 +56,14 @@ function cleanup
 {
 	if datasetexists $clone1; then
 		log_must zfs promote $ctrfs
-		log_must zfs destroy $clone1
+		destroy_dataset $clone1
 	fi
 
-	snapexists $snapctr && \
-		log_must zfs destroy -r $snapctr
+	snapexists $snapctr && destroy_dataset $snapctr -r
 
 	if snapexists $clone@$TESTSNAP1; then
 		log_must zfs promote $ctrfs
-		log_must zfs destroy -rR $ctrfs@$TESTSNAP1
+		destroy_dataset $ctrfs@$TESTSNAP1 -rR
 	fi
 }
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -29,6 +30,7 @@
 #include <sys/param.h>
 #include <sys/kernel.h>
 #include <sys/bio.h>
+#include <sys/buf.h>
 #include <sys/file.h>
 #include <sys/spa.h>
 #include <sys/spa_impl.h>
@@ -36,6 +38,7 @@
 #include <sys/vdev_os.h>
 #include <sys/fs/zfs.h>
 #include <sys/zio.h>
+#include <vm/vm_page.h>
 #include <geom/geom.h>
 #include <geom/geom_disk.h>
 #include <geom/geom_int.h>
@@ -61,9 +64,9 @@ struct consumer_vdev_elem {
 };
 
 SLIST_HEAD(consumer_priv_t, consumer_vdev_elem);
-/* BEGIN CSTYLED */
-_Static_assert(sizeof (((struct g_consumer *)NULL)->private)
-	== sizeof (struct consumer_priv_t*),
+_Static_assert(
+    sizeof (((struct g_consumer *)NULL)->private) ==
+    sizeof (struct consumer_priv_t *),
 	"consumer_priv_t* can't be stored in g_consumer.private");
 
 DECLARE_GEOM_CLASS(zfs_vdev_class, zfs_vdev);
@@ -72,12 +75,11 @@ SYSCTL_DECL(_vfs_zfs_vdev);
 /* Don't send BIO_FLUSH. */
 static int vdev_geom_bio_flush_disable;
 SYSCTL_INT(_vfs_zfs_vdev, OID_AUTO, bio_flush_disable, CTLFLAG_RWTUN,
-    &vdev_geom_bio_flush_disable, 0, "Disable BIO_FLUSH");
+	&vdev_geom_bio_flush_disable, 0, "Disable BIO_FLUSH");
 /* Don't send BIO_DELETE. */
 static int vdev_geom_bio_delete_disable;
 SYSCTL_INT(_vfs_zfs_vdev, OID_AUTO, bio_delete_disable, CTLFLAG_RWTUN,
-    &vdev_geom_bio_delete_disable, 0, "Disable BIO_DELETE");
-/* END CSTYLED */
+	&vdev_geom_bio_delete_disable, 0, "Disable BIO_DELETE");
 
 /* Declare local functions */
 static void vdev_geom_detach(struct g_consumer *cp, boolean_t open_for_read);
@@ -197,7 +199,6 @@ vdev_geom_orphan(struct g_consumer *cp)
 	 * async removal support to invoke a close on this
 	 * vdev once it is safe to do so.
 	 */
-	// cppcheck-suppress All
 	SLIST_FOREACH(elem, priv, elems) {
 		// cppcheck-suppress uninitvar
 		vdev_t *vd = elem->vd;
@@ -379,7 +380,7 @@ vdev_geom_io(struct g_consumer *cp, int *cmds, void **datas, off_t *offsets,
 	int i, n_bios, j;
 	size_t bios_size;
 
-	maxio = MAXPHYS - (MAXPHYS % cp->provider->sectorsize);
+	maxio = maxphys - (maxphys % cp->provider->sectorsize);
 	n_bios = 0;
 
 	/* How many bios are required for all commands ? */
@@ -453,7 +454,7 @@ vdev_geom_read_config(struct g_consumer *cp, nvlist_t **configp)
 	ZFS_LOG(1, "Reading config from %s...", pp->name);
 
 	psize = pp->mediasize;
-	psize = P2ALIGN(psize, (uint64_t)sizeof (vdev_label_t));
+	psize = P2ALIGN_TYPED(psize, sizeof (vdev_label_t), uint64_t);
 
 	size = sizeof (*vdev_lists[0]) + pp->sectorsize -
 	    ((sizeof (*vdev_lists[0]) - 1) % pp->sectorsize) - 1;
@@ -539,7 +540,7 @@ process_vdev_config(nvlist_t ***configs, uint64_t *count, nvlist_t *cfg,
 	uint64_t pool_guid;
 	uint64_t vdev_guid;
 	uint64_t id, txg, known_txg;
-	char *pname;
+	const char *pname;
 
 	if (nvlist_lookup_string(cfg, ZPOOL_CONFIG_POOL_NAME, &pname) != 0 ||
 	    strcmp(pname, name) != 0)
@@ -951,8 +952,7 @@ skip_open:
 	*logical_ashift = highbit(MAX(pp->sectorsize, SPA_MINBLOCKSIZE)) - 1;
 	*physical_ashift = 0;
 	if (pp->stripesize && pp->stripesize > (1 << *logical_ashift) &&
-	    ISP2(pp->stripesize) && pp->stripesize <= (1 << ASHIFT_MAX) &&
-	    pp->stripeoffset == 0)
+	    ISP2(pp->stripesize) && pp->stripeoffset == 0)
 		*physical_ashift = highbit(pp->stripesize) - 1;
 
 	/*
@@ -1015,21 +1015,6 @@ vdev_geom_io_intr(struct bio *bp)
 		zio->io_error = SET_ERROR(EIO);
 
 	switch (zio->io_error) {
-	case ENOTSUP:
-		/*
-		 * If we get ENOTSUP for BIO_FLUSH or BIO_DELETE we know
-		 * that future attempts will never succeed. In this case
-		 * we set a persistent flag so that we don't bother with
-		 * requests in the future.
-		 */
-		switch (bp->bio_cmd) {
-		case BIO_FLUSH:
-			vd->vdev_nowritecache = B_TRUE;
-			break;
-		case BIO_DELETE:
-			break;
-		}
-		break;
 	case ENXIO:
 		if (!vd->vdev_remove_wanted) {
 			/*
@@ -1050,13 +1035,95 @@ vdev_geom_io_intr(struct bio *bp)
 	/*
 	 * We have to split bio freeing into two parts, because the ABD code
 	 * cannot be called in this context and vdev_op_io_done is not called
-	 * for ZIO_TYPE_IOCTL zio-s.
+	 * for ZIO_TYPE_FLUSH zio-s.
 	 */
 	if (zio->io_type != ZIO_TYPE_READ && zio->io_type != ZIO_TYPE_WRITE) {
 		g_destroy_bio(bp);
 		zio->io_bio = NULL;
 	}
 	zio_delay_interrupt(zio);
+}
+
+struct vdev_geom_check_unmapped_cb_state {
+	int	pages;
+	uint_t	end;
+};
+
+/*
+ * Callback to check the ABD segment size/alignment and count the pages.
+ * GEOM requires data buffer to look virtually contiguous.  It means only
+ * the first page of the buffer may not start and only the last may not
+ * end on a page boundary.  All other physical pages must be full.
+ */
+static int
+vdev_geom_check_unmapped_cb(void *buf, size_t len, void *priv)
+{
+	struct vdev_geom_check_unmapped_cb_state *s = priv;
+	vm_offset_t off = (vm_offset_t)buf & PAGE_MASK;
+
+	if (s->pages != 0 && off != 0)
+		return (1);
+	if (s->end != 0)
+		return (1);
+	s->end = (off + len) & PAGE_MASK;
+	s->pages += (off + len + PAGE_MASK) >> PAGE_SHIFT;
+	return (0);
+}
+
+/*
+ * Check whether we can use unmapped I/O for this ZIO on this device to
+ * avoid data copying between scattered and/or gang ABD buffer and linear.
+ */
+static int
+vdev_geom_check_unmapped(zio_t *zio, struct g_consumer *cp)
+{
+	struct vdev_geom_check_unmapped_cb_state s;
+
+	/* If unmapped I/O is administratively disabled, respect that. */
+	if (!unmapped_buf_allowed)
+		return (0);
+
+	/* If the buffer is already linear, then nothing to do here. */
+	if (abd_is_linear(zio->io_abd))
+		return (0);
+
+	/*
+	 * If unmapped I/O is not supported by the GEOM provider,
+	 * then we can't do anything and have to copy the data.
+	 */
+	if ((cp->provider->flags & G_PF_ACCEPT_UNMAPPED) == 0)
+		return (0);
+
+	/* Check the buffer chunks sizes/alignments and count pages. */
+	s.pages = s.end = 0;
+	if (abd_iterate_func(zio->io_abd, 0, zio->io_size,
+	    vdev_geom_check_unmapped_cb, &s))
+		return (0);
+	return (s.pages);
+}
+
+/*
+ * Callback to translate the ABD segment into array of physical pages.
+ */
+static int
+vdev_geom_fill_unmap_cb(void *buf, size_t len, void *priv)
+{
+	struct bio *bp = priv;
+	vm_offset_t addr = (vm_offset_t)buf;
+	vm_offset_t end = addr + len;
+
+	if (bp->bio_ma_n == 0) {
+		bp->bio_ma_offset = addr & PAGE_MASK;
+		addr &= ~PAGE_MASK;
+	} else {
+		ASSERT0(P2PHASE(addr, PAGE_SIZE));
+	}
+	do {
+		bp->bio_ma[bp->bio_ma_n++] =
+		    PHYS_TO_VM_PAGE(pmap_kextract(addr));
+		addr += PAGE_SIZE;
+	} while (addr < end);
+	return (0);
 }
 
 static void
@@ -1068,46 +1135,35 @@ vdev_geom_io_start(zio_t *zio)
 
 	vd = zio->io_vd;
 
-	switch (zio->io_type) {
-	case ZIO_TYPE_IOCTL:
+	if (zio->io_type == ZIO_TYPE_FLUSH) {
 		/* XXPOLICY */
 		if (!vdev_readable(vd)) {
 			zio->io_error = SET_ERROR(ENXIO);
 			zio_interrupt(zio);
 			return;
-		} else {
-			switch (zio->io_cmd) {
-			case DKIOCFLUSHWRITECACHE:
-				if (zfs_nocacheflush ||
-				    vdev_geom_bio_flush_disable)
-					break;
-				if (vd->vdev_nowritecache) {
-					zio->io_error = SET_ERROR(ENOTSUP);
-					break;
-				}
-				goto sendreq;
-			default:
-				zio->io_error = SET_ERROR(ENOTSUP);
-			}
 		}
 
-		zio_execute(zio);
-		return;
-	case ZIO_TYPE_TRIM:
-		if (!vdev_geom_bio_delete_disable) {
-			goto sendreq;
+		if (zfs_nocacheflush || vdev_geom_bio_flush_disable) {
+			zio_execute(zio);
+			return;
 		}
-		zio_execute(zio);
-		return;
-	default:
-			;
-		/* PASSTHROUGH --- placate compiler */
+
+		if (vd->vdev_nowritecache) {
+			zio->io_error = SET_ERROR(ENOTSUP);
+			zio_execute(zio);
+			return;
+		}
+	} else if (zio->io_type == ZIO_TYPE_TRIM) {
+		if (vdev_geom_bio_delete_disable) {
+			zio_execute(zio);
+			return;
+		}
 	}
-sendreq:
+
 	ASSERT(zio->io_type == ZIO_TYPE_READ ||
 	    zio->io_type == ZIO_TYPE_WRITE ||
 	    zio->io_type == ZIO_TYPE_TRIM ||
-	    zio->io_type == ZIO_TYPE_IOCTL);
+	    zio->io_type == ZIO_TYPE_FLUSH);
 
 	cp = vd->vdev_tsd;
 	if (cp == NULL) {
@@ -1123,14 +1179,34 @@ sendreq:
 		zio->io_target_timestamp = zio_handle_io_delay(zio);
 		bp->bio_offset = zio->io_offset;
 		bp->bio_length = zio->io_size;
-		if (zio->io_type == ZIO_TYPE_READ) {
+		if (zio->io_type == ZIO_TYPE_READ)
 			bp->bio_cmd = BIO_READ;
-			bp->bio_data =
-			    abd_borrow_buf(zio->io_abd, zio->io_size);
-		} else {
+		else
 			bp->bio_cmd = BIO_WRITE;
-			bp->bio_data =
-			    abd_borrow_buf_copy(zio->io_abd, zio->io_size);
+
+		/*
+		 * If possible, represent scattered and/or gang ABD buffer to
+		 * GEOM as an array of physical pages.  It allows to satisfy
+		 * requirement of virtually contiguous buffer without copying.
+		 */
+		int pgs = vdev_geom_check_unmapped(zio, cp);
+		if (pgs > 0) {
+			bp->bio_ma = malloc(sizeof (struct vm_page *) * pgs,
+			    M_DEVBUF, M_WAITOK);
+			bp->bio_ma_n = 0;
+			bp->bio_ma_offset = 0;
+			abd_iterate_func(zio->io_abd, 0, zio->io_size,
+			    vdev_geom_fill_unmap_cb, bp);
+			bp->bio_data = unmapped_buf;
+			bp->bio_flags |= BIO_UNMAPPED;
+		} else {
+			if (zio->io_type == ZIO_TYPE_READ) {
+				bp->bio_data = abd_borrow_buf(zio->io_abd,
+				    zio->io_size);
+			} else {
+				bp->bio_data = abd_borrow_buf_copy(zio->io_abd,
+				    zio->io_size);
+			}
 		}
 		break;
 	case ZIO_TYPE_TRIM:
@@ -1139,7 +1215,7 @@ sendreq:
 		bp->bio_offset = zio->io_offset;
 		bp->bio_length = zio->io_size;
 		break;
-	case ZIO_TYPE_IOCTL:
+	case ZIO_TYPE_FLUSH:
 		bp->bio_cmd = BIO_FLUSH;
 		bp->bio_data = NULL;
 		bp->bio_offset = cp->provider->mediasize;
@@ -1160,19 +1236,35 @@ vdev_geom_io_done(zio_t *zio)
 	struct bio *bp = zio->io_bio;
 
 	if (zio->io_type != ZIO_TYPE_READ && zio->io_type != ZIO_TYPE_WRITE) {
-		ASSERT3P(bp, ==, NULL);
+		ASSERT0P(bp);
 		return;
 	}
 
 	if (bp == NULL) {
-		ASSERT3S(zio->io_error, ==, ENXIO);
+		if (zio_injection_enabled && zio->io_error == EIO)
+			/*
+			 * Convert an injected EIO to ENXIO. This is needed to
+			 * work around zio_handle_device_injection_impl() not
+			 * currently being able to inject ENXIO directly, while
+			 * the assertion below only allows ENXIO here.
+			 */
+			zio->io_error = SET_ERROR(ENXIO);
+		else
+			ASSERT3S(zio->io_error, ==, ENXIO);
 		return;
 	}
 
-	if (zio->io_type == ZIO_TYPE_READ)
-		abd_return_buf_copy(zio->io_abd, bp->bio_data, zio->io_size);
-	else
-		abd_return_buf(zio->io_abd, bp->bio_data, zio->io_size);
+	if (bp->bio_ma != NULL) {
+		free(bp->bio_ma, M_DEVBUF);
+	} else {
+		if (zio->io_type == ZIO_TYPE_READ) {
+			abd_return_buf_copy(zio->io_abd, bp->bio_data,
+			    zio->io_size);
+		} else {
+			abd_return_buf(zio->io_abd, bp->bio_data,
+			    zio->io_size);
+		}
+	}
 
 	g_destroy_bio(bp);
 	zio->io_bio = NULL;
@@ -1193,7 +1285,8 @@ vdev_ops_t vdev_disk_ops = {
 	.vdev_op_fini = NULL,
 	.vdev_op_open = vdev_geom_open,
 	.vdev_op_close = vdev_geom_close,
-	.vdev_op_asize = vdev_default_asize,
+	.vdev_op_psize_to_asize = vdev_default_asize,
+	.vdev_op_asize_to_psize = vdev_default_psize,
 	.vdev_op_min_asize = vdev_default_min_asize,
 	.vdev_op_min_alloc = NULL,
 	.vdev_op_io_start = vdev_geom_io_start,

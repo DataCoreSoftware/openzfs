@@ -1,4 +1,5 @@
 #!/bin/ksh
+# SPDX-License-Identifier: CDDL-1.0
 
 #
 # This file and its contents are supplied under the terms of the
@@ -28,12 +29,18 @@ typeset ds_name="panic"
 typeset sendfs="$POOL/$ds_name"
 typeset recvfs="$POOL2/$ds_name"
 typeset clone="$POOL/${ds_name}_clone"
-typeset stream=$(mktemp $tmpdir/stream.XXXX)
+typeset stream=$(mktemp -t stream.XXXX)
 
-log_onexit redacted_cleanup $sendfs $recvfs
+function cleanup
+{
+	redacted_cleanup $sendfs $recvfs
+	rm -f $stream
+}
+
+log_onexit cleanup
 
 log_must zfs create -o recsize=8k $sendfs
-log_must dd if=/dev/urandom of=/$sendfs/file bs=1024k count=2048
+log_must dd if=/dev/urandom of=/$sendfs/file bs=1024k count=1024
 log_must zfs snapshot $sendfs@init
 log_must zfs clone $sendfs@init $clone
 log_must stride_dd -i /dev/urandom -o /$clone/file -b 8192 -s 2 -c 7226

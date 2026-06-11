@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -54,7 +55,7 @@ zcp_clones_iter(lua_State *state)
 	uint64_t cursor = lua_tonumber(state, lua_upvalueindex(2));
 	dsl_pool_t *dp = zcp_run_info(state)->zri_pool;
 	dsl_dataset_t *ds, *clone;
-	zap_attribute_t za;
+	zap_attribute_t *za;
 	zap_cursor_t zc;
 
 	err = dsl_dataset_hold_obj(dp, dsobj, FTAG, &ds);
@@ -75,9 +76,11 @@ zcp_clones_iter(lua_State *state)
 	    dsl_dataset_phys(ds)->ds_next_clones_obj, cursor);
 	dsl_dataset_rele(ds, FTAG);
 
-	err = zap_cursor_retrieve(&zc, &za);
+	za = zap_attribute_alloc();
+	err = zap_cursor_retrieve(&zc, za);
 	if (err != 0) {
 		zap_cursor_fini(&zc);
+		zap_attribute_free(za);
 		if (err != ENOENT) {
 			return (luaL_error(state,
 			    "unexpected error %d from zap_cursor_retrieve()",
@@ -89,7 +92,8 @@ zcp_clones_iter(lua_State *state)
 	cursor = zap_cursor_serialize(&zc);
 	zap_cursor_fini(&zc);
 
-	err = dsl_dataset_hold_obj(dp, za.za_first_integer, FTAG, &clone);
+	err = dsl_dataset_hold_obj(dp, za->za_first_integer, FTAG, &clone);
+	zap_attribute_free(za);
 	if (err != 0) {
 		return (luaL_error(state,
 		    "unexpected error %d from "
@@ -107,12 +111,12 @@ zcp_clones_iter(lua_State *state)
 }
 
 static int zcp_clones_list(lua_State *);
-static zcp_list_info_t zcp_clones_list_info = {
+static const zcp_list_info_t zcp_clones_list_info = {
 	.name = "clones",
 	.func = zcp_clones_list,
 	.gc = NULL,
 	.pargs = {
-	    { .za_name = "snapshot", .za_lua_type = LUA_TSTRING},
+	    { .za_name = "snapshot", .za_lua_type = LUA_TSTRING },
 	    {NULL, 0}
 	},
 	.kwargs = {
@@ -194,12 +198,12 @@ zcp_snapshots_iter(lua_State *state)
 }
 
 static int zcp_snapshots_list(lua_State *);
-static zcp_list_info_t zcp_snapshots_list_info = {
+static const zcp_list_info_t zcp_snapshots_list_info = {
 	.name = "snapshots",
 	.func = zcp_snapshots_list,
 	.gc = NULL,
 	.pargs = {
-	    { .za_name = "filesystem | volume", .za_lua_type = LUA_TSTRING},
+	    { .za_name = "filesystem | volume", .za_lua_type = LUA_TSTRING },
 	    {NULL, 0}
 	},
 	.kwargs = {
@@ -281,12 +285,12 @@ zcp_children_iter(lua_State *state)
 }
 
 static int zcp_children_list(lua_State *);
-static zcp_list_info_t zcp_children_list_info = {
+static const zcp_list_info_t zcp_children_list_info = {
 	.name = "children",
 	.func = zcp_children_list,
 	.gc = NULL,
 	.pargs = {
-	    { .za_name = "filesystem | volume", .za_lua_type = LUA_TSTRING},
+	    { .za_name = "filesystem | volume", .za_lua_type = LUA_TSTRING },
 	    {NULL, 0}
 	},
 	.kwargs = {
@@ -333,7 +337,7 @@ zcp_user_props_list_gc(lua_State *state)
 static int
 zcp_user_props_iter(lua_State *state)
 {
-	char *source, *val;
+	const char *source, *val;
 	nvlist_t *nvprop;
 	nvlist_t **props = lua_touserdata(state, lua_upvalueindex(1));
 	nvpair_t *pair = lua_touserdata(state, lua_upvalueindex(2));
@@ -361,13 +365,13 @@ zcp_user_props_iter(lua_State *state)
 }
 
 static int zcp_user_props_list(lua_State *);
-static zcp_list_info_t zcp_user_props_list_info = {
+static const zcp_list_info_t zcp_user_props_list_info = {
 	.name = "user_properties",
 	.func = zcp_user_props_list,
 	.gc = zcp_user_props_list_gc,
 	.pargs = {
 	    { .za_name = "filesystem | snapshot | volume",
-	    .za_lua_type = LUA_TSTRING},
+	    .za_lua_type = LUA_TSTRING },
 	    {NULL, 0}
 	},
 	.kwargs = {
@@ -383,13 +387,13 @@ static zcp_list_info_t zcp_user_props_list_info = {
  * versions of ZFS, we declare 'properties' as an alias for
  * 'user_properties'.
  */
-static zcp_list_info_t zcp_props_list_info = {
+static const zcp_list_info_t zcp_props_list_info = {
 	.name = "properties",
 	.func = zcp_user_props_list,
 	.gc = zcp_user_props_list_gc,
 	.pargs = {
 	    { .za_name = "filesystem | snapshot | volume",
-	    .za_lua_type = LUA_TSTRING},
+	    .za_lua_type = LUA_TSTRING },
 	    {NULL, 0}
 	},
 	.kwargs = {
@@ -444,11 +448,11 @@ zcp_dataset_system_props(dsl_dataset_t *ds, nvlist_t *nv)
 }
 
 static int zcp_system_props_list(lua_State *);
-static zcp_list_info_t zcp_system_props_list_info = {
+static const zcp_list_info_t zcp_system_props_list_info = {
 	.name = "system_properties",
 	.func = zcp_system_props_list,
 	.pargs = {
-	    { .za_name = "dataset", .za_lua_type = LUA_TSTRING},
+	    { .za_name = "dataset", .za_lua_type = LUA_TSTRING },
 	    {NULL, 0}
 	},
 	.kwargs = {
@@ -467,7 +471,7 @@ zcp_system_props_list(lua_State *state)
 	char errbuf[128];
 	const char *dataset_name;
 	dsl_pool_t *dp = zcp_run_info(state)->zri_pool;
-	zcp_list_info_t *libinfo = &zcp_system_props_list_info;
+	const zcp_list_info_t *libinfo = &zcp_system_props_list_info;
 	zcp_parse_args(state, libinfo->name, libinfo->pargs, libinfo->kwargs);
 	dataset_name = lua_tostring(state, 1);
 	nvlist_t *nv = fnvlist_alloc();
@@ -499,7 +503,7 @@ zcp_bookmarks_iter(lua_State *state)
 	uint64_t cursor = lua_tonumber(state, lua_upvalueindex(2));
 	dsl_pool_t *dp = zcp_run_info(state)->zri_pool;
 	dsl_dataset_t *ds;
-	zap_attribute_t za;
+	zap_attribute_t *za;
 	zap_cursor_t zc;
 
 	int err = dsl_dataset_hold_obj(dp, dsobj, FTAG, &ds);
@@ -536,9 +540,11 @@ zcp_bookmarks_iter(lua_State *state)
 	    ds->ds_bookmarks_obj, cursor);
 	dsl_dataset_rele(ds, FTAG);
 
-	err = zap_cursor_retrieve(&zc, &za);
+	za = zap_attribute_alloc();
+	err = zap_cursor_retrieve(&zc, za);
 	if (err != 0) {
 		zap_cursor_fini(&zc);
+		zap_attribute_free(za);
 		if (err != ENOENT) {
 			return (luaL_error(state,
 			    "unexpected error %d from zap_cursor_retrieve()",
@@ -552,7 +558,8 @@ zcp_bookmarks_iter(lua_State *state)
 
 	/* Create the full "pool/fs#bookmark" string to return */
 	int n = snprintf(bookmark_name, ZFS_MAX_DATASET_NAME_LEN, "%s#%s",
-	    ds_name, za.za_name);
+	    ds_name, za->za_name);
+	zap_attribute_free(za);
 	if (n >= ZFS_MAX_DATASET_NAME_LEN) {
 		return (luaL_error(state,
 		    "unexpected error %d from snprintf()", ENAMETOOLONG));
@@ -566,11 +573,11 @@ zcp_bookmarks_iter(lua_State *state)
 }
 
 static int zcp_bookmarks_list(lua_State *);
-static zcp_list_info_t zcp_bookmarks_list_info = {
+static const zcp_list_info_t zcp_bookmarks_list_info = {
 	.name = "bookmarks",
 	.func = zcp_bookmarks_list,
 	.pargs = {
-	    { .za_name = "dataset", .za_lua_type = LUA_TSTRING},
+	    { .za_name = "dataset", .za_lua_type = LUA_TSTRING },
 	    {NULL, 0}
 	},
 	.kwargs = {
@@ -610,7 +617,7 @@ zcp_holds_iter(lua_State *state)
 	uint64_t cursor = lua_tonumber(state, lua_upvalueindex(2));
 	dsl_pool_t *dp = zcp_run_info(state)->zri_pool;
 	dsl_dataset_t *ds;
-	zap_attribute_t za;
+	zap_attribute_t *za;
 	zap_cursor_t zc;
 
 	int err = dsl_dataset_hold_obj(dp, dsobj, FTAG, &ds);
@@ -631,9 +638,11 @@ zcp_holds_iter(lua_State *state)
 	    dsl_dataset_phys(ds)->ds_userrefs_obj, cursor);
 	dsl_dataset_rele(ds, FTAG);
 
-	err = zap_cursor_retrieve(&zc, &za);
+	za = zap_attribute_alloc();
+	err = zap_cursor_retrieve(&zc, za);
 	if (err != 0) {
 		zap_cursor_fini(&zc);
+		zap_attribute_free(za);
 		if (err != ENOENT) {
 			return (luaL_error(state,
 			    "unexpected error %d from zap_cursor_retrieve()",
@@ -648,18 +657,19 @@ zcp_holds_iter(lua_State *state)
 	lua_pushnumber(state, cursor);
 	lua_replace(state, lua_upvalueindex(2));
 
-	(void) lua_pushstring(state, za.za_name);
-	(void) lua_pushnumber(state, za.za_first_integer);
+	(void) lua_pushstring(state, za->za_name);
+	(void) lua_pushnumber(state, za->za_first_integer);
+	zap_attribute_free(za);
 	return (2);
 }
 
 static int zcp_holds_list(lua_State *);
-static zcp_list_info_t zcp_holds_list_info = {
+static const zcp_list_info_t zcp_holds_list_info = {
 	.name = "holds",
 	.func = zcp_holds_list,
 	.gc = NULL,
 	.pargs = {
-	    { .za_name = "snapshot", .za_lua_type = LUA_TSTRING},
+	    { .za_name = "snapshot", .za_lua_type = LUA_TSTRING },
 	    {NULL, 0}
 	},
 	.kwargs = {
@@ -710,8 +720,7 @@ zcp_list_func(lua_State *state)
 int
 zcp_load_list_lib(lua_State *state)
 {
-	int i;
-	zcp_list_info_t *zcp_list_funcs[] = {
+	const zcp_list_info_t *zcp_list_funcs[] = {
 		&zcp_children_list_info,
 		&zcp_snapshots_list_info,
 		&zcp_user_props_list_info,
@@ -725,8 +734,8 @@ zcp_load_list_lib(lua_State *state)
 
 	lua_newtable(state);
 
-	for (i = 0; zcp_list_funcs[i] != NULL; i++) {
-		zcp_list_info_t *info = zcp_list_funcs[i];
+	for (int i = 0; zcp_list_funcs[i] != NULL; i++) {
+		const zcp_list_info_t *info = zcp_list_funcs[i];
 
 		if (info->gc != NULL) {
 			/*
@@ -741,10 +750,9 @@ zcp_load_list_lib(lua_State *state)
 			lua_pop(state, 1);
 		}
 
-		lua_pushlightuserdata(state, info);
+		lua_pushlightuserdata(state, (void *)(uintptr_t)info);
 		lua_pushcclosure(state, &zcp_list_func, 1);
 		lua_setfield(state, -2, info->name);
-		info++;
 	}
 
 	return (1);

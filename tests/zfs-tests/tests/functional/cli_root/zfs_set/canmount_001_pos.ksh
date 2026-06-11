@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -63,12 +64,11 @@ set -A values "on" "off"
 
 function cleanup
 {
-	if snapexists $TESTPOOL/$TESTFS@$TESTSNAP ; then
-		log_must zfs destroy -R $TESTPOOL/$TESTFS@$TESTSNAP
-	fi
-	if snapexists $TESTPOOL/$TESTVOL@$TESTSNAP ; then
-		log_must zfs destroy -R $TESTPOOL/$TESTVOL@$TESTSNAP
-	fi
+	snapexists $TESTPOOL/$TESTFS@$TESTSNAP && \
+		destroy_dataset $TESTPOOL/$TESTFS@$TESTSNAP -R
+
+	snapexists $TESTPOOL/$TESTVOL@$TESTSNAP && \
+		destroy_dataset $TESTPOOL/$TESTVOL@$TESTSNAP -R
 
 	[[ -n $old_ctr_canmount ]] && \
 		log_must zfs set canmount=$old_ctr_canmount $TESTPOOL/$TESTCTR
@@ -82,14 +82,8 @@ function cleanup
 log_assert "Setting a valid property of canmount to file system, it must be successful."
 log_onexit cleanup
 
-typeset old_fs_canmount="" old_ctr_canmount=""
-
-old_fs_canmount=$(get_prop canmount $TESTPOOL/$TESTFS)
-[[ $? != 0 ]] && \
-	log_fail "Get the $TESTPOOL/$TESTFS canmount error."
-old_ctr_canmount=$(get_prop canmount $TESTPOOL/$TESTCTR)
-[[ $? != 0 ]] && \
-	log_fail "Get the $TESTPOOL/$TESTCTR canmount error."
+typeset old_fs_canmount=$(get_prop canmount $TESTPOOL/$TESTFS)
+typeset old_ctr_canmount=$(get_prop canmount $TESTPOOL/$TESTCTR)
 
 log_must zfs snapshot $TESTPOOL/$TESTFS@$TESTSNAP
 log_must zfs snapshot $TESTPOOL/$TESTVOL@$TESTSNAP

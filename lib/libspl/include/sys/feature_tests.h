@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -7,7 +8,7 @@
  * with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -27,10 +28,14 @@
 #ifndef _SYS_FEATURE_TESTS_H
 #define	_SYS_FEATURE_TESTS_H
 
-#ifdef _MSC_VER
-#define	__NORETURN
+#define	____cacheline_aligned
+
+#if !defined(zfs_fallthrough) && !defined(_LIBCPP_VERSION)
+#if defined(HAVE_IMPLICIT_FALLTHROUGH)
+#define	zfs_fallthrough		__attribute__((__fallthrough__))
 #else
-#define	__NORETURN	__attribute__((__noreturn__))
+#define	zfs_fallthrough		((void)0)
+#endif
 #endif
 
 #endif

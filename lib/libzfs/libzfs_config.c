@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -46,57 +47,37 @@
 #include <string.h>
 #include <unistd.h>
 #include <libintl.h>
-#include <libuutil.h>
 
 #include "libzfs_impl.h"
 
 typedef struct config_node {
 	char		*cn_name;
 	nvlist_t	*cn_config;
-	uu_avl_node_t	cn_avl;
+	avl_node_t	cn_avl;
 } config_node_t;
 
-/* ARGSUSED */
 static int
-config_node_compare(const void *a, const void *b, void *unused)
+config_node_compare(const void *a, const void *b)
 {
-	int ret;
-
 	const config_node_t *ca = (config_node_t *)a;
 	const config_node_t *cb = (config_node_t *)b;
 
-	ret = strcmp(ca->cn_name, cb->cn_name);
-
-	if (ret < 0)
-		return (-1);
-	else if (ret > 0)
-		return (1);
-	else
-		return (0);
+	return (TREE_ISIGN(strcmp(ca->cn_name, cb->cn_name)));
 }
 
 void
 namespace_clear(libzfs_handle_t *hdl)
 {
-	if (hdl->libzfs_ns_avl) {
-		config_node_t *cn;
-		void *cookie = NULL;
+	config_node_t *cn;
+	void *cookie = NULL;
 
-		while ((cn = uu_avl_teardown(hdl->libzfs_ns_avl,
-		    &cookie)) != NULL) {
-			nvlist_free(cn->cn_config);
-			free(cn->cn_name);
-			free(cn);
-		}
-
-		uu_avl_destroy(hdl->libzfs_ns_avl);
-		hdl->libzfs_ns_avl = NULL;
+	while ((cn = avl_destroy_nodes(&hdl->libzfs_ns_avl, &cookie)) != NULL) {
+		nvlist_free(cn->cn_config);
+		free(cn->cn_name);
+		free(cn);
 	}
 
-	if (hdl->libzfs_ns_avlpool) {
-		uu_avl_pool_destroy(hdl->libzfs_ns_avlpool);
-		hdl->libzfs_ns_avlpool = NULL;
-	}
+	avl_destroy(&hdl->libzfs_ns_avl);
 }
 
 /*
@@ -112,24 +93,11 @@ namespace_reload(libzfs_handle_t *hdl)
 	void *cookie;
 
 	if (hdl->libzfs_ns_gen == 0) {
-		/*
-		 * This is the first time we've accessed the configuration
-		 * cache.  Initialize the AVL tree and then fall through to the
-		 * common code.
-		 */
-		if ((hdl->libzfs_ns_avlpool = uu_avl_pool_create("config_pool",
-		    sizeof (config_node_t),
-		    offsetof(config_node_t, cn_avl),
-		    config_node_compare, UU_DEFAULT)) == NULL)
-			return (no_memory(hdl));
-
-		if ((hdl->libzfs_ns_avl = uu_avl_create(hdl->libzfs_ns_avlpool,
-		    NULL, UU_DEFAULT)) == NULL)
-			return (no_memory(hdl));
+		avl_create(&hdl->libzfs_ns_avl, config_node_compare,
+		    sizeof (config_node_t), offsetof(config_node_t, cn_avl));
 	}
 
-	if (zcmd_alloc_dst_nvlist(hdl, &zc, 0) != 0)
-		return (-1);
+	zcmd_alloc_dst_nvlist(hdl, &zc, 0);
 
 	for (;;) {
 		zc.zc_cookie = hdl->libzfs_ns_gen;
@@ -143,10 +111,7 @@ namespace_reload(libzfs_handle_t *hdl)
 				return (0);
 
 			case ENOMEM:
-				if (zcmd_expand_dst_nvlist(hdl, &zc) != 0) {
-					zcmd_free_nvlists(&zc);
-					return (-1);
-				}
+				zcmd_expand_dst_nvlist(hdl, &zc);
 				break;
 
 			default:
@@ -172,7 +137,7 @@ namespace_reload(libzfs_handle_t *hdl)
 	 * Clear out any existing configuration information.
 	 */
 	cookie = NULL;
-	while ((cn = uu_avl_teardown(hdl->libzfs_ns_avl, &cookie)) != NULL) {
+	while ((cn = avl_destroy_nodes(&hdl->libzfs_ns_avl, &cookie)) != NULL) {
 		nvlist_free(cn->cn_config);
 		free(cn->cn_name);
 		free(cn);
@@ -181,31 +146,20 @@ namespace_reload(libzfs_handle_t *hdl)
 	elem = NULL;
 	while ((elem = nvlist_next_nvpair(config, elem)) != NULL) {
 		nvlist_t *child;
-		uu_avl_index_t where;
+		avl_index_t where;
 
-		if ((cn = zfs_alloc(hdl, sizeof (config_node_t))) == NULL) {
-			nvlist_free(config);
-			return (-1);
-		}
-
-		if ((cn->cn_name = zfs_strdup(hdl,
-		    nvpair_name(elem))) == NULL) {
-			free(cn);
-			nvlist_free(config);
-			return (-1);
-		}
-
-		verify(nvpair_value_nvlist(elem, &child) == 0);
+		cn = zfs_alloc(hdl, sizeof (config_node_t));
+		cn->cn_name = zfs_strdup(hdl, nvpair_name(elem));
+		child = fnvpair_value_nvlist(elem);
 		if (nvlist_dup(child, &cn->cn_config, 0) != 0) {
 			free(cn->cn_name);
 			free(cn);
 			nvlist_free(config);
 			return (no_memory(hdl));
 		}
-		verify(uu_avl_find(hdl->libzfs_ns_avl, cn, NULL, &where)
-		    == NULL);
+		verify(avl_find(&hdl->libzfs_ns_avl, cn, &where) == NULL);
 
-		uu_avl_insert(hdl->libzfs_ns_avl, cn, where);
+		avl_insert(&hdl->libzfs_ns_avl, cn, where);
 	}
 
 	nvlist_free(config);
@@ -275,8 +229,7 @@ zpool_refresh_stats(zpool_handle_t *zhp, boolean_t *missing)
 	if (zhp->zpool_config_size == 0)
 		zhp->zpool_config_size = 1 << 16;
 
-	if (zcmd_alloc_dst_nvlist(hdl, &zc, zhp->zpool_config_size) != 0)
-		return (-1);
+	zcmd_alloc_dst_nvlist(hdl, &zc, zhp->zpool_config_size);
 
 	for (;;) {
 		if (zfs_ioctl(zhp->zpool_hdl, ZFS_IOC_POOL_STATS,
@@ -288,12 +241,9 @@ zpool_refresh_stats(zpool_handle_t *zhp, boolean_t *missing)
 			break;
 		}
 
-		if (errno == ENOMEM) {
-			if (zcmd_expand_dst_nvlist(hdl, &zc) != 0) {
-				zcmd_free_nvlists(&zc);
-				return (-1);
-			}
-		} else {
+		if (errno == ENOMEM)
+			zcmd_expand_dst_nvlist(hdl, &zc);
+		else {
 			zcmd_free_nvlists(&zc);
 			if (errno == ENOENT || errno == EINVAL)
 				*missing = B_TRUE;
@@ -324,6 +274,23 @@ zpool_refresh_stats(zpool_handle_t *zhp, boolean_t *missing)
 		zhp->zpool_state = POOL_STATE_ACTIVE;
 
 	return (0);
+}
+
+/*
+ * Copies the pool config and state from szhp to dzhp. szhp and dzhp must
+ * represent the same pool. Used by pool_list_refresh() to avoid another
+ * round-trip into the kernel to get stats already collected earlier in the
+ * function.
+ */
+void
+zpool_refresh_stats_from_handle(zpool_handle_t *dzhp, zpool_handle_t *szhp)
+{
+	VERIFY0(strcmp(dzhp->zpool_name, szhp->zpool_name));
+	nvlist_free(dzhp->zpool_old_config);
+	dzhp->zpool_old_config = dzhp->zpool_config;
+	dzhp->zpool_config = fnvlist_dup(szhp->zpool_config);
+	dzhp->zpool_config_size = szhp->zpool_config_size;
+	dzhp->zpool_state = szhp->zpool_state;
 }
 
 /*
@@ -402,8 +369,8 @@ zpool_iter(libzfs_handle_t *hdl, zpool_iter_f func, void *data)
 		return (-1);
 
 	hdl->libzfs_pool_iter++;
-	for (cn = uu_avl_first(hdl->libzfs_ns_avl); cn != NULL;
-	    cn = uu_avl_next(hdl->libzfs_ns_avl, cn)) {
+	for (cn = avl_first(&hdl->libzfs_ns_avl); cn != NULL;
+	    cn = AVL_NEXT(&hdl->libzfs_ns_avl, cn)) {
 
 		if (zpool_skip_pool(cn->cn_name))
 			continue;
@@ -440,8 +407,8 @@ zfs_iter_root(libzfs_handle_t *hdl, zfs_iter_f func, void *data)
 	if (namespace_reload(hdl) != 0)
 		return (-1);
 
-	for (cn = uu_avl_first(hdl->libzfs_ns_avl); cn != NULL;
-	    cn = uu_avl_next(hdl->libzfs_ns_avl, cn)) {
+	for (cn = avl_first(&hdl->libzfs_ns_avl); cn != NULL;
+	    cn = AVL_NEXT(&hdl->libzfs_ns_avl, cn)) {
 
 		if (zpool_skip_pool(cn->cn_name))
 			continue;

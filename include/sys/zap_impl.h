@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -24,6 +25,7 @@
  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
  * Copyright (c) 2013, 2016 by Delphix. All rights reserved.
  * Copyright 2017 Nexenta Systems, Inc.
+ * Copyright (c) 2024, Klara, Inc.
  */
 
 #ifndef	_SYS_ZAP_IMPL_H
@@ -45,7 +47,6 @@ extern int fzap_default_block_shift;
 
 #define	MZAP_ENT_LEN		64
 #define	MZAP_NAME_LEN		(MZAP_ENT_LEN - 8 - 4 - 2)
-#define	MZAP_MAX_BLKSZ		SPA_OLD_MAXBLOCKSIZE
 
 #define	ZAP_NEED_CD		(-1U)
 
@@ -66,10 +67,9 @@ typedef struct mzap_phys {
 } mzap_phys_t;
 
 typedef struct mzap_ent {
-	avl_node_t mze_node;
-	int mze_chunkid;
-	uint64_t mze_hash;
-	uint32_t mze_cd; /* copy from mze_phys->mze_cd */
+	uint32_t mze_hash;
+	uint16_t mze_cd; /* copy from mze_phys->mze_cd */
+	uint16_t mze_chunkid;
 } mzap_ent_t;
 
 #define	MZE_PHYS(zap, mze) \
@@ -146,6 +146,7 @@ typedef struct zap {
 	dmu_buf_user_t zap_dbu;
 	objset_t *zap_objset;
 	uint64_t zap_object;
+	dnode_t *zap_dnode;
 	struct dmu_buf *zap_dbuf;
 	krwlock_t zap_rwlock;
 	boolean_t zap_ismicro;
@@ -164,7 +165,7 @@ typedef struct zap {
 			int16_t zap_num_entries;
 			int16_t zap_num_chunks;
 			int16_t zap_alloc_next;
-			avl_tree_t zap_avl;
+			zfs_btree_t zap_tree;
 		} zap_micro;
 	} zap_u;
 } zap_t;
@@ -191,7 +192,8 @@ typedef struct zap_name {
 	uint64_t zn_hash;
 	matchtype_t zn_matchtype;
 	int zn_normflags;
-	char zn_normbuf[ZAP_MAXNAMELEN];
+	int zn_normbuf_len;
+	char zn_normbuf[];
 } zap_name_t;
 
 #define	zap_f	zap_u.zap_fat
@@ -199,14 +201,17 @@ typedef struct zap_name {
 
 boolean_t zap_match(zap_name_t *zn, const char *matchname);
 int zap_lockdir(objset_t *os, uint64_t obj, dmu_tx_t *tx,
-    krw_t lti, boolean_t fatreader, boolean_t adding, void *tag, zap_t **zapp);
-void zap_unlockdir(zap_t *zap, void *tag);
+    krw_t lti, boolean_t fatreader, boolean_t adding, const void *tag,
+    zap_t **zapp);
+void zap_unlockdir(zap_t *zap, const void *tag);
 void zap_evict_sync(void *dbu);
-zap_name_t *zap_name_alloc(zap_t *zap, const char *key, matchtype_t mt);
+zap_name_t *zap_name_alloc_str(zap_t *zap, const char *key, matchtype_t mt);
 void zap_name_free(zap_name_t *zn);
 int zap_hashbits(zap_t *zap);
 uint32_t zap_maxcd(zap_t *zap);
 uint64_t zap_getflags(zap_t *zap);
+
+uint64_t zap_get_micro_max_size(spa_t *spa);
 
 #define	ZAP_HASH_IDX(hash, n) (((n) == 0) ? 0 : ((hash) >> (64 - (n))))
 
@@ -214,13 +219,14 @@ void fzap_byteswap(void *buf, size_t size);
 int fzap_count(zap_t *zap, uint64_t *count);
 int fzap_lookup(zap_name_t *zn,
     uint64_t integer_size, uint64_t num_integers, void *buf,
-    char *realname, int rn_len, boolean_t *normalization_conflictp);
+    char *realname, int rn_len, boolean_t *normalization_conflictp,
+    uint64_t *actual_num_integers);
 void fzap_prefetch(zap_name_t *zn);
 int fzap_add(zap_name_t *zn, uint64_t integer_size, uint64_t num_integers,
-    const void *val, void *tag, dmu_tx_t *tx);
+    const void *val, const void *tag, dmu_tx_t *tx);
 int fzap_update(zap_name_t *zn,
     int integer_size, uint64_t num_integers, const void *val,
-    void *tag, dmu_tx_t *tx);
+    const void *tag, dmu_tx_t *tx);
 int fzap_length(zap_name_t *zn,
     uint64_t *integer_size, uint64_t *num_integers);
 int fzap_remove(zap_name_t *zn, dmu_tx_t *tx);
@@ -230,7 +236,7 @@ void zap_put_leaf(struct zap_leaf *l);
 
 int fzap_add_cd(zap_name_t *zn,
     uint64_t integer_size, uint64_t num_integers,
-    const void *val, uint32_t cd, void *tag, dmu_tx_t *tx);
+    const void *val, uint32_t cd, const void *tag, dmu_tx_t *tx);
 void fzap_upgrade(zap_t *zap, dmu_tx_t *tx, zap_flags_t flags);
 
 #ifdef	__cplusplus

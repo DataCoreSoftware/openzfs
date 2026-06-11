@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -39,15 +40,16 @@
 
 function cleanup
 {
-	datasetexists $TESTPOOL/$TESTFS1 && zfs destroy -R $TESTPOOL/$TESTFS1
+	datasetexists $TESTPOOL/$TESTFS1 && destroy_dataset $TESTPOOL/$TESTFS1 -R
 	# reset the livelist sublist size to its original value
 	set_tunable64 LIVELIST_MAX_ENTRIES $ORIGINAL_MAX
+	log_must zfs inherit compression $TESTPOOL
 }
 
 function clone_write_file
 {
 	log_must mkfile 1m /$TESTPOOL/$1/$2
-	log_must zpool sync $TESTPOOL
+	sync_pool $TESTPOOL
 }
 
 function test_one_empty
@@ -146,6 +148,11 @@ function test_clone_clone_promote
 ORIGINAL_MAX=$(get_tunable LIVELIST_MAX_ENTRIES)
 
 log_onexit cleanup
+# You might think that setting compression=off for $TESTFS1 would be
+# sufficient. You would be mistaken.
+# You need compression=off for whatever the parent of $TESTFS1 is,
+# and $TESTFS1.
+log_must zfs set compression=off $TESTPOOL
 log_must zfs create $TESTPOOL/$TESTFS1
 log_must mkfile 20m /$TESTPOOL/$TESTFS1/atestfile
 log_must zfs snapshot $TESTPOOL/$TESTFS1@snap

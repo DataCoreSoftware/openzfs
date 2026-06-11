@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 /*
  * BSD 3-Clause New License (https://spdx.org/licenses/BSD-3-Clause.html)
  *
@@ -44,6 +45,7 @@ extern "C" {
 #ifdef _KERNEL
 
 #if defined(__FreeBSD__)
+#include <sys/types.h>    /* u_int, u_char */
 #include <sys/systm.h>    /* memcpy, memset */
 #elif defined(__linux__)
 #include <linux/string.h> /* memcpy, memset */

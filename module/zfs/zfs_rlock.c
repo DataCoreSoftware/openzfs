@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -665,7 +666,7 @@ zfs_rangelock_reduce(zfs_locked_range_t *lr, uint64_t off, uint64_t len)
 
 	/* Ensure there are no other locks */
 	ASSERT3U(avl_numnodes(&rl->rl_tree), ==, 1);
-	ASSERT3U(lr->lr_offset, ==, 0);
+	ASSERT0(lr->lr_offset);
 	ASSERT3U(lr->lr_type, ==, RL_WRITER);
 	ASSERT(!lr->lr_proxy);
 	ASSERT3U(lr->lr_length, ==, UINT64_MAX);

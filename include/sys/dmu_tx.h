@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -24,6 +25,7 @@
  */
 /*
  * Copyright (c) 2012, 2016 by Delphix. All rights reserved.
+ * Copyright (c) 2025, Klara, Inc.
  */
 
 #ifndef	_SYS_DMU_TX_H
@@ -79,6 +81,9 @@ struct dmu_tx {
 	/* has this transaction already been delayed? */
 	boolean_t tx_dirty_delayed;
 
+	/* whether dmu_tx_wait() should return on suspend */
+	boolean_t tx_break_on_suspend;
+
 	int tx_err;
 };
 
@@ -90,6 +95,8 @@ enum dmu_tx_hold_type {
 	THT_ZAP,
 	THT_SPACE,
 	THT_SPILL,
+	THT_CLONE,
+	THT_APPEND,
 	THT_NUMTYPES
 };
 
@@ -125,6 +132,7 @@ typedef struct dmu_tx_stats {
 	kstat_named_t dmu_tx_dirty_delay;
 	kstat_named_t dmu_tx_dirty_over_max;
 	kstat_named_t dmu_tx_dirty_frees_delay;
+	kstat_named_t dmu_tx_wrlog_delay;
 	kstat_named_t dmu_tx_quota;
 } dmu_tx_stats_t;
 
@@ -139,7 +147,7 @@ extern dmu_tx_stats_t dmu_tx_stats;
  * These routines are defined in dmu.h, and are called by the user.
  */
 dmu_tx_t *dmu_tx_create(objset_t *dd);
-int dmu_tx_assign(dmu_tx_t *tx, uint64_t txg_how);
+int dmu_tx_assign(dmu_tx_t *tx, dmu_tx_flag_t flags);
 void dmu_tx_commit(dmu_tx_t *tx);
 void dmu_tx_abort(dmu_tx_t *tx);
 uint64_t dmu_tx_get_txg(dmu_tx_t *tx);

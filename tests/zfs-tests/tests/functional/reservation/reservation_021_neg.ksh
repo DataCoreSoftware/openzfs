@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -34,7 +35,7 @@
 
 verify_runnable "both"
 
-fs=$TESTPOOL/$TESTFS/$(basename $0).$$
+fs=$TESTPOOL/$TESTFS/${0##*/}.$$
 
 function cleanup
 {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (C) 2007-2010 Lawrence Livermore National Security, LLC.
  *  Copyright (C) 2007 The Regents of the University of California.
@@ -91,8 +92,10 @@ typedef struct vmem { } vmem_t;
 #define	vmem_zalloc(sz, fl)	spl_vmem_zalloc((sz), (fl), __func__, __LINE__)
 #define	vmem_free(ptr, sz)	spl_vmem_free((ptr), (sz))
 
-extern void *spl_vmem_alloc(size_t sz, int fl, const char *func, int line);
-extern void *spl_vmem_zalloc(size_t sz, int fl, const char *func, int line);
+extern void *spl_vmem_alloc(size_t sz, int fl, const char *func, int line)
+    __attribute__((malloc, alloc_size(1)));
+extern void *spl_vmem_zalloc(size_t sz, int fl, const char *func, int line)
+    __attribute__((malloc, alloc_size(1)));
 extern void spl_vmem_free(const void *ptr, size_t sz);
 
 int spl_vmem_init(void);

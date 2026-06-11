@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -51,7 +52,7 @@ verify_runnable "both"
 function cleanup
 {
 	for snap in $snap2 $snap1; do
-		datasetexists $snap && log_must zfs destroy -rf $snap
+		datasetexists $snap && destroy_dataset $snap -rf
 	done
 	for file in $fbackup1 $fbackup2 $mntpnt/file1 $mntpnt/file2; do
 		[[ -f $file ]] && log_must rm -f $file
@@ -59,10 +60,10 @@ function cleanup
 
 	if is_global_zone; then
 		datasetexists $TESTPOOL/$TESTFS/$TESTFS1 && \
-			log_must zfs destroy -rf $TESTPOOL/$TESTFS/$TESTFS1
+			destroy_dataset $TESTPOOL/$TESTFS/$TESTFS1 -rf
 	else
 		datasetexists $TESTPOOL/${ZONE_CTR}0 && \
-			log_must zfs destroy -rf $TESTPOOL/${ZONE_CTR}0
+			destroy_dataset $TESTPOOL/${ZONE_CTR}0 -rf
 	fi
 
 }
@@ -82,7 +83,7 @@ datasetexists $ancestor_fs || \
 	log_must zfs create $ancestor_fs
 log_must zfs create $fs
 
-mntpnt=$(get_prop mountpoint $fs) || log_fail "get_prop mountpoint $fs"
+mntpnt=$(get_prop mountpoint $fs)
 log_must mkfile 10m $mntpnt/file1
 log_must zfs snapshot $snap1
 log_must mkfile 10m $mntpnt/file2

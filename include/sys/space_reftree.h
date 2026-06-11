@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -46,8 +47,8 @@ void space_reftree_create(avl_tree_t *t);
 void space_reftree_destroy(avl_tree_t *t);
 void space_reftree_add_seg(avl_tree_t *t, uint64_t start, uint64_t end,
     int64_t refcnt);
-void space_reftree_add_map(avl_tree_t *t, range_tree_t *rt, int64_t refcnt);
-void space_reftree_generate_map(avl_tree_t *t, range_tree_t *rt,
+void space_reftree_add_map(avl_tree_t *t, zfs_range_tree_t *rt, int64_t refcnt);
+void space_reftree_generate_map(avl_tree_t *t, zfs_range_tree_t *rt,
     int64_t minref);
 
 #ifdef	__cplusplus

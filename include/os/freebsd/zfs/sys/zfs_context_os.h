@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2020 iXsystems, Inc.
  * All rights reserved.
@@ -41,10 +42,12 @@
 #include <sys/ccompat.h>
 #include <linux/types.h>
 
-#define	cond_resched()		kern_yield(PRI_USER)
+#if KSTACK_PAGES * PAGE_SIZE >= 16384
+#define	HAVE_LARGE_STACKS	1
+#endif
 
 #define	taskq_create_sysdc(a, b, d, e, p, dc, f) \
-	    (taskq_create(a, b, maxclsyspri, d, e, f))
+	    ((void) sizeof (dc), taskq_create(a, b, maxclsyspri, d, e, f))
 
 #define	tsd_create(keyp, destructor)    do {                 \
 		*(keyp) = osd_thread_register((destructor));         \
@@ -76,7 +79,7 @@ extern int hz;
 extern int tick;
 typedef int fstrans_cookie_t;
 #define	spl_fstrans_mark() (0)
-#define	spl_fstrans_unmark(x) (x = 0)
+#define	spl_fstrans_unmark(x) ((void)x)
 #define	signal_pending(x) SIGPENDING(x)
 #define	current curthread
 #define	thread_join(x)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -29,6 +30,7 @@
 
 #include <sys/zfs_context.h>
 #include <sys/zio.h>
+#include <sys/zap.h>
 #include <sys/ddt.h>
 #include <sys/bplist.h>
 
@@ -60,7 +62,7 @@ typedef struct dsl_scan_phys {
 	uint64_t scn_end_time;
 	uint64_t scn_to_examine; /* total bytes to be scanned */
 	uint64_t scn_examined; /* bytes scanned so far */
-	uint64_t scn_to_process;
+	uint64_t scn_skipped;	/* bytes skipped by scanner */
 	uint64_t scn_processed;
 	uint64_t scn_errors;	/* scan I/O error count */
 	uint64_t scn_ddt_class_max;
@@ -77,6 +79,21 @@ typedef enum dsl_scan_flags {
 } dsl_scan_flags_t;
 
 #define	DSL_SCAN_FLAGS_MASK (DSF_VISIT_DS_AGAIN)
+
+typedef struct dsl_errorscrub_phys {
+	uint64_t dep_func; /* pool_scan_func_t */
+	uint64_t dep_state; /* dsl_scan_state_t */
+	uint64_t dep_cursor; /* serialized zap cursor for tracing progress */
+	uint64_t dep_start_time; /* error scrub start time, unix timestamp */
+	uint64_t dep_end_time; /* error scrub end time, unix timestamp */
+	uint64_t dep_to_examine; /* total error blocks to be scrubbed */
+	uint64_t dep_examined; /* blocks scrubbed so far */
+	uint64_t dep_errors;	/* error scrub I/O error count */
+	uint64_t dep_paused_flags; /* flag for paused */
+} dsl_errorscrub_phys_t;
+
+#define	ERRORSCRUB_PHYS_NUMINTS (sizeof (dsl_errorscrub_phys_t) \
+	/ sizeof (uint64_t))
 
 /*
  * Every pool will have one dsl_scan_t and this structure will contain
@@ -140,7 +157,7 @@ typedef struct dsl_scan {
 
 	/* per txg statistics */
 	uint64_t scn_visited_this_txg;	/* total bps visited this txg */
-	uint64_t scn_dedup_frees_this_txg;	/* dedup bps freed this txg */
+	uint64_t scn_async_frees_this_txg; /* async frees (dedup/clone/gang) */
 	uint64_t scn_holes_this_txg;
 	uint64_t scn_lt_min_this_txg;
 	uint64_t scn_gt_max_this_txg;
@@ -151,12 +168,23 @@ typedef struct dsl_scan {
 	uint64_t scn_avg_zio_size_this_txg;
 	uint64_t scn_zios_this_txg;
 
+	/* zap cursor for tracing error scrub progress */
+	zap_cursor_t errorscrub_cursor;
 	/* members needed for syncing scan status to disk */
 	dsl_scan_phys_t scn_phys;	/* on disk representation of scan */
 	dsl_scan_phys_t scn_phys_cached;
 	avl_tree_t scn_queue;		/* queue of datasets to scan */
-	uint64_t scn_bytes_pending;	/* outstanding data to issue */
+	kmutex_t scn_queue_lock;	/* serializes scn_queue inserts */
+	uint64_t scn_queues_pending;	/* outstanding data to issue */
+	/* members needed for syncing error scrub status to disk */
+	dsl_errorscrub_phys_t errorscrub_phys;
 } dsl_scan_t;
+
+typedef struct {
+	pool_scan_func_t func;
+	uint64_t	 txgstart;
+	uint64_t	 txgend;
+} setup_sync_arg_t;
 
 typedef struct dsl_scan_io_queue dsl_scan_io_queue_t;
 
@@ -168,22 +196,28 @@ void dsl_scan_setup_sync(void *, dmu_tx_t *);
 void dsl_scan_fini(struct dsl_pool *dp);
 void dsl_scan_sync(struct dsl_pool *, dmu_tx_t *);
 int dsl_scan_cancel(struct dsl_pool *);
-int dsl_scan(struct dsl_pool *, pool_scan_func_t);
+int dsl_scan(struct dsl_pool *, pool_scan_func_t, uint64_t starttxg,
+    uint64_t txgend);
 void dsl_scan_assess_vdev(struct dsl_pool *dp, vdev_t *vd);
 boolean_t dsl_scan_scrubbing(const struct dsl_pool *dp);
-int dsl_scrub_set_pause_resume(const struct dsl_pool *dp, pool_scrub_cmd_t cmd);
+boolean_t dsl_errorscrubbing(const struct dsl_pool *dp);
+boolean_t dsl_errorscrub_active(dsl_scan_t *scn);
 void dsl_scan_restart_resilver(struct dsl_pool *, uint64_t txg);
+int dsl_scrub_set_pause_resume(const struct dsl_pool *dp,
+    pool_scrub_cmd_t cmd);
+void dsl_errorscrub_sync(struct dsl_pool *, dmu_tx_t *);
 boolean_t dsl_scan_resilvering(struct dsl_pool *dp);
 boolean_t dsl_scan_resilver_scheduled(struct dsl_pool *dp);
 boolean_t dsl_dataset_unstable(struct dsl_dataset *ds);
 void dsl_scan_ddt_entry(dsl_scan_t *scn, enum zio_checksum checksum,
-    ddt_entry_t *dde, dmu_tx_t *tx);
+    ddt_t *ddt, ddt_lightweight_entry_t *ddlwe, dmu_tx_t *tx);
 void dsl_scan_ds_destroyed(struct dsl_dataset *ds, struct dmu_tx *tx);
 void dsl_scan_ds_snapshotted(struct dsl_dataset *ds, struct dmu_tx *tx);
 void dsl_scan_ds_clone_swapped(struct dsl_dataset *ds1, struct dsl_dataset *ds2,
     struct dmu_tx *tx);
 boolean_t dsl_scan_active(dsl_scan_t *scn);
 boolean_t dsl_scan_is_paused_scrub(const dsl_scan_t *scn);
+boolean_t dsl_errorscrub_is_paused(const dsl_scan_t *scn);
 void dsl_scan_freed(spa_t *spa, const blkptr_t *bp);
 void dsl_scan_io_queue_destroy(dsl_scan_io_queue_t *queue);
 void dsl_scan_io_queue_vdev_xfer(vdev_t *svd, vdev_t *tvd);

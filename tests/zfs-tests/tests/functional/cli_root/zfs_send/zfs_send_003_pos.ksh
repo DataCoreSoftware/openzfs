@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -44,8 +45,8 @@ verify_runnable "both"
 
 function cleanup
 {
-	datasetexists $snap1 && log_must zfs destroy $snap1
-	datasetexists $snap2 && log_must zfs destroy $snap2
+	datasetexists $snap1 && destroy_dataset $snap1
+	datasetexists $snap2 && destroy_dataset $snap2
 }
 
 log_assert "'zfs send -i' can deal with abbreviated snapshot name."
@@ -61,7 +62,7 @@ log_must zfs snapshot $snap2
 
 typeset -i i=0
 while (( i < ${#args[*]} )); do
-	log_must eval "zfs send -i ${args[i]} >$TEST_BASE_DIR/devnull"
+	log_must eval "zfs send -i ${args[i]} > /dev/null"
 
 	(( i += 1 ))
 done

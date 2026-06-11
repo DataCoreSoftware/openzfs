@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*-
  * Copyright 2004-2014 Olivier Houchard <cognet@FreeBSD.org>
  * Copyright 2012-2014 Ian Lepore <ian@FreeBSD.org>
@@ -40,7 +41,7 @@
 #define	ENTRY(x) \
 	.text; \
 	.syntax unified; \
-	.align 2; \
+	.balign 2; \
 	.global x; \
 	.type x,#function; \
 	_FUNC_MODE; \

@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -77,9 +78,7 @@ function test_n_check
 	fi
 
 	# Clean the test environment and make it clear.
-	if datasetexists $CTR; then
-		log_must zfs destroy -Rf $CTR
-	fi
+	datasetexists $CTR && destroy_dataset $CTR -Rf
 
 	# According to option create test compatible environment.
 	case $opt in

@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -60,8 +61,7 @@ do
 			tdev=$(random_get $LDEV2)
 			log_must zpool replace $TESTPOOL $sdev $tdev
 			log_must display_status $TESTPOOL
-			# sleep 15 to make sure replacement completely.
-			log_must sleep 15
+			log_must zpool wait $TESTPOOL
 			log_must verify_slog_device \
 				$TESTPOOL $tdev 'ONLINE' $logtype
 

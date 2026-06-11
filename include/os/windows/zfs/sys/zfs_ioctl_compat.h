@@ -19,8 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2013 Jorgen Lundan <lundman@lundman.net>.  All rights reserved.
- * Use is subject to license terms.
+ * Copyright 2013 Jorgen Lundan <lundman@lundman.net>.
  */
 
 #ifndef	_SYS_ZFS_IOCTL_COMPAT_H
@@ -72,7 +71,7 @@ typedef struct zfs_iocparm {
 
 	/*
 	 * ioctl() return codes can not be used to communicate -
-	 * as XNU will skip copyout() if there is an error, so it
+	 * as Windows will skip copyout() if there is an error, so it
 	 * is passed along in this wrapping structure.
 	 */
 	int			zfs_ioc_error;	/* ioctl error value */
@@ -121,7 +120,7 @@ typedef struct zfs_cmd_1_9_4
 	uint64_t	zc_fromobj;
 	uint64_t	zc_createtxg;
 	zfs_stat_t	zc_stat;
-    int		zc_ioc_error; /* ioctl error value */
+	int		zc_ioc_error; /* ioctl error value */
 	uint64_t	zc_dev;	/* OSX doesn't have ddi_driver_major */
 } zfs_cmd_1_9_4_t;
 
@@ -198,6 +197,7 @@ void zfs_cmd_compat_get(zfs_cmd_t *, caddr_t, const int);
 void zfs_cmd_compat_put(zfs_cmd_t *, caddr_t, const int, const int);
 uint64_t zfs_ioc_unregister_fs(void);
 
+#if 0
 int	wrap_avl_init(void);
 int	wrap_unicode_init(void);
 int	wrap_nvpair_init(void);
@@ -210,7 +210,20 @@ void wrap_nvpair_fini(void);
 void wrap_zcommon_fini(void);
 void wrap_icp_fini(void);
 void wrap_lua_fini(void);
-
+#else
+int avl_init(void);
+int unicode_init(void);
+int nvpair_init(void);
+int zcommon_init(void);
+int icp_init(void);
+int lua_init(void);
+void avl_fini(void);
+void unicode_fini(void);
+void nvpair_fini(void);
+void zcommon_fini(void);
+void icp_fini(void);
+void lua_fini(void);
+#endif
 #ifdef	__cplusplus
 }
 #endif

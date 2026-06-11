@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -63,15 +64,14 @@ function cleanup
 	ds=$TESTPOOL/$TESTCLONE
 	if datasetexists $ds; then
 		mntp=$(get_prop mountpoint $ds)
-		log_must zfs destroy $ds
+		destroy_dataset $ds
 		if [[ -d $mntp ]]; then
 			log_must rm -fr $mntp
 		fi
 	fi
 
-	if snapexists $TESTPOOL/$TESTFS@$TESTSNAP ; then
-		log_must zfs destroy -R $TESTPOOL/$TESTFS@$TESTSNAP
-	fi
+	snapexists $TESTPOOL/$TESTFS@$TESTSNAP && \
+		destroy_dataset $TESTPOOL/$TESTFS@$TESTSNAP -R
 
 	zfs unmount -a > /dev/null 2>&1
 	log_must zfs mount -a
@@ -98,9 +98,9 @@ while (( i < ${#dataset_pos[*]} )); do
 done
 
 i=0
-while (( i < ${#dataset_pos[*]} )) ; do
+while (( i < ${#dataset_pos[*]} )); do
 	dataset=${dataset_pos[i]}
-	if  ismounted $dataset; then
+	if ismounted $dataset; then
 		log_must cd ${old_mnt[i]}
 		set_n_check_prop "noauto" "canmount" "$dataset"
 		log_must mounted $dataset

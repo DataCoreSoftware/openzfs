@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 
 #
 # This file and its contents are supplied under the terms of the
@@ -35,11 +36,11 @@ log_must disk_setup
 log_must zpool create $TESTPOOL raidz $ZPOOL_DISKS special mirror \
 	$CLASS_DISK0 $CLASS_DISK1
 
-for value in 0 512 1024 2048 4096 8192 16384 32768 65536 131072
+for value in 0 200 512 1300 4096 12345 131072 1572864 16777216
 do
 	log_must zfs set special_small_blocks=$value $TESTPOOL
 	ACTUAL=$(zfs get -p special_small_blocks $TESTPOOL | \
-		grep special_small_blocks | awk '{print $3}')
+		awk '/special_small_blocks/ {print $3}')
 	if [ "$ACTUAL" != "$value" ]
 	then
 		log_fail "v. $ACTUAL set for $TESTPOOL, expected v. $value!"

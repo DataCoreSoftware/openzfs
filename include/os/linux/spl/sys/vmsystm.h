@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (C) 2007-2010 Lawrence Livermore National Security, LLC.
  *  Copyright (C) 2007 The Regents of the University of California.
@@ -44,7 +45,10 @@
 #define	zfs_totalhigh_pages	totalhigh_pages
 #endif
 
+#define	membar_consumer()		smp_rmb()
 #define	membar_producer()		smp_wmb()
+#define	membar_sync()			smp_mb()
+
 #define	physmem				zfs_totalram_pages
 
 #define	xcopyin(from, to, size)		copy_from_user(to, from, size)

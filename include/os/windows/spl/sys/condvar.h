@@ -45,7 +45,6 @@ enum {
 
 struct cv {
 	KEVENT cv_kevent[CV_MAX_EVENTS]; // signal event, broadcast event
-	KSPIN_LOCK cv_waiters_count_lock;
 	uint32_t cv_waiters_count;
 	uint32_t cv_initialised; // Just used as sanity
 };
@@ -75,7 +74,7 @@ int cv_timedwait_hires(kcondvar_t *cvp, struct kmutex *mp,
 
 /*
  * Linux provides a cv_wait_io so the schedular will know why we block.
- * find OSX equivalent?
+ * find Windows equivalent?
  */
 #define	cv_wait_io(cvp, mp)                     \
 	(void) spl_cv_wait((cvp), (mp), PRIBIO, #cvp)

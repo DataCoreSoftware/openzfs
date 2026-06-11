@@ -21,6 +21,7 @@
 /*
  * Copyright 2006 Sun Microsystems, Inc. All rights reserved.
  * Use is subject to license terms.
+ * Copyright (c) 2013, 2020 Jorgen Lundman <lundman@lundman.net>
  * Portions Copyright 2022 Andrew Innes <andrew.c12@gmail.com>
  */
 
@@ -128,7 +129,7 @@ typedef struct kstat_raw_ops {
 	int (*headers)(char *buf, size_t size);
 	int (*seq_headers)(struct seq_file *);
 	int (*data)(char *buf, size_t size, void *data);
-	void *(*addr)(struct kstat_s *ksp, loff_t index);
+	void *(*addr)(struct kstat *ksp, loff_t index);
 } kstat_raw_ops_t;
 
 #pragma pack(4)
@@ -246,7 +247,7 @@ typedef struct kstat_io {
 } kstat_io_t;
 
 typedef struct kstat_timer {
-	char		name[KSTAT_STRLEN+1]; /* event name */
+	char		name[KSTAT_STRLEN]; /* event name */
 	u_longlong_t	num_events;	/* number of events */
 	hrtime_t	elapsed_time;	/* cumulative elapsed time */
 	hrtime_t	min_time;	/* shortest event duration */
@@ -255,8 +256,66 @@ typedef struct kstat_timer {
 	hrtime_t	stop_time;	/* previous event stop time */
 } kstat_timer_t;
 
+typedef struct
+{
+	uint64_t total;
+	uint64_t count;
+} stat_pair;
+
+/*
+ * Somewhat awkward, as the functions are in spl-kstat, but struct
+ * refers to ZFS name, crossing the ZFS/SPL boundary separation.
+ */
+typedef struct {
+	uint64_t	arcstat_hits;
+	uint64_t	arcstat_misses;
+	uint64_t	arcstat_total_demand_hits;
+	uint64_t	arcstat_total_demand_miss;
+	uint64_t	arcstat_perfetch_hits;
+	uint64_t	arcstat_perfetch_miss;
+	uint64_t	arcstat_size;
+	uint64_t	arcstat_c;
+	uint64_t	arcstat_mfu_hits;
+	uint64_t	arcstat_mru_hits;
+	uint64_t	arcstat_mru_ghost_hits;
+	uint64_t	arcstat_mfu_ghost_hits;
+	uint64_t	arcstat_evict_skip;
+	uint64_t	arcstat_mutex_miss;
+	uint64_t	arcstat_compressed_size;
+	uint64_t	arcstat_uncompressed_size;
+	uint64_t	arcstat_overhead_size;
+	uint64_t	arcstat_read_ps;
+	uint64_t	arcstat_metadata_accesses_ps;
+	uint64_t	arcstat_metadata_hit_ps;
+	uint64_t	arcstat_metadata_miss_ps;
+	uint64_t	arcstat_perfetch_ps;
+	uint64_t	arcstat_demand_ps;
+	uint64_t	arcstat_l2_hits;
+	uint64_t	arcstat_l2_misses;
+	uint64_t	arcstat_l2_read_bytes;
+	uint64_t	arcstat_l2_write_bytes;
+	uint64_t	arcstat_l2_access_ps;
+	/*
+	 * ZIL and SLOG counters
+	 */
+	uint64_t	zil_commit_count;
+	uint64_t	zil_commit_writer_count;
+	uint64_t	zil_itx_count;
+	uint64_t	zil_itx_indirect_count;
+	uint64_t	zil_itx_indirect_bytes;
+	uint64_t	zil_itx_copied_count;
+	uint64_t	zil_itx_copied_bytes;
+	uint64_t	zil_itx_needcopy_count;
+	uint64_t	zil_itx_needcopy_bytes;
+	uint64_t	zil_itx_metaslab_normal_count;
+	uint64_t	zil_itx_metaslab_normal_bytes;
+	uint64_t	zil_itx_metaslab_slog_count;
+	uint64_t	zil_itx_metaslab_slog_bytes;
+} cache_counters;
+
 void spl_kstat_init(void);
 void spl_kstat_fini(void);
+void kstat_init(void);
 
 typedef uint64_t zoneid_t;
 #define	ALL_ZONES 0

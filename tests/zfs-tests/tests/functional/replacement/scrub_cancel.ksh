@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 
 #
 # CDDL HEADER START
@@ -60,7 +61,7 @@ log_must zfs create $TESTPOOL1/$TESTFS
 
 mntpnt=$(get_prop mountpoint $TESTPOOL1/$TESTFS)
 log_must dd if=/dev/urandom of=$mntpnt/file bs=1M count=64
-log_must zpool sync $TESTPOOL1
+sync_pool $TESTPOOL1
 
 # Request a healing or sequential resilver
 for replace_mode in "healing" "sequential"; do

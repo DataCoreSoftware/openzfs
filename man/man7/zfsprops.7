@@ -1,3 +1,4 @@
+.\" SPDX-License-Identifier: CDDL-1.0
 .\"
 .\" CDDL HEADER START
 .\"
@@ -6,7 +7,7 @@
 .\" You may not use this file except in compliance with the License.
 .\"
 .\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or http://www.opensolaris.org/os/licensing.
+.\" or https://opensource.org/licenses/CDDL-1.0.
 .\" See the License for the specific language governing permissions
 .\" and limitations under the License.
 .\"
@@ -36,8 +37,9 @@
 .\" Copyright 2018 Nexenta Systems, Inc.
 .\" Copyright 2019 Joyent, Inc.
 .\" Copyright (c) 2019, Kjeld Schouten-Lebbing
+.\" Copyright (c) 2022 Hewlett Packard Enterprise Development LP.
 .\"
-.Dd May 24, 2021
+.Dd September 13, 2025
 .Dt ZFSPROPS 7
 .Os
 .
@@ -79,7 +81,9 @@ for zettabyte
 The following are all valid
 .Pq and equal
 specifications:
-.Li 1536M, 1.5g, 1.50GB .
+.Li 1536M ,
+.Li 1.5g ,
+.Li 1.50GB .
 .Pp
 The values of non-numeric properties are case sensitive and must be lowercase,
 except for
@@ -191,7 +195,8 @@ and
 .It Sy guid
 The 64 bit GUID of this dataset or bookmark which does not change over its
 entire lifetime.
-When a snapshot is sent to another pool, the received snapshot has the same GUID.
+When a snapshot is sent to another pool, the received snapshot has the same
+GUID.
 Thus, the
 .Sy guid
 is suitable to identify a snapshot across pools.
@@ -215,7 +220,7 @@ This property can also be referred to by its shortened column name,
 .It Sy logicalused
 The amount of space that is
 .Qq logically
-consumed by this dataset and all its descendents.
+consumed by this dataset and all its descendants.
 See the
 .Sy used
 property.
@@ -258,9 +263,10 @@ this opaque token can be provided to
 to resume and complete the
 .Nm zfs Cm receive .
 .It Sy redact_snaps
-For bookmarks, this is the list of snapshot guids the bookmark contains a redaction
+For bookmarks, this is the list of snapshot GUIDs the bookmark contains a
+redaction
 list for.
-For snapshots, this is the list of snapshot guids the snapshot is redacted with
+For snapshots, this is the list of snapshot GUIDs the snapshot is redacted with
 respect to.
 .It Sy referenced
 The amount of data that is accessible by this dataset, which may or may not be
@@ -292,7 +298,7 @@ The type of dataset:
 or
 .Sy bookmark .
 .It Sy used
-The amount of space consumed by this dataset and all its descendents.
+The amount of space consumed by this dataset and all its descendants.
 This is the value that is checked against this dataset's quota and reservation.
 The space used does not include this dataset's reservation, but does take into
 account the reservations of any descendent datasets.
@@ -355,7 +361,7 @@ The amount of space used by this dataset itself, which would be freed if the
 dataset were destroyed
 .Po after first removing any
 .Sy refreservation
-and destroying any necessary snapshots or descendents
+and destroying any necessary snapshots or descendants
 .Pc .
 .It Sy usedbyrefreservation
 The amount of space used by a
@@ -388,7 +394,7 @@ privilege with
 can access everyone's usage.
 .Pp
 The
-.Sy userused Ns @ Ns Ar ...
+.Sy userused Ns @ Ns Ar …
 properties are not displayed by
 .Nm zfs Cm get Sy all .
 The user's name must be appended after the
@@ -519,16 +525,41 @@ The root user, or a user who has been granted the
 privilege with
 .Nm zfs allow ,
 can access all projects' objects usage.
+.It Sy snapshots_changed
+Provides a mechanism to quickly determine whether snapshot list has
+changed without having to mount a dataset or iterate the snapshot list.
+Specifies the time at which a snapshot for a dataset was last
+created or deleted.
+.Pp
+This allows us to be more efficient how often we query snapshots.
+The property is persistent across mount and unmount operations only if the
+.Sy extensible_dataset
+feature is enabled.
+.It Sy snapshots_changed_nsecs
+Specifies the UTC time at which a snapshot for a dataset was last created
+or deleted, expressed as the number of nanoseconds since the Unix epoch.
+This is a high-precision version of
+.Sy snapshots_changed ,
+representing the same instant with nanosecond instead of second resolution.
+The property is persistent across mount and unmount operations only if the
+.Sy extensible_dataset
+feature is enabled.
 .It Sy volblocksize
 For volumes, specifies the block size of the volume.
 The
 .Sy blocksize
 cannot be changed once the volume has been written, so it should be set at
 volume creation time.
-The default
-.Sy blocksize
-for volumes is 8 Kbytes.
-Any power of 2 from 512 bytes to 128 Kbytes is valid.
+The size specified must be a power of two greater than or equal to
+.Ar 512 B
+and less than or equal to
+.Ar 128 KiB .
+If the
+.Sy large_blocks
+feature is enabled on the pool, the size may be up to
+.Ar 16 MiB .
+The default size is
+.Ar 16 KiB .
 .Pp
 This property can also be referred to by its shortened column name,
 .Sy volblock .
@@ -743,7 +774,7 @@ This property is not inherited.
 .It Xo
 .Sy checksum Ns = Ns Sy on Ns | Ns Sy off Ns | Ns Sy fletcher2 Ns | Ns
 .Sy fletcher4 Ns | Ns Sy sha256 Ns | Ns Sy noparity Ns | Ns
-.Sy sha512 Ns | Ns Sy skein Ns | Ns Sy edonr
+.Sy sha512 Ns | Ns Sy skein Ns | Ns Sy edonr Ns | Ns Sy blake3
 .Xc
 Controls the checksum used to verify data integrity.
 The default value is
@@ -768,13 +799,10 @@ a recommended practice.
 The
 .Sy sha512 ,
 .Sy skein ,
+.Sy edonr ,
 and
-.Sy edonr
+.Sy blake3
 checksum algorithms require enabling the appropriate features on the pool.
-.Fx
-does not support the
-.Sy edonr
-algorithm.
 .Pp
 Please see
 .Xr zpool-features 7
@@ -788,9 +816,10 @@ Changing this property affects only newly-written data.
 .Xc
 Controls the compression algorithm used for this dataset.
 .Pp
-Setting compression to
+When set to
 .Sy on
-indicates that the current default compression algorithm should be used.
+(the default), indicates that the current default compression algorithm should
+be used.
 The default balances compression and decompression speed, with compression ratio
 and is expected to work well on a wide variety of workloads.
 Unlike all other settings for this property,
@@ -853,7 +882,8 @@ is equivalent to
 .Pp
 The
 .Sy zstd
-compression algorithm provides both high compression ratios and good performance.
+compression algorithm provides both high compression ratios and good
+performance.
 You can specify the
 .Sy zstd
 level by using the value
@@ -876,14 +906,17 @@ This is done using
 .Sy zstd-fast- Ns Ar N ,
 where
 .Ar N
-is an integer in [1-9,10,20,30,...,100,500,1000] which maps to a negative
+is an integer in
+.Bq Sy 1 Ns - Ns Sy 10 , 20 , 30 , No … , Sy 100 , 500 , 1000
+which maps to a negative
 .Sy zstd
 level.
-The lower the level the faster the compression -
-.Ar 1000 No provides the fastest compression and lowest compression ratio.
+The lower the level the faster the compression \(em
+.Sy 1000
+provides the fastest compression and lowest compression ratio.
 .Sy zstd-fast
 is equivalent to
-.Sy zstd-fast-1 .
+.Sy zstd-fast- Ns Ar 1 .
 .Pp
 The
 .Sy zle
@@ -900,16 +933,27 @@ zeroes (the NUL byte).
 When a zero-filled block is detected, it is stored as
 a hole and not compressed using the indicated compression algorithm.
 .Pp
-Any block being compressed must be no larger than 7/8 of its original size
-after compression, otherwise the compression will not be considered worthwhile
-and the block saved uncompressed.
-Note that when the logical block is less than
-8 times the disk sector size this effectively reduces the necessary compression
-ratio; for example, 8kB blocks on disks with 4kB disk sectors must compress to 1/2
-or less of their original size.
+All blocks are allocated as a whole number of sectors
+.Pq chunks of 2^ Ns Sy ashift No bytes , e.g . Sy 512B No or Sy 4KB .
+Compression may result in a non-sector-aligned size, which will be rounded up
+to a whole number of sectors.
+If compression saves less than one whole sector,
+the block will be stored uncompressed.
+Therefore, blocks whose logical size is a small number of sectors will
+experience less compression
+(e.g. for
+.Sy recordsize Ns = Ns Sy 16K
+with
+.Sy 4K
+sectors, which have 4 sectors per block,
+compression needs to save at least 25% to actually save space on disk).
+.Pp
+There is
+.Sy 12.5%
+default compression threshold in addition to sector rounding.
 .It Xo
 .Sy context Ns = Ns Sy none Ns | Ns
-.Ar SELinux-User : Ns Ar SElinux-Role : Ns Ar Selinux-Type : Ns Ar Sensitivity-Level
+.Ar SELinux-User : Ns Ar SELinux-Role : Ns Ar SELinux-Type : Ns Ar Sensitivity-Level
 .Xc
 This flag sets the SELinux context for all files in the file system under
 a mount point for that file system.
@@ -918,7 +962,7 @@ See
 for more information.
 .It Xo
 .Sy fscontext Ns = Ns Sy none Ns | Ns
-.Ar SELinux-User : Ns Ar SElinux-Role : Ns Ar Selinux-Type : Ns Ar Sensitivity-Level
+.Ar SELinux-User : Ns Ar SELinux-Role : Ns Ar SELinux-Type : Ns Ar Sensitivity-Level
 .Xc
 This flag sets the SELinux context for the file system file system being
 mounted.
@@ -927,7 +971,7 @@ See
 for more information.
 .It Xo
 .Sy defcontext Ns = Ns Sy none Ns | Ns
-.Ar SELinux-User : Ns Ar SElinux-Role : Ns Ar Selinux-Type : Ns Ar Sensitivity-Level
+.Ar SELinux-User : Ns Ar SELinux-Role : Ns Ar SELinux-Type : Ns Ar Sensitivity-Level
 .Xc
 This flag sets the SELinux default context for unlabeled files.
 See
@@ -935,7 +979,7 @@ See
 for more information.
 .It Xo
 .Sy rootcontext Ns = Ns Sy none Ns | Ns
-.Ar SELinux-User : Ns Ar SElinux-Role : Ns Ar Selinux-Type : Ns Ar Sensitivity-Level
+.Ar SELinux-User : Ns Ar SELinux-Role : Ns Ar SELinux-Type : Ns Ar Sensitivity-Level
 .Xc
 This flag sets the SELinux context for the root inode of the file system.
 See
@@ -985,7 +1029,7 @@ mount options.
 .It Xo
 .Sy dedup Ns = Ns Sy off Ns | Ns Sy on Ns | Ns Sy verify Ns | Ns
 .Sy sha256 Ns Oo , Ns Sy verify Oc Ns | Ns Sy sha512 Ns Oo , Ns Sy verify Oc Ns | Ns Sy skein Ns Oo , Ns Sy verify Oc Ns | Ns
-.Sy edonr , Ns Sy verify
+.Sy edonr , Ns Sy verify Ns | Ns Sy blake3 Ns Oo , Ns Sy verify Oc Ns
 .Xc
 Configures deduplication for a dataset.
 The default value is
@@ -1021,6 +1065,48 @@ See the
 section of
 .Xr zfsconcepts 7 .
 .It Xo
+.Sy direct Ns = Ns Sy disabled Ns | Ns Sy standard Ns | Ns Sy always
+.Xc
+Controls the behavior of Direct I/O requests
+.Pq e.g. Dv O_DIRECT .
+The
+.Sy standard
+behavior for Direct I/O requests is to bypass the ARC when possible.
+These requests will not be cached and performance will be limited by the
+raw speed of the underlying disks
+.Pq Dv this is the default .
+.Sy always
+causes every properly aligned read or write to be treated as a direct request.
+.Sy disabled
+causes the O_DIRECT flag to be silently ignored and all direct requests will
+be handled by the ARC.
+This is the default behavior for OpenZFS 2.2 and prior releases.
+.Pp
+Bypassing the ARC requires that a direct request be correctly aligned.
+For write requests the starting offset and size of the request must be
+.Sy recordsize Ns
+-aligned, if not then the unaligned portion of the request will be silently
+redirected through the ARC.
+For read requests there is no
+.Sy recordsize
+alignment restriction on either the starting offset or size.
+All direct requests must use a page-aligned memory buffer and the request
+size must be a multiple of the page size or an error is returned.
+.Pp
+Concurrently mixing buffered and direct requests to overlapping regions of
+a file can decrease performance.
+However, the resulting file will always be coherent.
+For example, a direct read after a buffered write will return the data
+from the buffered write.
+Furthermore, if an application uses
+.Xr mmap 2
+based file access then in order to maintain coherency all direct requests
+are converted to buffered requests while the file is mapped.
+Currently Direct I/O is not supported with zvols.
+If dedup is enabled on a dataset, Direct I/O writes will not check for
+deduplication.
+Deduplication and Direct I/O writes are currently incompatible.
+.It Xo
 .Sy dnodesize Ns = Ns Sy legacy Ns | Ns Sy auto Ns | Ns Sy 1k Ns | Ns
 .Sy 2k Ns | Ns Sy 4k Ns | Ns Sy 8k Ns | Ns Sy 16k
 .Xc
@@ -1029,7 +1115,7 @@ file system.
 The default value is
 .Sy legacy .
 Setting this property to a value other than
-.Sy legacy No requires the Sy large_dnode No pool feature to be enabled.
+.Sy legacy No requires the Sy large_dnode No pool feature to be enabled .
 .Pp
 Consider setting
 .Sy dnodesize
@@ -1052,7 +1138,7 @@ if you need to receive a send stream of this dataset on a pool that doesn't
 enable the
 .Sy large_dnode
 feature, or if you need to import this pool on a system that doesn't support the
-.Sy large_dnode No feature.
+.Sy large_dnode No feature .
 .Pp
 This property can also be referred to by its shortened column name,
 .Sy dnsize .
@@ -1115,20 +1201,30 @@ keylocation can be with either
 .Nm zfs Cm set
 or
 .Nm zfs Cm change-key .
+.Pp
 If
 .Sy prompt
-is selected ZFS will ask for the key at the command prompt when it is required
-to access the encrypted data (see
+is selected, ZFS will expect the key to be provided when it is required to
+access the encrypted data (see
 .Nm zfs Cm load-key
 for details).
-This setting will also allow the key to be passed in via the standard input stream,
-but users should be careful not to place keys which should be kept secret on
-the command line.
-If a file URI is selected, the key will be loaded from the
+If stdin is a TTY, then ZFS will ask for the key to be provided.
+Otherwise, stdin is expected to be the key to use and will be processed as such.
+Users should be careful not to place keys which should be kept secret on the
+command line, as most operating systems may expose command line arguments to
+other processes.
+If the
+.Dq raw
+.Sy keyformat
+was used, then the key must be provided via stdin.
+.Pp
+If a file URL is selected, the key will be loaded from the
 specified absolute file path.
+.Pp
 If an HTTPS or HTTP URL is selected, it will be GETted using
 .Xr fetch 3 ,
-libcurl, or nothing, depending on compile-time configuration and run-time availability.
+libcurl, or nothing, depending on compile-time configuration and run-time
+availability.
 The
 .Sy SSL_CA_CERT_FILE
 environment variable can be set to set the location
@@ -1177,6 +1273,18 @@ are equivalent to the
 and
 .Sy noexec
 mount options.
+.It Sy volthreading Ns = Ns Sy on Ns | Ns Sy off
+Controls internal zvol threading.
+The value
+.Sy off
+disables zvol threading, and zvol relies on application threads.
+The default value is
+.Sy on ,
+which enables threading within a zvol.
+Please note that this property will be overridden by
+.Sy zvol_request_sync
+module parameter.
+This property is only applicable to Linux.
 .It Sy filesystem_limit Ns = Ns Ar count Ns | Ns Sy none
 Limits the number of filesystems and volumes that can exist under this point in
 the dataset tree.
@@ -1185,7 +1293,7 @@ Setting a
 .Sy filesystem_limit
 to
 .Sy on
-a descendent of a filesystem that already has a
+a descendant of a filesystem that already has a
 .Sy filesystem_limit
 does not override the ancestor's
 .Sy filesystem_limit ,
@@ -1196,12 +1304,14 @@ This feature must be enabled to be used
 .Pc .
 .It Sy special_small_blocks Ns = Ns Ar size
 This value represents the threshold block size for including small file
-blocks into the special allocation class.
-Blocks smaller than or equal to this
-value will be assigned to the special allocation class while greater blocks
-will be assigned to the regular class.
-Valid values are zero or a power of two from 512B up to 1M.
-The default size is 0 which means no small file blocks
+or zvol blocks into the special allocation class.
+Blocks smaller than or equal to this value after compression and encryption
+will be assigned to the special allocation class, while greater blocks will
+be assigned to the regular class.
+Valid values are from 0 to maximum block size (
+.Ar 16 MiB
+).
+The default size is 0 which means no small file or zvol blocks
 will be allocated in the special class.
 .Pp
 Before setting this property, a special class vdev must be added to the
@@ -1228,18 +1338,28 @@ Otherwise, they are automatically remounted in the new location if the property
 was previously
 .Sy legacy
 or
-.Sy none ,
-or if they were mounted before the property was changed.
+.Sy none .
 In addition, any shared file systems are unshared and shared in the new
 location.
+.Pp
+When the
+.Sy mountpoint
+property is set with
+.Nm zfs Cm set Fl u
+, the
+.Sy mountpoint
+property is updated but dataset is not mounted or unmounted and remains
+as it was before.
 .It Sy nbmand Ns = Ns Sy on Ns | Ns Sy off
 Controls whether the file system should be mounted with
 .Sy nbmand
 .Pq Non-blocking mandatory locks .
-This is used for SMB clients.
-Changes to this property only take effect when the file system is umounted and
+Changes to this property only take effect when the file system is unmounted and
 remounted.
-Support for these locks is scarce and not described by POSIX.
+This was only supported by Linux prior to 5.15, and was buggy there,
+and is not supported by
+.Fx .
+On Solaris it's used for SMB clients.
 .It Sy overlay Ns = Ns Sy on Ns | Ns Sy off
 Allow mounting on a busy directory or a directory which already contains
 files or directories.
@@ -1267,11 +1387,11 @@ then only metadata is cached.
 The default value is
 .Sy all .
 .It Sy quota Ns = Ns Ar size Ns | Ns Sy none
-Limits the amount of space a dataset and its descendents can consume.
+Limits the amount of space a dataset and its descendants can consume.
 This property enforces a hard limit on the amount of space used.
-This includes all space consumed by descendents, including file systems and
+This includes all space consumed by descendants, including file systems and
 snapshots.
-Setting a quota on a descendent of a dataset that already has a quota does not
+Setting a quota on a descendant of a dataset that already has a quota does not
 override the ancestor's quota, but rather imposes an additional limit.
 .Pp
 Quotas cannot be set on volumes, as the
@@ -1279,10 +1399,10 @@ Quotas cannot be set on volumes, as the
 property acts as an implicit quota.
 .It Sy snapshot_limit Ns = Ns Ar count Ns | Ns Sy none
 Limits the number of snapshots that can be created on a dataset and its
-descendents.
+descendants.
 Setting a
 .Sy snapshot_limit
-on a descendent of a dataset that already has a
+on a descendant of a dataset that already has a
 .Sy snapshot_limit
 does not override the ancestor's
 .Sy snapshot_limit ,
@@ -1319,7 +1439,7 @@ can get and set everyone's quota.
 This property is not available on volumes, on file systems before version 4, or
 on pools before version 15.
 The
-.Sy userquota@ Ns Ar ...
+.Sy userquota@ Ns Ar …
 properties are not displayed by
 .Nm zfs Cm get Sy all .
 The user's name must be appended after the
@@ -1341,6 +1461,12 @@ SID numeric ID
 .El
 .Pp
 Files created on Linux always have POSIX owners.
+.It Sy defaultuserquota Ns = Ns Ar size Ns | Ns Sy none
+Sets a default user quota to be applied to each user for whom no
+user-specific quota is set.
+The value
+.Sy 0
+disables defaultuserquota.
 .It Sy userobjquota@ Ns Ar user Ns = Ns Ar size Ns | Ns Sy none
 The
 .Sy userobjquota
@@ -1350,6 +1476,12 @@ but it limits the number of objects a user can create.
 Please refer to
 .Sy userobjused
 for more information about how objects are counted.
+.It Sy defaultuserobjquota Ns = Ns Ar size Ns | Ns Sy none
+Sets a default user object quota to be applied to each user for
+whom no userobj-specific quota is set.
+The value
+.Sy 0
+disables defaultuserobjquota.
 .It Sy groupquota@ Ns Ar group Ns = Ns Ar size Ns | Ns Sy none
 Limits the amount of space consumed by the specified group.
 Group space consumption is identified by the
@@ -1362,6 +1494,12 @@ The root user, or a user who has been granted the
 privilege with
 .Nm zfs Cm allow ,
 can get and set all groups' quotas.
+.It Sy defaultgroupquota Ns = Ns Ar size Ns | Ns Sy none
+Sets a default group quota to be applied to each group for whom no
+group-specific quota is set.
+The value
+.Sy 0
+disables defaultgroupquota.
 .It Sy groupobjquota@ Ns Ar group Ns = Ns Ar size Ns | Ns Sy none
 The
 .Sy groupobjquota
@@ -1371,6 +1509,12 @@ but it limits number of objects a group can consume.
 Please refer to
 .Sy userobjused
 for more information about how objects are counted.
+.It Sy defaultgroupobjquota Ns = Ns Ar size Ns | Ns Sy none
+Sets a default group object quota to be applied to each group for
+whom no groupobj-specific quota is set.
+The value
+.Sy 0
+disables defaultgroupobjquota.
 .It Sy projectquota@ Ns Ar project Ns = Ns Ar size Ns | Ns Sy none
 Limits the amount of space consumed by the specified project.
 Project space consumption is identified by the
@@ -1385,6 +1529,12 @@ The root user, or a user who has been granted the
 privilege with
 .Nm zfs allow ,
 can access all projects' quota.
+.It Sy defaultprojectquota Ns = Ns Ar size Ns | Ns Sy none
+Sets a default project quota to be applied to each project for whom no
+project-specific quota is set.
+The value
+.Sy 0
+disables defaultprojectquota.
 .It Sy projectobjquota@ Ns Ar project Ns = Ns Ar size Ns | Ns Sy none
 The
 .Sy projectobjquota
@@ -1394,6 +1544,12 @@ but it limits number of objects a project can consume.
 Please refer to
 .Sy userobjused
 for more information about how objects are counted.
+.It Sy defaultprojectobjquota Ns = Ns Ar size Ns | Ns Sy none
+Sets a default project object quota to be applied to each project for
+whom no projectobj-specific quota is set.
+The value
+.Sy 0
+disables defaultprojectobjquota.
 .It Sy readonly Ns = Ns Sy on Ns | Ns Sy off
 Controls whether this dataset can be modified.
 The default value is
@@ -1427,16 +1583,22 @@ Use of this property for general purpose file systems is strongly discouraged,
 and may adversely affect performance.
 .Pp
 The size specified must be a power of two greater than or equal to
-.Ar 512B
+.Ar 512 B
 and less than or equal to
-.Ar 128kB .
+.Ar 128 KiB .
 If the
 .Sy large_blocks
 feature is enabled on the pool, the size may be up to
-.Ar 1MB .
+.Ar 16 MiB .
 See
 .Xr zpool-features 7
 for details on ZFS feature flags.
+.Pp
+Note that maximum size is still limited by default to
+.Ar 1 MiB
+on x86_32, see
+.Sy zfs_max_recordsize
+module parameter.
 .Pp
 Changing the file system's
 .Sy recordsize
@@ -1444,7 +1606,7 @@ affects only files created afterward; existing files are unaffected.
 .Pp
 This property can also be referred to by its shortened column name,
 .Sy recsize .
-.It Sy redundant_metadata Ns = Ns Sy all Ns | Ns Sy most
+.It Sy redundant_metadata Ns = Ns Sy all Ns | Ns Sy most Ns | Ns Sy some Ns | Ns Sy none
 Controls what types of metadata are stored redundantly.
 ZFS stores an extra copy of metadata, so that if a single block is corrupted,
 the amount of user data lost is limited.
@@ -1476,7 +1638,7 @@ When set to
 ZFS stores an extra copy of most types of metadata.
 This can improve performance of random writes, because less metadata must be
 written.
-In practice, at worst about 100 blocks
+In practice, at worst about 1000 blocks
 .Po of
 .Sy recordsize
 bytes each
@@ -1485,16 +1647,29 @@ of user data can be lost if a single on-disk block is corrupt.
 The exact behavior of which metadata blocks are stored redundantly may change in
 future releases.
 .Pp
+When set to
+.Sy some ,
+ZFS stores an extra copy of only critical metadata.
+This can improve file create performance since less metadata
+needs to be written.
+If a single on-disk block is corrupt, multiple user files or directories
+can be lost.
+.Pp
+When set to
+.Sy none ,
+ZFS does not store any copies of metadata redundantly.
+If a single on-disk block is corrupt, an entire dataset can be lost.
+.Pp
 The default value is
 .Sy all .
 .It Sy refquota Ns = Ns Ar size Ns | Ns Sy none
 Limits the amount of space a dataset can consume.
 This property enforces a hard limit on the amount of space used.
-This hard limit does not include space used by descendents, including file
+This hard limit does not include space used by descendants, including file
 systems and snapshots.
 .It Sy refreservation Ns = Ns Ar size Ns | Ns Sy none Ns | Ns Sy auto
 The minimum amount of space guaranteed to a dataset, not including its
-descendents.
+descendants.
 When the amount of space used is below this value, the dataset is treated as if
 it were taking up the amount of space specified by
 .Sy refreservation .
@@ -1538,7 +1713,7 @@ Access time is only updated if the previous
 access time was earlier than the current modify or change time or if the
 existing access time hasn't been updated within the past 24 hours.
 The default value is
-.Sy off .
+.Sy on .
 The values
 .Sy on
 and
@@ -1571,6 +1746,23 @@ If this property is set to
 then only metadata is cached.
 The default value is
 .Sy all .
+.It Sy prefetch Ns = Ns Sy all Ns | Ns Sy none Ns | Ns Sy metadata
+Controls what speculative prefetch does.
+If this property is set to
+.Sy all ,
+then both user data and metadata are prefetched.
+If this property is set to
+.Sy none ,
+then neither user data nor metadata are prefetched.
+If this property is set to
+.Sy metadata ,
+then only metadata are prefetched.
+The default value is
+.Sy all .
+.Pp
+Please note that the module parameter zfs_prefetch_disable=1 can
+be used to totally disable speculative prefetch, bypassing anything
+this property does.
 .It Sy setuid Ns = Ns Sy on Ns | Ns Sy off
 Controls whether the setuid bit is respected for the file system.
 The default value is
@@ -1614,10 +1806,21 @@ the file systems are unshared.
 .Pp
 The share is created with the ACL (Access Control List) "Everyone:F" ("F"
 stands for "full permissions", i.e. read and write permissions) and no guest
-access (which means Samba must be able to authenticate a real user, system
-passwd/shadow, LDAP or smbpasswd based) by default.
+access (which means Samba must be able to authenticate a real user \(em
+.Xr passwd 5 Ns / Ns Xr shadow 5 Ns - ,
+LDAP- or
+.Xr smbpasswd 5 Ns -based )
+by default.
 This means that any additional access control
-(disallow specific user specific access etc) must be done on the underlying file system.
+(disallow specific user specific access etc) must be done on the underlying file
+system.
+.Pp
+When the
+.Sy sharesmb
+property is updated with
+.Nm zfs Cm set Fl u
+, the property is set to desired value, but the operation to share, reshare
+or unshare the the dataset is not performed.
 .It Sy sharenfs Ns = Ns Sy on Ns | Ns Sy off Ns | Ns Ar opts
 Controls whether the file system is shared via NFS, and what options are to be
 used.
@@ -1640,6 +1843,23 @@ If the property is set to
 the dataset is shared using the default options:
 .Dl sec=sys,rw,crossmnt,no_subtree_check
 .Pp
+Please note that the options are comma-separated, unlike those found in
+.Xr exports 5 .
+This is done to negate the need for quoting, as well as to make parsing
+with scripts easier.
+.Pp
+For
+.Fx ,
+there may be multiple sets of options separated by semicolon(s).
+Each set of options must apply to different hosts or networks and each
+set of options will create a separate line for
+.Xr exports 5 .
+Any semicolon separated option set that consists entirely of whitespace
+will be ignored.
+This use of semicolons is only for
+.Fx
+at this time.
+.Pp
 See
 .Xr exports 5
 for the meaning of the default options.
@@ -1656,8 +1876,16 @@ or if they were shared before the property was changed.
 If the new property is
 .Sy off ,
 the file systems are unshared.
+.Pp
+When the
+.Sy sharenfs
+property is updated with
+.Nm zfs Cm set Fl u
+, the property is set to desired value, but the operation to share, reshare
+or unshare the the dataset is not performed.
 .It Sy logbias Ns = Ns Sy latency Ns | Ns Sy throughput
-Provide a hint to ZFS about handling of synchronous requests in this dataset.
+Provide a hint to ZFS about handling of synchronous write requests in this
+dataset.
 If
 .Sy logbias
 is set to
@@ -1665,12 +1893,12 @@ is set to
 .Pq the default ,
 ZFS will use pool log devices
 .Pq if configured
-to handle the requests at low latency.
+to handle the write requests at low latency.
 If
 .Sy logbias
 is set to
 .Sy throughput ,
-ZFS will not use configured pool log devices.
+ZFS will not use configured pool log devices to store written data.
 ZFS will instead optimize synchronous operations for global pool throughput and
 efficient use of resources.
 .It Sy snapdev Ns = Ns Sy hidden Ns | Ns Sy visible
@@ -1679,11 +1907,11 @@ Controls whether the volume snapshot devices under
 are hidden or visible.
 The default value is
 .Sy hidden .
-.It Sy snapdir Ns = Ns Sy hidden Ns | Ns Sy visible
+.It Sy snapdir Ns = Ns Sy disabled Ns | Ns Sy hidden Ns | Ns Sy visible
 Controls whether the
 .Pa .zfs
-directory is hidden or visible in the root of the file system as discussed in
-the
+directory is disabled, hidden or visible in the root of the file system as
+discussed in the
 .Sx Snapshots
 section of
 .Xr zfsconcepts 7 .
@@ -1813,33 +2041,38 @@ enabled for virus scanning to occur.
 The default value is
 .Sy off .
 This property is not used by OpenZFS.
-.It Sy xattr Ns = Ns Sy on Ns | Ns Sy off Ns | Ns Sy sa
+.It Sy xattr Ns = Ns Sy on Ns | Ns Sy off Ns | Ns Sy dir Ns | Ns Sy sa
 Controls whether extended attributes are enabled for this file system.
-Two styles of extended attributes are supported: either directory based
-or system attribute based.
+Two styles of extended attributes are supported: either directory-based
+or system-attribute-based.
 .Pp
-The default value of
-.Sy on
-enables directory based extended attributes.
+Directory-based extended attributes can be enabled by setting the value to
+.Sy dir .
 This style of extended attribute imposes no practical limit
 on either the size or number of attributes which can be set on a file.
 Although under Linux the
 .Xr getxattr 2
 and
 .Xr setxattr 2
-system calls limit the maximum size to 64K.
+system calls limit the maximum size to
+.Sy 64K .
 This is the most compatible
 style of extended attribute and is supported by all ZFS implementations.
 .Pp
-System attribute based xattrs can be enabled by setting the value to
-.Sy sa .
+System-attribute-based xattrs can be enabled by setting the value to
+.Sy sa
+(default and equal to
+.Sy on
+) .
 The key advantage of this type of xattr is improved performance.
 Storing extended attributes as system attributes
-significantly decreases the amount of disk IO required.
-Up to 64K of data may be stored per-file in the space reserved for system attributes.
+significantly decreases the amount of disk I/O required.
+Up to
+.Sy 64K
+of data may be stored per-file in the space reserved for system attributes.
 If there is not enough space available for an extended attribute
-then it will be automatically written as a directory based xattr.
-System attribute based extended attributes are not accessible
+then it will be automatically written as a directory-based xattr.
+System-attribute-based extended attributes are not accessible
 on platforms which do not support the
 .Sy xattr Ns = Ns Sy sa
 feature.
@@ -1849,7 +2082,7 @@ on both
 .Fx
 and Linux.
 .Pp
-The use of system attribute based xattrs is strongly encouraged for users of
+The use of system-attribute-based xattrs is strongly encouraged for users of
 SELinux or POSIX ACLs.
 Both of these features heavily rely on extended
 attributes and benefit significantly from the reduced access time.
@@ -1870,14 +2103,15 @@ See
 for more information.
 Jails are a
 .Fx
-feature and are not relevant on other platforms.
-The default value is
-.Sy off .
-.It Sy zoned Ns = Ns Sy on Ns | Ns Sy off
-Controls whether the dataset is managed from a non-global zone.
-Zones are a Solaris feature and are not relevant on other platforms.
-The default value is
-.Sy off .
+feature and this property is not available on other platforms.
+.It Sy zoned Ns = Ns Sy off Ns | Ns Sy on
+Controls whether the dataset is managed from a non-global zone or namespace.
+See
+.Xr zfs-zone 8
+for more information.
+Zoning is a
+Linux
+feature and this property is not available on other platforms.
 .El
 .Pp
 The following three properties cannot be changed after the file system is
@@ -1922,7 +2156,7 @@ value behavior, see the "ZFS Administration Guide".
 .Sy formD Ns | Ns Sy formKC Ns | Ns Sy formKD
 .Xc
 Indicates whether the file system should perform a
-.Sy unicode
+.Sy Unicode
 normalization of file names whenever two file names are compared, and which
 normalization algorithm should be used.
 File names are always stored unmodified, names are normalized as part of any

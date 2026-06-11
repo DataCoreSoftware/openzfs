@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -47,8 +48,6 @@
 
 #include "zdb.h"
 
-extern uint8_t dump_opt[256];
-
 static char tab_prefix[4] = "\t\t\t";
 
 static void
@@ -60,25 +59,26 @@ print_log_bp(const blkptr_t *bp, const char *prefix)
 	(void) printf("%s%s\n", prefix, blkbuf);
 }
 
-/* ARGSUSED */
 static void
 zil_prt_rec_create(zilog_t *zilog, int txtype, const void *arg)
 {
-	const lr_create_t *lr = arg;
+	(void) zilog;
+	const lr_create_t *lrc = arg;
+	const _lr_create_t *lr = &lrc->lr_create;
 	time_t crtime = lr->lr_crtime[0];
-	char *name, *link;
+	const char *name, *link;
 	lr_attr_t *lrattr;
 
-	name = (char *)(lr + 1);
+	name = (const char *)&lrc->lr_data[0];
 
 	if (lr->lr_common.lrc_txtype == TX_CREATE_ATTR ||
 	    lr->lr_common.lrc_txtype == TX_MKDIR_ATTR) {
-		lrattr = (lr_attr_t *)(lr + 1);
+		lrattr = (lr_attr_t *)&lrc->lr_data[0];
 		name += ZIL_XVAT_SIZE(lrattr->lr_attr_masksize);
 	}
 
 	if (txtype == TX_SYMLINK) {
-		link = name + strlen(name) + 1;
+		link = (const char *)&lrc->lr_data[strlen(name) + 1];
 		(void) printf("%s%s -> %s\n", tab_prefix, name, link);
 	} else if (txtype != TX_MKXATTR) {
 		(void) printf("%s%s\n", tab_prefix, name);
@@ -96,44 +96,53 @@ zil_prt_rec_create(zilog_t *zilog, int txtype, const void *arg)
 	    (u_longlong_t)lr->lr_gen, (u_longlong_t)lr->lr_rdev);
 }
 
-/* ARGSUSED */
 static void
 zil_prt_rec_remove(zilog_t *zilog, int txtype, const void *arg)
 {
+	(void) zilog, (void) txtype;
 	const lr_remove_t *lr = arg;
 
 	(void) printf("%sdoid %llu, name %s\n", tab_prefix,
-	    (u_longlong_t)lr->lr_doid, (char *)(lr + 1));
+	    (u_longlong_t)lr->lr_doid, (const char *)&lr->lr_data[0]);
 }
 
-/* ARGSUSED */
 static void
 zil_prt_rec_link(zilog_t *zilog, int txtype, const void *arg)
 {
+	(void) zilog, (void) txtype;
 	const lr_link_t *lr = arg;
 
 	(void) printf("%sdoid %llu, link_obj %llu, name %s\n", tab_prefix,
 	    (u_longlong_t)lr->lr_doid, (u_longlong_t)lr->lr_link_obj,
-	    (char *)(lr + 1));
+	    (const char *)&lr->lr_data[0]);
 }
 
-/* ARGSUSED */
 static void
 zil_prt_rec_rename(zilog_t *zilog, int txtype, const void *arg)
 {
-	const lr_rename_t *lr = arg;
-	char *snm = (char *)(lr + 1);
-	char *tnm = snm + strlen(snm) + 1;
+	(void) zilog, (void) txtype;
+	const lr_rename_t *lrr = arg;
+	const _lr_rename_t *lr = &lrr->lr_rename;
+	const char *snm = (const char *)&lrr->lr_data[0];
+	const char *tnm = (const char *)&lrr->lr_data[strlen(snm) + 1];
 
 	(void) printf("%ssdoid %llu, tdoid %llu\n", tab_prefix,
 	    (u_longlong_t)lr->lr_sdoid, (u_longlong_t)lr->lr_tdoid);
 	(void) printf("%ssrc %s tgt %s\n", tab_prefix, snm, tnm);
+	switch (txtype) {
+	case TX_RENAME_EXCHANGE:
+		(void) printf("%sflags RENAME_EXCHANGE\n", tab_prefix);
+		break;
+	case TX_RENAME_WHITEOUT:
+		(void) printf("%sflags RENAME_WHITEOUT\n", tab_prefix);
+		break;
+	}
 }
 
-/* ARGSUSED */
 static int
 zil_prt_rec_write_cb(void *data, size_t len, void *unused)
 {
+	(void) unused;
 	char *cdata = data;
 
 	for (size_t i = 0; i < len; i++) {
@@ -146,7 +155,6 @@ zil_prt_rec_write_cb(void *data, size_t len, void *unused)
 	return (0);
 }
 
-/* ARGSUSED */
 static void
 zil_prt_rec_write(zilog_t *zilog, int txtype, const void *arg)
 {
@@ -161,23 +169,25 @@ zil_prt_rec_write(zilog_t *zilog, int txtype, const void *arg)
 	    (u_longlong_t)lr->lr_foid, (u_longlong_t)lr->lr_offset,
 	    (u_longlong_t)lr->lr_length);
 
-	if (txtype == TX_WRITE2 || verbose < 5)
+	if (txtype == TX_WRITE2 || verbose < 4)
 		return;
 
 	if (lr->lr_common.lrc_reclen == sizeof (lr_write_t)) {
 		(void) printf("%shas blkptr, %s\n", tab_prefix,
-		    !BP_IS_HOLE(bp) &&
-		    bp->blk_birth >= spa_min_claim_txg(zilog->zl_spa) ?
+		    !BP_IS_HOLE(bp) && BP_GET_BIRTH(bp) >=
+		    spa_min_claim_txg(zilog->zl_spa) ?
 		    "will claim" : "won't claim");
 		print_log_bp(bp, tab_prefix);
 
+		if (verbose < 5)
+			return;
 		if (BP_IS_HOLE(bp)) {
 			(void) printf("\t\t\tLSIZE 0x%llx\n",
 			    (u_longlong_t)BP_GET_LSIZE(bp));
 			(void) printf("%s<hole>\n", tab_prefix);
 			return;
 		}
-		if (bp->blk_birth < zilog->zl_header->zh_claim_txg) {
+		if (BP_GET_BIRTH(bp) < zilog->zl_header->zh_claim_txg) {
 			(void) printf("%s<block already committed>\n",
 			    tab_prefix);
 			return;
@@ -195,9 +205,12 @@ zil_prt_rec_write(zilog_t *zilog, int txtype, const void *arg)
 		if (error)
 			goto out;
 	} else {
+		if (verbose < 5)
+			return;
+
 		/* data is stored after the end of the lr_write record */
 		data = abd_alloc(lr->lr_length, B_FALSE);
-		abd_copy_from_buf(data, lr + 1, lr->lr_length);
+		abd_copy_from_buf(data, &lr->lr_data[0], lr->lr_length);
 	}
 
 	(void) printf("%s", tab_prefix);
@@ -210,10 +223,32 @@ out:
 	abd_free(data);
 }
 
-/* ARGSUSED */
+static void
+zil_prt_rec_write_enc(zilog_t *zilog, int txtype, const void *arg)
+{
+	(void) txtype;
+	const lr_write_t *lr = arg;
+	const blkptr_t *bp = &lr->lr_blkptr;
+	int verbose = MAX(dump_opt['d'], dump_opt['i']);
+
+	(void) printf("%s(encrypted)\n", tab_prefix);
+
+	if (verbose < 4)
+		return;
+
+	if (lr->lr_common.lrc_reclen == sizeof (lr_write_t)) {
+		(void) printf("%shas blkptr, %s\n", tab_prefix,
+		    !BP_IS_HOLE(bp) && BP_GET_BIRTH(bp) >=
+		    spa_min_claim_txg(zilog->zl_spa) ?
+		    "will claim" : "won't claim");
+		print_log_bp(bp, tab_prefix);
+	}
+}
+
 static void
 zil_prt_rec_truncate(zilog_t *zilog, int txtype, const void *arg)
 {
+	(void) zilog, (void) txtype;
 	const lr_truncate_t *lr = arg;
 
 	(void) printf("%sfoid %llu, offset 0x%llx, length 0x%llx\n", tab_prefix,
@@ -221,10 +256,10 @@ zil_prt_rec_truncate(zilog_t *zilog, int txtype, const void *arg)
 	    (u_longlong_t)lr->lr_length);
 }
 
-/* ARGSUSED */
 static void
 zil_prt_rec_setattr(zilog_t *zilog, int txtype, const void *arg)
 {
+	(void) zilog, (void) txtype;
 	const lr_setattr_t *lr = arg;
 	time_t atime = (time_t)lr->lr_atime[0];
 	time_t mtime = (time_t)lr->lr_mtime[0];
@@ -267,19 +302,83 @@ zil_prt_rec_setattr(zilog_t *zilog, int txtype, const void *arg)
 	}
 }
 
-/* ARGSUSED */
+static void
+zil_prt_rec_setsaxattr(zilog_t *zilog, int txtype, const void *arg)
+{
+	(void) zilog, (void) txtype;
+	const lr_setsaxattr_t *lr = arg;
+
+	const char *name = (const char *)&lr->lr_data[0];
+	(void) printf("%sfoid %llu\n", tab_prefix,
+	    (u_longlong_t)lr->lr_foid);
+
+	(void) printf("%sXAT_NAME  %s\n", tab_prefix, name);
+	if (lr->lr_size == 0) {
+		(void) printf("%sXAT_VALUE  NULL\n", tab_prefix);
+	} else {
+		(void) printf("%sXAT_VALUE  ", tab_prefix);
+		const char *val = (const char *)&lr->lr_data[strlen(name) + 1];
+		for (int i = 0; i < lr->lr_size; i++) {
+			(void) printf("%c", *val);
+			val++;
+		}
+	}
+}
+
 static void
 zil_prt_rec_acl(zilog_t *zilog, int txtype, const void *arg)
 {
+	(void) zilog, (void) txtype;
 	const lr_acl_t *lr = arg;
 
 	(void) printf("%sfoid %llu, aclcnt %llu\n", tab_prefix,
 	    (u_longlong_t)lr->lr_foid, (u_longlong_t)lr->lr_aclcnt);
 }
 
+static void
+zil_prt_rec_clone_range(zilog_t *zilog, int txtype, const void *arg)
+{
+	(void) zilog, (void) txtype;
+	const lr_clone_range_t *lr = arg;
+	int verbose = MAX(dump_opt['d'], dump_opt['i']);
+
+	(void) printf("%sfoid %llu, offset %llx, length %llx, blksize %llx\n",
+	    tab_prefix, (u_longlong_t)lr->lr_foid, (u_longlong_t)lr->lr_offset,
+	    (u_longlong_t)lr->lr_length, (u_longlong_t)lr->lr_blksz);
+
+	if (verbose < 4)
+		return;
+
+	for (unsigned int i = 0; i < lr->lr_nbps; i++) {
+		(void) printf("%s[%u/%llu] ", tab_prefix, i + 1,
+		    (u_longlong_t)lr->lr_nbps);
+		print_log_bp(&lr->lr_bps[i], "");
+	}
+}
+
+static void
+zil_prt_rec_clone_range_enc(zilog_t *zilog, int txtype, const void *arg)
+{
+	(void) zilog, (void) txtype;
+	const lr_clone_range_t *lr = arg;
+	int verbose = MAX(dump_opt['d'], dump_opt['i']);
+
+	(void) printf("%s(encrypted)\n", tab_prefix);
+
+	if (verbose < 4)
+		return;
+
+	for (unsigned int i = 0; i < lr->lr_nbps; i++) {
+		(void) printf("%s[%u/%llu] ", tab_prefix, i + 1,
+		    (u_longlong_t)lr->lr_nbps);
+		print_log_bp(&lr->lr_bps[i], "");
+	}
+}
+
 typedef void (*zil_prt_rec_func_t)(zilog_t *, int, const void *);
 typedef struct zil_rec_info {
 	zil_prt_rec_func_t	zri_print;
+	zil_prt_rec_func_t	zri_print_enc;
 	const char		*zri_name;
 	uint64_t		zri_count;
 } zil_rec_info_t;
@@ -294,7 +393,9 @@ static zil_rec_info_t zil_rec_info[TX_MAX_TYPE] = {
 	{.zri_print = zil_prt_rec_remove,   .zri_name = "TX_RMDIR           "},
 	{.zri_print = zil_prt_rec_link,	    .zri_name = "TX_LINK            "},
 	{.zri_print = zil_prt_rec_rename,   .zri_name = "TX_RENAME          "},
-	{.zri_print = zil_prt_rec_write,    .zri_name = "TX_WRITE           "},
+	{.zri_print = zil_prt_rec_write,
+	    .zri_print_enc = zil_prt_rec_write_enc,
+	    .zri_name = "TX_WRITE           "},
 	{.zri_print = zil_prt_rec_truncate, .zri_name = "TX_TRUNCATE        "},
 	{.zri_print = zil_prt_rec_setattr,  .zri_name = "TX_SETATTR         "},
 	{.zri_print = zil_prt_rec_acl,	    .zri_name = "TX_ACL_V0          "},
@@ -306,12 +407,19 @@ static zil_rec_info_t zil_rec_info[TX_MAX_TYPE] = {
 	{.zri_print = zil_prt_rec_create,   .zri_name = "TX_MKDIR_ATTR      "},
 	{.zri_print = zil_prt_rec_create,   .zri_name = "TX_MKDIR_ACL_ATTR  "},
 	{.zri_print = zil_prt_rec_write,    .zri_name = "TX_WRITE2          "},
+	{.zri_print = zil_prt_rec_setsaxattr,
+	    .zri_name = "TX_SETSAXATTR      "},
+	{.zri_print = zil_prt_rec_rename,   .zri_name = "TX_RENAME_EXCHANGE "},
+	{.zri_print = zil_prt_rec_rename,   .zri_name = "TX_RENAME_WHITEOUT "},
+	{.zri_print = zil_prt_rec_clone_range,
+	    .zri_print_enc = zil_prt_rec_clone_range_enc,
+	    .zri_name = "TX_CLONE_RANGE     "},
 };
 
-/* ARGSUSED */
 static int
 print_log_record(zilog_t *zilog, const lr_t *lr, void *arg, uint64_t claim_txg)
 {
+	(void) arg, (void) claim_txg;
 	int txtype;
 	int verbose = MAX(dump_opt['d'], dump_opt['i']);
 
@@ -331,6 +439,8 @@ print_log_record(zilog_t *zilog, const lr_t *lr, void *arg, uint64_t claim_txg)
 	if (txtype && verbose >= 3) {
 		if (!zilog->zl_os->os_encrypted) {
 			zil_rec_info[txtype].zri_print(zilog, txtype, lr);
+		} else if (zil_rec_info[txtype].zri_print_enc) {
+			zil_rec_info[txtype].zri_print_enc(zilog, txtype, lr);
 		} else {
 			(void) printf("%s(encrypted)\n", tab_prefix);
 		}
@@ -342,11 +452,11 @@ print_log_record(zilog_t *zilog, const lr_t *lr, void *arg, uint64_t claim_txg)
 	return (0);
 }
 
-/* ARGSUSED */
 static int
 print_log_block(zilog_t *zilog, const blkptr_t *bp, void *arg,
     uint64_t claim_txg)
 {
+	(void) arg;
 	char blkbuf[BP_SPRINTF_LEN + 10];
 	int verbose = MAX(dump_opt['d'], dump_opt['i']);
 	const char *claim;
@@ -364,7 +474,7 @@ print_log_block(zilog_t *zilog, const blkptr_t *bp, void *arg,
 
 	if (claim_txg != 0)
 		claim = "already claimed";
-	else if (bp->blk_birth >= spa_min_claim_txg(zilog->zl_spa))
+	else if (BP_GET_BIRTH(bp) >= spa_min_claim_txg(zilog->zl_spa))
 		claim = "will claim";
 	else
 		claim = "won't claim";
@@ -397,7 +507,6 @@ print_log_stats(int verbose)
 	(void) printf("\n");
 }
 
-/* ARGSUSED */
 void
 dump_intent_log(zilog_t *zilog)
 {

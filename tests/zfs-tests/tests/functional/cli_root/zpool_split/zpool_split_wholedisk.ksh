@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -44,7 +45,7 @@ function cleanup
 	destroy_pool $TESTPOOL
 	destroy_pool $TESTPOOL2
 	unload_scsi_debug
-	rm -f "$FILE_DEVICE"
+	rm -fd "$FILE_DEVICE" "$ALTROOT"
 }
 
 function setup_mirror

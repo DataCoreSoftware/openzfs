@@ -23,32 +23,25 @@
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  */
 
+/* Copyright(c) 2015 Jorgen Lundman <lundman@lundman.net> */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
-#include <strings.h>
 #include <unistd.h>
 #include <uuid/uuid.h>
 #include <zlib.h>
 #include <libintl.h>
 #include <sys/types.h>
 #include <sys/dkio.h>
-#include <sys/vtoc.h>
 #include <sys/mhd.h>
 #include <sys/param.h>
 #include <sys/dktp/fdisk.h>
 #include <sys/efi_partition.h>
 #include <sys/byteorder.h>
+#include <umem.h>
 #if defined(__linux__)
 #include <linux/fs.h>
-#endif
-
-#ifdef __APPLE__
-#include <sys/disk.h>
-#include <sys/fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-int osx_device_isvirtual(char *pathbuf);
 #endif
 
 static struct uuid_to_ptag {
@@ -83,39 +76,6 @@ static struct uuid_to_ptag {
 	{ EFI_RHT_DATA }
 };
 
-/*
- * Default vtoc information for non-SVr4 partitions
- */
-struct dk_map2  default_vtoc_map[NDKMAP] = {
-	{	V_ROOT,		0	},		/* a - 0 */
-	{	V_SWAP,		V_UNMNT	},		/* b - 1 */
-	{	V_BACKUP,	V_UNMNT	},		/* c - 2 */
-	{	V_UNASSIGNED,	0	},		/* d - 3 */
-	{	V_UNASSIGNED,	0	},		/* e - 4 */
-	{	V_UNASSIGNED,	0	},		/* f - 5 */
-	{	V_USR,		0	},		/* g - 6 */
-	{	V_UNASSIGNED,	0	},		/* h - 7 */
-
-#if defined(_SUNOS_VTOC_16)
-
-#if defined(i386) || defined(__amd64) || defined(__arm) || \
-    defined(__powerpc) || defined(__sparc)
-	{	V_BOOT,		V_UNMNT	},		/* i - 8 */
-	{	V_ALTSCTR,	0	},		/* j - 9 */
-
-#else
-#error No VTOC format defined.
-#endif			/* defined(i386) */
-
-	{	V_UNASSIGNED,	0	},		/* k - 10 */
-	{	V_UNASSIGNED,	0	},		/* l - 11 */
-	{	V_UNASSIGNED,	0	},		/* m - 12 */
-	{	V_UNASSIGNED,	0	},		/* n - 13 */
-	{	V_UNASSIGNED,	0	},		/* o - 14 */
-	{	V_UNASSIGNED,	0	},		/* p - 15 */
-#endif			/* defined(_SUNOS_VTOC_16) */
-};
-
 #ifdef DEBUG
 int efi_debug = 1;
 #else
@@ -123,6 +83,18 @@ int efi_debug = 0;
 #endif
 
 static int efi_read(int, struct dk_gpt *);
+
+/*
+ * When set, efi_read() will correct a GPT with NumPartitions < 128 in-place
+ * and write the fixed header back to disk.  Set via efi_set_fix_gpt().
+ */
+static boolean_t efi_fix_gpt = B_FALSE;
+
+void
+efi_set_fix_gpt(boolean_t val)
+{
+	efi_fix_gpt = val;
+}
 
 /*
  * Return a 32-bit CRC of the contents of the buffer.  Pre-and-post
@@ -142,26 +114,74 @@ static int
 read_disk_info(int fd, diskaddr_t *capacity, uint_t *lbsize)
 {
 	DISK_GEOMETRY_EX geometry_ex;
-	DWORD len;
+	DWORD len = 0;
 
-	LARGE_INTEGER large;
 	if (DeviceIoControl(ITOH(fd), IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, NULL, 0,
 	    &geometry_ex, sizeof (geometry_ex), &len, NULL)) {
 
 		*lbsize = (uint_t)geometry_ex.Geometry.BytesPerSector;
 		*capacity = (diskaddr_t)geometry_ex.DiskSize.QuadPart;
-		*capacity /= *lbsize; // Capacity is in # blocks
-		return (0);
+		goto done;
 	}
 
+	if (*capacity > 0 &&
+	    *lbsize > 0)
+		goto done;
+
+	if (*capacity > 0)
+		goto gotsize;
+
+	GET_LENGTH_INFORMATION lengthInfo = { 0 };
+	len = 0;
+
+	if (DeviceIoControl(
+	    ITOH(fd),
+	    IOCTL_DISK_GET_LENGTH_INFO,
+	    NULL, 0,
+	    &lengthInfo, sizeof (lengthInfo),
+	    &len,
+	    NULL)) {
+		*capacity = lengthInfo.Length.QuadPart;
+	}
+
+gotsize:
+	// We need to lookup sectorSize;
+	if (*lbsize == 0) {
+
+		STORAGE_PROPERTY_QUERY query = {
+		    .PropertyId = StorageAccessAlignmentProperty,
+		    .QueryType = PropertyStandardQuery
+		};
+
+		STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR align = { 0 };
+		len = 0;
+
+		if (DeviceIoControl(
+		    ITOH(fd),
+		    IOCTL_STORAGE_QUERY_PROPERTY,
+		    &query, sizeof (query),
+		    &align, sizeof (align),
+		    &len,
+		    NULL)) {
+			*lbsize = align.BytesPerLogicalSector;
+		}
+	}
+
+	if (*lbsize == 0) {
+		*lbsize = 512;
+		fprintf(stderr, "Assuming 512 byte sector size\n");
+	}
+
+done:
+	*capacity /= *lbsize; // Capacity is in # blocks
 	return (0);
 }
 
 static int
 efi_get_info(int fd, struct dk_cinfo *dki_info)
 {
-	int rval = 0;
 #if defined(__linux__)
+	int rval = 0;
 	char *path;
 	char *dev_path;
 
@@ -520,7 +540,7 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
 	diskaddr_t capacity;
 	uint_t lbsize;
-
+	usleep(100);
 	/*
 	 * When the IO is not being performed in kernel as an ioctl we need
 	 * to know the sector size so we can seek to the proper byte offset.
@@ -536,6 +556,7 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 
 	switch (cmd) {
 	case DKIOCGETEFI:
+	{
 		if (lbsize == 0) {
 			if (efi_debug)
 				(void) fprintf(stderr, "DKIOCGETEFI assuming "
@@ -544,33 +565,56 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 			lbsize = DEV_BSIZE;
 		}
 
-		error = lseek(fd, dk_ioc->dki_lba * lbsize, SEEK_SET);
-		if (error == -1) {
-			if (efi_debug)
-				(void) fprintf(stderr, "DKIOCGETEFI lseek "
-				    "error: %d\n", errno);
-			return (error);
+		if (efi_debug)
+			fprintf(stderr,
+			    "DKIOCGETEFI: lba %llu, sectorsize %d, len %lld\n",
+			    (long long)dk_ioc->dki_lba, lbsize,
+			    dk_ioc->dki_length);
+
+		int block = dk_ioc->dki_lba;
+		size_t total_iosize = dk_ioc->dki_length;
+		size_t total_done = 0;
+
+		while (total_iosize > 0) {
+			int iosize = MIN(total_iosize, lbsize);
+
+			error = lseek(fd, block * lbsize, SEEK_SET);
+			if (error == -1) {
+				if (efi_debug)
+					(void) fprintf(stderr,
+					    "DKIOCGETEFI lseek error: %d\n",
+					    errno);
+				return (error);
+			}
+
+			error = read(fd, data, iosize);
+			if (error == -1) {
+				if (efi_debug)
+					(void) fprintf(stderr,
+					    "DKIOCGETEFI read error: %d\n",
+					    errno);
+				return (error);
+			}
+
+			block++;
+			data += iosize;
+			total_iosize -= iosize;
+			total_done += iosize;
 		}
 
-		error = read(fd, data, dk_ioc->dki_length);
-		if (error == -1) {
-			if (efi_debug)
-				(void) fprintf(stderr, "DKIOCGETEFI read "
-				    "error: %d\n", errno);
-			return (error);
-		}
-
-		if (error != dk_ioc->dki_length) {
+		if (total_done != dk_ioc->dki_length) {
 			if (efi_debug)
 				(void) fprintf(stderr, "DKIOCGETEFI short "
-				    "read of %d bytes\n", error);
+				    "read of %zu bytes\n", total_done);
 			errno = EIO;
 			return (-1);
 		}
 		error = 0;
 		break;
+	}
 
 	case DKIOCSETEFI:
+	{
 		if (lbsize == 0) {
 			if (efi_debug)
 				(void) fprintf(stderr, "DKIOCSETEFI unknown "
@@ -579,26 +623,47 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 			return (-1);
 		}
 
-		error = lseek(fd, dk_ioc->dki_lba * lbsize, SEEK_SET);
-		if (error == -1) {
-			if (efi_debug)
-				(void) fprintf(stderr, "DKIOCSETEFI lseek "
-				    "error: %d\n", errno);
-			return (error);
+		if (efi_debug)
+			fprintf(stderr,
+			    "DKIOCSETEFI: lba %llu, sectorsize %d, len%lld\n",
+			    (long long)dk_ioc->dki_lba, lbsize,
+			    dk_ioc->dki_length);
+
+		int block = dk_ioc->dki_lba;
+		size_t total_iosize = dk_ioc->dki_length;
+		size_t total_done = 0;
+
+		while (total_iosize > 0) {
+			int iosize = MIN(total_iosize, lbsize);
+
+			error = lseek(fd, block * lbsize, SEEK_SET);
+			if (error == -1) {
+				if (efi_debug)
+					(void) fprintf(stderr,
+					    "DKIOCSETEFI lseek error: %d\n",
+					    errno);
+				return (error);
+			}
+
+			error = write(fd, data, iosize);
+			if (error == -1) {
+				if (efi_debug)
+					(void) fprintf(stderr,
+					    "DKIOCSETEFI write error: %d\n",
+					    errno);
+				return (error);
+			}
+
+			block++;
+			data += iosize;
+			total_iosize -= iosize;
+			total_done += iosize;
 		}
 
-		error = write(fd, data, dk_ioc->dki_length);
-		if (error == -1) {
-			if (efi_debug)
-				(void) fprintf(stderr, "DKIOCSETEFI write "
-				    "error: %d\n", errno);
-			return (error);
-		}
-
-		if (error != dk_ioc->dki_length) {
+		if (total_done != dk_ioc->dki_length) {
 			if (efi_debug)
 				(void) fprintf(stderr, "DKIOCSETEFI short "
-				    "write of %d bytes\n", error);
+				    "write of %zu bytes\n", total_done);
 			errno = EIO;
 			return (-1);
 		}
@@ -616,6 +681,7 @@ efi_ioctl(int fd, int cmd, dk_efi_t *dk_ioc)
 #endif
 		error = 0;
 		break;
+	}
 
 	default:
 		if (efi_debug)
@@ -778,8 +844,9 @@ efi_read(int fd, struct dk_gpt *vtoc)
 		}
 	}
 
-	if (posix_memalign((void **)&dk_ioc.dki_data,
-	    disk_info.dki_lbsize, label_len))
+	dk_ioc.dki_data = (void *)umem_alloc_aligned(label_len,
+	    disk_info.dki_lbsize, UMEM_DEFAULT);
+	if (dk_ioc.dki_data == NULL)
 		return (VT_ERROR);
 
 	memset(dk_ioc.dki_data, 0, label_len);
@@ -899,7 +966,7 @@ efi_read(int fd, struct dk_gpt *vtoc)
 	}
 
 	if (rval < 0) {
-		posix_memalign_free(efi);
+		umem_free_aligned(efi, label_len);
 		return (rval);
 	}
 
@@ -921,6 +988,118 @@ efi_read(int fd, struct dk_gpt *vtoc)
 	UUID_LE_CONVERT(vtoc->efi_disk_uguid, efi->efi_gpt_DiskGUID);
 
 	/*
+	 * OpenZFS/Solaris historically creates GPT headers with
+	 * NumPartitions=9.  Windows requires NumPartitions=128 (the UEFI
+	 * minimum) and will not create HarddiskXPartitionY devices without
+	 * it.  Warn the user and, if --fix-gpt was requested, correct both
+	 * the primary and backup GPT headers in-place.
+	 *
+	 * The partition entry array is always laid out to cover
+	 * EFI_MIN_ARRAY_SIZE (16 KB = 128 entries) on disk, so correcting
+	 * the header field is safe: entries 9-127 are already zeroed.
+	 */
+	uint_t efi_nparts_min =
+	    (uint_t)(EFI_MIN_ARRAY_SIZE / sizeof (efi_gpe_t));
+	if (vtoc->efi_nparts < efi_nparts_min) {
+		(void) fprintf(stderr,
+		    "Warning: disk GPT has NumPartitions=%u (expected %u). "
+		    "Windows may not create partition devices for this disk.\n"
+		    "Use 'zpool import --fix-gpt' to correct.\n",
+		    vtoc->efi_nparts, efi_nparts_min);
+
+		if (efi_fix_gpt) {
+			uint32_t new_nparts = efi_nparts_min;
+			uint32_t array_crc;
+			dk_efi_t fix_ioc;
+			DWORD bytesReturned;
+
+			/* Update primary header nparts and recompute CRCs */
+			efi->efi_gpt_NumberOfPartitionEntries =
+			    LE_32(new_nparts);
+			array_crc = efi_crc32((unsigned char *)efi_parts,
+			    new_nparts * (int)sizeof (efi_gpe_t));
+			efi->efi_gpt_PartitionEntryArrayCRC32 =
+			    LE_32(array_crc);
+			efi->efi_gpt_HeaderCRC32 = 0;
+			efi->efi_gpt_HeaderCRC32 =
+			    LE_32(efi_crc32((unsigned char *)efi,
+			    LE_32(efi->efi_gpt_HeaderSize)));
+
+			/* Write primary GPT header + array starting at LBA 1 */
+			fix_ioc.dki_lba = 1;
+			fix_ioc.dki_length = label_len;
+			fix_ioc.dki_data = efi;
+
+			if (efi_ioctl(fd, DKIOCSETEFI, &fix_ioc) != 0) {
+				(void) fprintf(stderr,
+				    "Warning: failed to write corrected "
+				    "primary GPT: errno %d\n", errno);
+			} else {
+				/*
+				 * Fix the backup GPT header.  Read it, update
+				 * nparts and CRCs (the backup partition array
+				 * on disk is already correct), write it back.
+				 */
+				efi_gpt_t *backup;
+				dk_efi_t bak_ioc;
+
+				backup = umem_alloc_aligned(
+				    disk_info.dki_lbsize,
+				    disk_info.dki_lbsize, UMEM_DEFAULT);
+				if (backup != NULL) {
+					bak_ioc.dki_lba =
+					    vtoc->efi_altern_lba;
+					bak_ioc.dki_length =
+					    disk_info.dki_lbsize;
+					bak_ioc.dki_data = backup;
+
+					if (efi_ioctl(fd, DKIOCGETEFI,
+					    &bak_ioc) == 0) {
+					backup->
+					    efi_gpt_NumberOfPartitionEntries =
+					    LE_32(new_nparts);
+					backup->
+					    efi_gpt_PartitionEntryArrayCRC32 =
+					    LE_32(array_crc);
+					backup->efi_gpt_HeaderCRC32 =
+					    0;
+					backup->efi_gpt_HeaderCRC32 =
+					    LE_32(efi_crc32(
+					    (unsigned char *)backup,
+					    LE_32(backup->
+					    efi_gpt_HeaderSize)));
+					if (efi_ioctl(fd,
+					    DKIOCSETEFI,
+					    &bak_ioc) != 0 &&
+					    efi_debug) {
+						(void) fprintf(stderr,
+						    "Warning: failed "
+						    "to write corrected"
+						    " backup GPT: "
+						    "errno %d\n",
+						    errno);
+					}
+					}
+					umem_free_aligned(backup,
+					    disk_info.dki_lbsize);
+				}
+
+				/* Notify Windows of partition table change */
+				DeviceIoControl(fd,
+				    IOCTL_DISK_UPDATE_PROPERTIES,
+				    NULL, 0, NULL, 0,
+				    &bytesReturned, NULL);
+
+				(void) fprintf(stderr,
+				    "GPT corrected: NumPartitions set to %u.\n",
+				    new_nparts);
+			}
+
+			vtoc->efi_nparts = new_nparts;
+		}
+	}
+
+	/*
 	 * If the array the user passed in is too small, set the length
 	 * to what it needs to be and return
 	 */
@@ -937,7 +1116,7 @@ efi_read(int fd, struct dk_gpt *vtoc)
 		    j < sizeof (conversion_array)
 		    / sizeof (struct uuid_to_ptag); j++) {
 
-			if (bcmp(&vtoc->efi_parts[i].p_guid,
+			if (memcmp(&vtoc->efi_parts[i].p_guid,
 			    &conversion_array[j].uuid,
 			    sizeof (struct uuid)) == 0) {
 				vtoc->efi_parts[i].p_tag = j;
@@ -965,7 +1144,7 @@ efi_read(int fd, struct dk_gpt *vtoc)
 		UUID_LE_CONVERT(vtoc->efi_parts[i].p_uguid,
 		    efi_parts[i].efi_gpe_UniquePartitionGUID);
 	}
-	posix_memalign_free(efi);
+	umem_free_aligned(efi, label_len);
 
 	return (dki_info.dki_partition);
 }
@@ -982,7 +1161,8 @@ write_pmbr(int fd, struct dk_gpt *vtoc)
 	int		len;
 
 	len = (vtoc->efi_lbasize == 0) ? sizeof (mb) : vtoc->efi_lbasize;
-	if (posix_memalign((void **)&buf, len, len))
+	buf = (void *)umem_alloc_aligned(len, len, UMEM_DEFAULT);
+	if (buf == NULL)
 		return (VT_ERROR);
 
 	/*
@@ -996,17 +1176,17 @@ write_pmbr(int fd, struct dk_gpt *vtoc)
 	dk_ioc.dki_data = (efi_gpt_t *)buf;
 	if (efi_ioctl(fd, DKIOCGETEFI, &dk_ioc) == -1) {
 		(void) memcpy(&mb, buf, sizeof (mb));
-		bzero(&mb, sizeof (mb));
+		memset(&mb, 0, sizeof (mb));
 		mb.signature = LE_16(MBB_MAGIC);
 	} else {
 		(void) memcpy(&mb, buf, sizeof (mb));
 		if (mb.signature != LE_16(MBB_MAGIC)) {
-			bzero(&mb, sizeof (mb));
+			memset(&mb, 0, sizeof (mb));
 			mb.signature = LE_16(MBB_MAGIC);
 		}
 	}
 
-	bzero(&mb.parts, sizeof (mb.parts));
+	memset(&mb.parts, 0, sizeof (mb.parts));
 	cp = (uchar_t *)&mb.parts[0];
 	/* bootable or not */
 	*cp++ = 0;
@@ -1045,7 +1225,7 @@ write_pmbr(int fd, struct dk_gpt *vtoc)
 	dk_ioc.dki_lba = 0;
 	dk_ioc.dki_length = len;
 	if (efi_ioctl(fd, DKIOCSETEFI, &dk_ioc) == -1) {
-		posix_memalign_free(buf);
+		umem_free_aligned(buf, len);
 		switch (errno) {
 		case EIO:
 			return (VT_EIO);
@@ -1055,7 +1235,7 @@ write_pmbr(int fd, struct dk_gpt *vtoc)
 			return (VT_ERROR);
 		}
 	}
-	posix_memalign_free(buf);
+	umem_free_aligned(buf, len);
 	return (0);
 }
 
@@ -1499,8 +1679,9 @@ efi_write(int fd, struct dk_gpt *vtoc)
 	 * for backup GPT header.
 	 */
 	lba_backup_gpt_hdr = vtoc->efi_last_u_lba + 1 + nblocks;
-	if (posix_memalign((void **)&dk_ioc.dki_data,
-	    vtoc->efi_lbasize, dk_ioc.dki_length))
+	dk_ioc.dki_data = (void *)umem_alloc_aligned(dk_ioc.dki_length,
+	    vtoc->efi_lbasize, UMEM_DEFAULT);
+	if (dk_ioc.dki_data == NULL)
 		return (VT_ERROR);
 
 	memset(dk_ioc.dki_data, 0, dk_ioc.dki_length);
@@ -1593,7 +1774,7 @@ efi_write(int fd, struct dk_gpt *vtoc)
 	efi->efi_gpt_Signature = LE_64(EFI_SIGNATURE);
 
 	if (efi_ioctl(fd, DKIOCSETEFI, &dk_ioc) == -1) {
-		posix_memalign_free(dk_ioc.dki_data);
+		umem_free_aligned(dk_ioc.dki_data, dk_ioc.dki_length);
 		switch (errno) {
 		case EIO:
 			return (VT_EIO);
@@ -1605,7 +1786,7 @@ efi_write(int fd, struct dk_gpt *vtoc)
 	}
 	/* if it's a metadevice we're done */
 	if (md_flag) {
-		posix_memalign_free(dk_ioc.dki_data);
+		umem_free_aligned(dk_ioc.dki_data, dk_ioc.dki_length);
 		return (0);
 	}
 
@@ -1680,7 +1861,7 @@ efi_write(int fd, struct dk_gpt *vtoc)
 	// Verify it landed on disk ok
 	rval = verify_label(fd, vtoc->efi_lbasize, chksum_sector_1);
 
-	posix_memalign_free(dk_ioc.dki_data);
+	umem_free_aligned(dk_ioc.dki_data, dk_ioc.dki_length);
 
 	return (rval);
 }
@@ -1807,37 +1988,4 @@ efi_err_check(struct dk_gpt *vtoc)
 		(void) fprintf(stderr,
 		    "no reserved partition found\n");
 	}
-}
-
-int repair_vtoc(int fd, struct dk_gpt* vtoc)
-{
-    diskaddr_t	capacity = 0;
-    uint_t		lbsize = 0;
-    read_disk_info(fd, &capacity, &lbsize);
-
-    uint64_t disk_last_lba = capacity - 1;
-    uint64_t nblocks = NBLOCKS(EFI_NUMPAR, lbsize);  // always 128 for ZFS fix
-
-    if ((nblocks * lbsize) < EFI_MIN_ARRAY_SIZE + lbsize) {
-	nblocks = EFI_MIN_ARRAY_SIZE / lbsize + 1;
-    }
-
-    // ---- PATCH HEADERS ONLY ----
-    vtoc->efi_lbasize = lbsize;
-    vtoc->efi_last_lba = disk_last_lba;
-    vtoc->efi_altern_lba = disk_last_lba;
-    vtoc->efi_last_u_lba = disk_last_lba - nblocks;
-    vtoc->efi_nparts = 128;
-
-    fprintf(stderr, "**[repair_vtoc] capacity (blocks): %llu\n",
-	(unsigned long long)capacity);
-    fprintf(stderr, "**[repair_vtoc] lbsize           : %u\n", lbsize);
-    fprintf(stderr, "**[repair_vtoc] disk_last_lba    : %llu\n",
-	(unsigned long long)disk_last_lba);
-    fprintf(stderr, "**[repair_vtoc] nblocks (parttbl): %llu\n",
-	(unsigned long long)nblocks);
-    fprintf(stderr, "**[repair_vtoc] efi_last_u_lba   : %llu\n",
-	(unsigned long long)vtoc->efi_last_u_lba);
-    fprintf(stderr, "**[repair_vtoc] efi_nparts       : %u\n",
-	vtoc->efi_nparts);
 }

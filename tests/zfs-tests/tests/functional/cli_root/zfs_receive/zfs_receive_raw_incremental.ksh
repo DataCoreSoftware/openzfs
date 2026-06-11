@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -43,10 +44,10 @@ verify_runnable "both"
 function cleanup
 {
 	datasetexists $TESTPOOL/$TESTFS1 && \
-		log_must zfs destroy -r $TESTPOOL/$TESTFS1
+		destroy_dataset $TESTPOOL/$TESTFS1 -r
 
 	datasetexists $TESTPOOL/$TESTFS2 && \
-		log_must zfs destroy -r $TESTPOOL/$TESTFS2
+		destroy_dataset $TESTPOOL/$TESTFS2 -r
 
 	[[ -f $ibackup ]] && log_must rm -f $ibackup
 	[[ -f $ibackup_trunc ]] && log_must rm -f $ibackup_trunc
@@ -69,7 +70,7 @@ log_must eval "echo $passphrase | zfs create -o encryption=on" \
 log_must zfs snapshot $snap1
 
 log_must mkfile 1M /$TESTPOOL/$TESTFS1/$TESTFILE0
-typeset checksum=$(md5digest /$TESTPOOL/$TESTFS1/$TESTFILE0)
+typeset checksum=$(xxh128digest /$TESTPOOL/$TESTFS1/$TESTFILE0)
 
 log_must zfs snapshot $snap2
 
@@ -89,7 +90,7 @@ log_must zfs unload-key $TESTPOOL/$TESTFS2
 log_must eval "zfs receive $TESTPOOL/$TESTFS2 < $ibackup"
 log_must eval "echo $passphrase2 | zfs mount -l $TESTPOOL/$TESTFS2"
 
-typeset cksum1=$(md5digest /$TESTPOOL/$TESTFS2/$TESTFILE0)
+typeset cksum1=$(xxh128digest /$TESTPOOL/$TESTFS2/$TESTFILE0)
 [[ "$cksum1" == "$checksum" ]] || \
 	log_fail "Checksums differ ($cksum1 != $checksum)"
 

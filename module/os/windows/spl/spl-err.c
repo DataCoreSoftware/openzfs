@@ -31,6 +31,8 @@
 
 #include <Trace.h>
 
+#include <zfs_gitrev.h>
+
 void
 vcmn_err(int ce, const char *fmt, va_list ap)
 {
@@ -65,3 +67,52 @@ cmn_err(int ce, const char *fmt, ...)
 	vcmn_err(ce, fmt, ap);
 	va_end(ap);
 } /* cmn_err() */
+
+void
+spl_panic(const char *file, const char *func, int line, const char *fmt, ...)
+{
+	char msg[MAXMSGLEN];
+	va_list ap;
+
+	va_start(ap, fmt);
+	_vsnprintf(msg, sizeof (msg) - 1, fmt, ap);
+	va_end(ap);
+
+	/* Log to debugger output and circular buffer */
+	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+	    "OpenZFS panic at %s:%d in %s: %s\n", file, line, func, msg));
+	printBuffer("OpenZFS panic at %s:%d in %s: %s\n",
+	    file, line, func, msg);
+	printBuffer("OpenZFS version %s\n", ZFS_META_GITREV);
+
+	/*
+	 * If a kernel debugger is attached let the developer inspect
+	 * the live state before we tear down.  Without a debugger this
+	 * is a no-op (KdBreakPoint is gated on KD_DEBUGGER_ENABLED).
+	 */
+	KdBreakPoint();
+
+	/*
+	 * Issue a proper bug-check so Windows captures a full minidump.
+	 * Parameters: custom ZFS code, file, func, line, message pointer.
+	 * The 0x00FFFFFF code is easy to recognise as an OpenZFS-initiated
+	 * panic in the minidump header.
+	 */
+	KeBugCheckEx(0x00FFFFFF,
+	    (ULONG_PTR)file,
+	    (ULONG_PTR)func,
+	    (ULONG_PTR)line,
+	    (ULONG_PTR)msg);
+}
+
+// Backward compatible, loses FILE/FUNCTION/LINE
+// but no longer used much in ZFS.
+void
+panic(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	spl_panic(__FILE__, __FUNCTION__, __LINE__, fmt, ap);
+	va_end(ap);
+}

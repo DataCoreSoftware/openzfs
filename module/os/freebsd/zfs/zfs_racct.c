@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2021 iXsystems, Inc.
  *
@@ -27,7 +28,7 @@
 #include <sys/racct.h>
 
 void
-zfs_racct_read(uint64_t size, uint64_t iops)
+zfs_racct_read(spa_t *spa, uint64_t size, uint64_t iops, dmu_flags_t flags)
 {
 	curthread->td_ru.ru_inblock += iops;
 #ifdef RACCT
@@ -37,11 +38,15 @@ zfs_racct_read(uint64_t size, uint64_t iops)
 		racct_add_force(curproc, RACCT_READIOPS, iops);
 		PROC_UNLOCK(curproc);
 	}
+#else
+	(void) size;
 #endif /* RACCT */
+
+	spa_iostats_read_add(spa, size, iops, flags);
 }
 
 void
-zfs_racct_write(uint64_t size, uint64_t iops)
+zfs_racct_write(spa_t *spa, uint64_t size, uint64_t iops, dmu_flags_t flags)
 {
 	curthread->td_ru.ru_oublock += iops;
 #ifdef RACCT
@@ -51,5 +56,9 @@ zfs_racct_write(uint64_t size, uint64_t iops)
 		racct_add_force(curproc, RACCT_WRITEIOPS, iops);
 		PROC_UNLOCK(curproc);
 	}
+#else
+	(void) size;
 #endif /* RACCT */
+
+	spa_iostats_write_add(spa, size, iops, flags);
 }

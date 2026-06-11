@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2010 Pawel Jakub Dawidek <pjd@FreeBSD.org>
  * Copyright (c) 2020 iXsystems, Inc.
@@ -24,9 +25,6 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-
-#include <sys/cdefs.h>
-__FBSDID("$FreeBSD$");
 
 #include <sys/types.h>
 #include <sys/param.h>
@@ -114,7 +112,7 @@ log_sysevent(nvlist_t *event)
 		}
 		case DATA_TYPE_STRING:
 		{
-			char *value;
+			const char *value;
 
 			(void) nvpair_value_string(elem, &value);
 			sbuf_printf(sb, " %s=%s", nvpair_name(elem), value);
@@ -180,7 +178,7 @@ log_sysevent(nvlist_t *event)
 		}
 		case DATA_TYPE_STRING_ARRAY:
 		{
-			char **strarr;
+			const char **strarr;
 			uint_t ii, nelem;
 
 			(void) nvpair_value_string_array(elem, &strarr, &nelem);
@@ -250,7 +248,17 @@ sysevent_worker(void *arg __unused)
 			nvlist_free(event);
 		}
 	}
-	zfs_zevent_destroy(ze);
+
+	/*
+	 * We avoid zfs_zevent_destroy() here because we're otherwise racing
+	 * against fm_fini() destroying the zevent_lock.  zfs_zevent_destroy()
+	 * will currently only clear `ze->ze_zevent` from an event list then
+	 * free `ze`, so just inline the free() here -- events have already
+	 * been drained.
+	 */
+	VERIFY0P(ze->ze_zevent);
+	kmem_free(ze, sizeof (zfs_zevent_t));
+
 	kthread_exit();
 }
 

@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -25,8 +26,6 @@ verify_runnable "global"
 
 log_assert "overflowing a 64-bit integer should wrap around"
 
-log_must_program $TESTPOOL - <<-EOF
-	assert(18446744073709551615 + 1 == (-18446744073709551616))
-EOF
+log_must_program $TESTPOOL - <<<"assert(18446744073709551615 + 1 == (-18446744073709551616))"
 
 log_pass "overflowing a 64-bit integer should wrap around"

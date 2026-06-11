@@ -1,4 +1,4 @@
-/* BEGIN CSTYLED */
+// SPDX-License-Identifier: MIT
 /*
 ** $Id: lzio.h,v 1.26.1.1 2013/04/12 18:48:47 roberto Exp $
 ** Buffered streams
@@ -64,4 +64,3 @@ struct Zio {
 LUAI_FUNC int luaZ_fill (ZIO *z);
 
 #endif
-/* END CSTYLED */

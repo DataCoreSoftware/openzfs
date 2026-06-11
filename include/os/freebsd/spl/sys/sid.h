@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2007 Pawel Jakub Dawidek <pjd@FreeBSD.org>
  * All rights reserved.
@@ -29,7 +30,6 @@
 #ifndef _OPENSOLARIS_SYS_SID_H_
 #define	_OPENSOLARIS_SYS_SID_H_
 #include <sys/idmap.h>
-#include <sys/kidmap.h>
 
 typedef struct ksiddomain {
 	char	*kd_name;	/* Domain part of SID */
@@ -58,29 +58,5 @@ ksiddomain_rele(ksiddomain_t *kd)
 	kmem_free(kd->kd_name, kd->kd_len);
 	kmem_free(kd, sizeof (*kd));
 }
-
-static __inline uint_t
-ksid_getid(ksid_t *ks)
-{
-
-	panic("%s has been unexpectedly called", __func__);
-}
-
-static __inline const char *
-ksid_getdomain(ksid_t *ks)
-{
-
-	panic("%s has been unexpectedly called", __func__);
-}
-
-static __inline uint_t
-ksid_getrid(ksid_t *ks)
-{
-
-	panic("%s has been unexpectedly called", __func__);
-}
-
-#define	kidmap_getsidbyuid(zone, uid, sid_prefix, rid)	(1)
-#define	kidmap_getsidbygid(zone, gid, sid_prefix, rid)	(1)
 
 #endif	/* _OPENSOLARIS_SYS_SID_H_ */

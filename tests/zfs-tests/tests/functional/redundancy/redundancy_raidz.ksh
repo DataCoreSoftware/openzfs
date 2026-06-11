@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -77,7 +78,7 @@ function test_selfheal # <pool> <parity> <dir>
 	log_must zpool import -o cachefile=none -d $dir $pool
 
 	typeset mntpnt=$(get_prop mountpoint $pool/fs)
-	log_must find $mntpnt -type f -exec cksum {} + >> /dev/null 2>&1
+	log_must eval "find $mntpnt -type f -exec cksum {} + >> /dev/null 2>&1"
 	log_must check_pool_status $pool "errors" "No known data errors"
 
 	#
@@ -100,7 +101,7 @@ function test_selfheal # <pool> <parity> <dir>
 	log_must zpool import -o cachefile=none -d $dir $pool
 
 	typeset mntpnt=$(get_prop mountpoint $pool/fs)
-	log_must find $mntpnt -type f -exec cksum {} + >> /dev/null 2>&1
+	log_must eval "find $mntpnt -type f -exec cksum {} + >> /dev/null 2>&1"
 	log_must check_pool_status $pool "errors" "No known data errors"
 
 	log_must zpool scrub -w $pool
@@ -219,17 +220,17 @@ for nparity in 1 2 3; do
 	raid=raidz$nparity
 	dir=$TEST_BASE_DIR
 
-	log_must zpool create -f -o cachefile=none $TESTPOOL $raid ${disks[@]}
+	log_must zpool create -O compression=off -f -o cachefile=none $TESTPOOL $raid ${disks[@]}
 	log_must zfs set primarycache=metadata $TESTPOOL
 
 	log_must zfs create $TESTPOOL/fs
-	log_must fill_fs /$TESTPOOL/fs 1 512 100 1024 R
+	log_must fill_fs /$TESTPOOL/fs 1 512 102400 1 R
 
 	log_must zfs create -o compress=on $TESTPOOL/fs2
-	log_must fill_fs /$TESTPOOL/fs2 1 512 100 1024 R
+	log_must fill_fs /$TESTPOOL/fs2 1 512 102400 1 R
 
 	log_must zfs create -o compress=on -o recordsize=8k $TESTPOOL/fs3
-	log_must fill_fs /$TESTPOOL/fs3 1 512 100 1024 R
+	log_must fill_fs /$TESTPOOL/fs3 1 512 102400 1 R
 
 	typeset pool_size=$(get_pool_prop size $TESTPOOL)
 

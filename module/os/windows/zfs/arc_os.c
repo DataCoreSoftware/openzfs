@@ -56,10 +56,8 @@
 #include <sys/arc_impl.h>
 #include <sys/trace_zfs.h>
 #include <sys/aggsum.h>
-#include <sys/kstat_windows.h>
 
 extern arc_stats_t arc_stats;
-extern uint64_t zfs_arc_max;
 
 static kmutex_t			arc_reclaim_lock;
 static kcondvar_t		arc_reclaim_thread_cv;
@@ -75,7 +73,7 @@ static kcondvar_t		arc_reclaim_waiters_cv;
  * This must be less than arc_shrink_shift, so that when we shrink the ARC,
  * we will still not allow it to grow.
  */
-extern int	arc_no_grow_shift;
+extern uint_t	arc_no_grow_shift;
 
 extern uint64_t total_memory;
 extern uint64_t real_total_memory;
@@ -131,12 +129,6 @@ arc_available_memory(void)
 	return (arc_free_memory() - arc_sys_free);
 }
 
-int64_t
-arc_target_size(void)
-{
-    return (arc_c);
-}
-
 int
 arc_memory_throttle(spa_t *spa, uint64_t reserve, uint64_t txg)
 {
@@ -144,7 +136,8 @@ arc_memory_throttle(spa_t *spa, uint64_t reserve, uint64_t txg)
 	/* possibly wake up arc reclaim thread */
 
 	if (arc_reclaim_in_loop == B_FALSE) {
-		if (spl_free_manual_pressure_wrapper() != 0 || !spl_minimal_physmem_p() ||
+		if (spl_free_manual_pressure_wrapper() != 0 ||
+		    !spl_minimal_physmem_p() ||
 		    arc_reclaim_needed()) {
 			cv_signal(&arc_reclaim_thread_cv);
 			kpreempt(KPREEMPT_SYNC);
@@ -161,7 +154,7 @@ arc_memory_throttle(spa_t *spa, uint64_t reserve, uint64_t txg)
  */
 static void arc_kmem_reap_now(void)
 {
-	arc_wait_for_eviction(0);
+	arc_wait_for_eviction(0, B_FALSE, B_FALSE);
 
 	/* arc.c will do the heavy lifting */
 	arc_kmem_reap_soon();
@@ -215,7 +208,7 @@ arc_reclaim_thread(void *unused)
 			    (arc_c >> arc_shrink_shift)));
 		}
 
-		arc_wait_for_eviction(0);
+		arc_wait_for_eviction(0, B_FALSE, B_FALSE);
 
 		int64_t free_memory = arc_available_memory();
 
@@ -260,8 +253,7 @@ arc_reclaim_thread(void *unused)
 		 * it is worth reaping the abd_chunk_cache
 		 */
 		if (d_adj >= 64LL*1024LL*1024LL) {
-			extern kmem_cache_t *abd_chunk_cache;
-			kmem_cache_reap_now(abd_chunk_cache);
+			abd_cache_reap_now();
 		}
 
 		free_memory = post_adjust_free_memory;
@@ -614,7 +606,7 @@ arc_os_fini(void)
 #define	arc_meta_max	ARCSTAT(arcstat_meta_max) /* max size of metadata */
 
 /* So close, they made arc_min_prefetch_ms be static, but no others */
-
+#if 0
 int
 arc_kstat_update_windows(kstat_t *ksp, int rw)
 {
@@ -701,9 +693,6 @@ arc_kstat_update_windows(kstat_t *ksp, int rw)
 		zfs_arc_p_min_shift = ks->arc_zfs_arc_p_min_shift.value.ui64;
 		zfs_arc_average_blocksize =
 		    ks->arc_zfs_arc_average_blocksize.value.ui64;
-		zvol_threads = ks->zvol_io_threads.value.ui32;
-		zfs_prealloc_percent = ks->zfs_prealloc_percent.value.ui32;
-		zfs_adc_target_sync_pct = ks->zfs_adc_target_sync_pct.value.ui32;
 
 #ifdef _KERNEL
 		if (ks->zfs_total_memory_limit.value.ui64 > total_memory &&
@@ -738,9 +727,6 @@ arc_kstat_update_windows(kstat_t *ksp, int rw)
 		ks->arc_zfs_arc_p_min_shift.value.ui64 = zfs_arc_p_min_shift;
 		ks->arc_zfs_arc_average_blocksize.value.ui64 =
 		    zfs_arc_average_blocksize;
-		ks->zvol_io_threads.value.ui32 = zvol_threads;
-		ks->zfs_prealloc_percent.value.ui32 = zfs_prealloc_percent;
-		ks->zfs_adc_target_sync_pct.value.ui32 = zfs_adc_target_sync_pct;
 
 #ifdef _KERNEL
 		ks->zfs_total_memory_limit.value.ui64 = total_memory;
@@ -748,7 +734,7 @@ arc_kstat_update_windows(kstat_t *ksp, int rw)
 	}
 	return (0);
 }
-
+#endif
 
 /*
  * Helper function for arc_prune_async() it is responsible for safely
@@ -778,7 +764,7 @@ arc_prune_task(void *ptr)
  * for releasing it once the registered arc_prune_func_t has completed.
  */
 void
-arc_prune_async(int64_t adjust)
+arc_prune_async(uint64_t adjust)
 {
 	arc_prune_t *ap;
 
@@ -839,4 +825,12 @@ arc_register_hotplug(void)
 void
 arc_unregister_hotplug(void)
 {
+}
+
+void
+spl_set_arc_no_grow(int i)
+{
+	arc_no_grow = i;
+	if (i == B_TRUE)
+		membar_producer(); /* make it visible to other threads */
 }

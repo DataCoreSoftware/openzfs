@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -45,10 +46,11 @@
 #define	OFFSET_MASK	((1 << (16 - MATCH_BITS)) - 1)
 #define	LEMPEL_SIZE	1024
 
-/*ARGSUSED*/
-size_t
-lzjb_compress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
+static size_t
+zfs_lzjb_compress_buf(void *s_start, void *d_start, size_t s_len,
+    size_t d_len, int n)
 {
+	(void) n;
 	uchar_t *src = s_start;
 	uchar_t *dst = d_start;
 	uchar_t *cpy;
@@ -100,10 +102,11 @@ lzjb_compress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
 	return (dst - (uchar_t *)d_start);
 }
 
-/*ARGSUSED*/
-int
-lzjb_decompress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
+static int
+zfs_lzjb_decompress_buf(void *s_start, void *d_start,
+    size_t s_len, size_t d_len, int n)
 {
+	(void) s_len, (void) n;
 	uchar_t *src = s_start;
 	uchar_t *dst = d_start;
 	uchar_t *d_end = (uchar_t *)d_start + d_len;
@@ -130,3 +133,6 @@ lzjb_decompress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
 	}
 	return (0);
 }
+
+ZFS_COMPRESS_WRAP_DECL(zfs_lzjb_compress)
+ZFS_DECOMPRESS_WRAP_DECL(zfs_lzjb_decompress)

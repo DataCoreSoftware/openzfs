@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -39,7 +40,7 @@ function cleanup
 	for ds in "$SENDFS" "$ZVOL" "$ZVOL-renamed"; do
 		destroy_dataset "$ds" '-rf'
 	done
-	udev_wait
+	block_device_wait
 }
 
 log_assert "Verify 'zfs rename' works on a ZVOL already in use as block device"
@@ -54,7 +55,7 @@ SENDFS="$TESTPOOL/sendfs.$$"
 log_must zfs create -V $VOLSIZE "$ZVOL"
 
 # 2. Create a filesystem on the ZVOL device and mount it
-udev_wait
+block_device_wait "$ZDEV"
 log_must eval "new_fs $ZDEV >/dev/null 2>&1"
 log_must mkdir "$MNTPFS"
 log_must mount "$ZDEV" "$MNTPFS"

@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 
 #
 # This file and its contents are supplied under the terms of the
@@ -60,6 +61,7 @@ log_must zpool reopen $TESTPOOL
 log_must check_state $TESTPOOL "$REMOVED_DISK_ID" "unavail"
 # 3. Write test file to pool.
 log_must generate_random_file /$TESTPOOL/data $LARGE_FILE_SIZE
+sync_pool $TESTPOOL
 # 4. "Plug back" disk.
 insert_disk $REMOVED_DISK $scsi_host
 

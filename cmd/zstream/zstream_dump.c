@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -34,7 +35,7 @@
 #include <libnvpair.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <strings.h>
+#include <string.h>
 #include <unistd.h>
 #include <stddef.h>
 
@@ -54,12 +55,12 @@
  */
 #define	DUMP_GROUPING	4
 
-uint64_t total_stream_len = 0;
-FILE *send_stream = 0;
-boolean_t do_byteswap = B_FALSE;
-boolean_t do_cksum = B_TRUE;
+static uint64_t total_stream_len = 0;
+static FILE *send_stream = 0;
+static boolean_t do_byteswap = B_FALSE;
+static boolean_t do_cksum = B_TRUE;
 
-static void *
+void *
 safe_malloc(size_t size)
 {
 	void *rv = malloc(size);
@@ -297,6 +298,7 @@ zstream_do_dump(int argc, char *argv[])
 
 	fletcher_4_init();
 	while (read_hdr(drr, &zc)) {
+		uint64_t featureflags = 0;
 
 		/*
 		 * If this is the first DMU record being processed, check for
@@ -459,6 +461,18 @@ zstream_do_dump(int argc, char *argv[])
 				drro->drr_toguid = BSWAP_64(drro->drr_toguid);
 				drro->drr_maxblkid =
 				    BSWAP_64(drro->drr_maxblkid);
+			}
+
+			featureflags =
+			    DMU_GET_FEATUREFLAGS(drrb->drr_versioninfo);
+
+			if (featureflags & DMU_BACKUP_FEATURE_RAW &&
+			    drro->drr_bonuslen > drro->drr_raw_bonuslen) {
+				(void) fprintf(stderr,
+				    "Warning: Object %llu has bonuslen = "
+				    "%u > raw_bonuslen = %u\n\n",
+				    (u_longlong_t)drro->drr_object,
+				    drro->drr_bonuslen, drro->drr_raw_bonuslen);
 			}
 
 			payload_size = DRR_OBJECT_PAYLOAD_SIZE(drro);

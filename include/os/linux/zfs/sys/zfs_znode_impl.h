@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -36,20 +37,20 @@
 #include <sys/list.h>
 #include <sys/dmu.h>
 #include <sys/sa.h>
+#include <sys/time.h>
 #include <sys/zfs_vfsops.h>
 #include <sys/rrwlock.h>
 #include <sys/zfs_sa.h>
 #include <sys/zfs_stat.h>
 #include <sys/zfs_rlock.h>
 
-
 #ifdef	__cplusplus
 extern "C" {
 #endif
 
 #define	ZNODE_OS_FIELDS			\
+	inode_timespec_t z_btime; /* creation/birth time (cached) */ \
 	struct inode	z_inode;
-
 
 /*
  * Convert between znode pointers and inode pointers
@@ -70,8 +71,12 @@ extern "C" {
 #define	Z_ISDEV(type)	(S_ISCHR(type) || S_ISBLK(type) || S_ISFIFO(type))
 #define	Z_ISDIR(type)	S_ISDIR(type)
 
-#define	zn_has_cached_data(zp)		((zp)->z_is_mapped)
-#define	zn_rlimit_fsize(zp, uio)	(0)
+#define	zn_has_cached_data(zp, start, end) \
+	filemap_range_has_page(ZTOI(zp)->i_mapping, start, end)
+
+#define	zn_flush_cached_data(zp, sync)	write_inode_now(ZTOI(zp), sync)
+#define	zn_rlimit_fsize(size)		(0)
+#define	zn_rlimit_fsize_uio(zp, uio)	(0)
 
 /*
  * zhold() wraps igrab() on Linux, and igrab() may fail when the
@@ -83,39 +88,41 @@ extern "C" {
 #define	zrele(zp)	iput(ZTOI((zp)))
 
 /* Called on entry to each ZFS inode and vfs operation. */
-#define	ZFS_ENTER_ERROR(zfsvfs, error)				\
-do {								\
-	ZFS_TEARDOWN_ENTER_READ(zfsvfs, FTAG);			\
-	if (unlikely((zfsvfs)->z_unmounted)) {			\
-		ZFS_TEARDOWN_EXIT_READ(zfsvfs, FTAG);		\
-		return (error);					\
-	}							\
-} while (0)
-#define	ZFS_ENTER(zfsvfs)	ZFS_ENTER_ERROR(zfsvfs, EIO)
-#define	ZPL_ENTER(zfsvfs)	ZFS_ENTER_ERROR(zfsvfs, -EIO)
+static inline int
+zfs_enter(zfsvfs_t *zfsvfs, const char *tag)
+{
+	ZFS_TEARDOWN_ENTER_READ(zfsvfs, tag);
+	if (unlikely(zfsvfs->z_unmounted)) {
+		ZFS_TEARDOWN_EXIT_READ(zfsvfs, tag);
+		return (SET_ERROR(EIO));
+	}
+	return (0);
+}
 
 /* Must be called before exiting the operation. */
-#define	ZFS_EXIT(zfsvfs)					\
-do {								\
-	zfs_exit_fs(zfsvfs);					\
-	ZFS_TEARDOWN_EXIT_READ(zfsvfs, FTAG);			\
-} while (0)
+static inline void
+zfs_exit(zfsvfs_t *zfsvfs, const char *tag)
+{
+	zfs_exit_fs(zfsvfs);
+	ZFS_TEARDOWN_EXIT_READ(zfsvfs, tag);
+}
 
-#define	ZPL_EXIT(zfsvfs)					\
-do {								\
-	rrm_exit(&(zfsvfs)->z_teardown_lock, FTAG);		\
-} while (0)
+static inline int
+zpl_enter(zfsvfs_t *zfsvfs, const char *tag)
+{
+	return (-zfs_enter(zfsvfs, tag));
+}
 
-/* Verifies the znode is valid. */
-#define	ZFS_VERIFY_ZP_ERROR(zp, error)				\
-do {								\
-	if (unlikely((zp)->z_sa_hdl == NULL)) {			\
-		ZFS_EXIT(ZTOZSB(zp));				\
-		return (error);					\
-	}							\
-} while (0)
-#define	ZFS_VERIFY_ZP(zp)	ZFS_VERIFY_ZP_ERROR(zp, EIO)
-#define	ZPL_VERIFY_ZP(zp)	ZFS_VERIFY_ZP_ERROR(zp, -EIO)
+static inline void
+zpl_exit(zfsvfs_t *zfsvfs, const char *tag)
+{
+	ZFS_TEARDOWN_EXIT_READ(zfsvfs, tag);
+}
+
+/* zfs_verify_zp and zfs_enter_verify_zp are defined in zfs_znode.h */
+#define	zpl_verify_zp(zp)	(-zfs_verify_zp(zp))
+#define	zpl_enter_verify_zp(zfsvfs, zp, tag)	\
+	(-zfs_enter_verify_zp(zfsvfs, zp, tag))
 
 /*
  * Macros for dealing with dmu_buf_hold
@@ -135,27 +142,14 @@ do {						\
 	(stmp)[1] = (uint64_t)(tp)->tv_nsec;	\
 } while (0)
 
-#if defined(HAVE_INODE_TIMESPEC64_TIMES)
 /*
  * Decode ZFS stored time values to a struct timespec64
- * 4.18 and newer kernels.
  */
 #define	ZFS_TIME_DECODE(tp, stmp)		\
 do {						\
 	(tp)->tv_sec = (time64_t)(stmp)[0];	\
 	(tp)->tv_nsec = (long)(stmp)[1];	\
 } while (0)
-#else
-/*
- * Decode ZFS stored time values to a struct timespec
- * 4.17 and older kernels.
- */
-#define	ZFS_TIME_DECODE(tp, stmp)		\
-do {						\
-	(tp)->tv_sec = (time_t)(stmp)[0];	\
-	(tp)->tv_nsec = (long)(stmp)[1];	\
-} while (0)
-#endif /* HAVE_INODE_TIMESPEC64_TIMES */
 
 #define	ZFS_ACCESSTIME_STAMP(zfsvfs, zp)
 
@@ -163,17 +157,11 @@ struct znode;
 
 extern int	zfs_sync(struct super_block *, int, cred_t *);
 extern int	zfs_inode_alloc(struct super_block *, struct inode **ip);
+extern void	zfs_inode_free(struct inode *);
 extern void	zfs_inode_destroy(struct inode *);
 extern void	zfs_mark_inode_dirty(struct inode *);
 extern boolean_t zfs_relatime_need_update(const struct inode *);
-
-#if defined(HAVE_UIO_RW)
-extern caddr_t zfs_map_page(page_t *, enum seg_rw);
-extern void zfs_unmap_page(page_t *, caddr_t);
-#endif /* HAVE_UIO_RW */
-
-extern zil_replay_func_t *zfs_replay_vector[TX_MAX_TYPE];
-extern int zfsfstype;
+extern zil_replay_func_t *const zfs_replay_vector[TX_MAX_TYPE];
 
 #ifdef	__cplusplus
 }

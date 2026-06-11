@@ -78,11 +78,11 @@ BEGIN
     BEGIN
         BLOCK "400904b0"
         BEGIN
-            VALUE "CompanyName", "DataCore Software Corporation"
+            VALUE "CompanyName", "TODO: <Company name>"
             VALUE "FileDescription", "kstat.exe"
             VALUE "FileVersion", "1.0.0.1"
-            VALUE "LegalCopyright", "Copyright (C) 2023 DataCore Software Corporation"
-            VALUE "OriginalFilename", "kstat.exe"
+            VALUE "LegalCopyright", "Copyright (C) 2021"
+            VALUE "OriginalFilename", "resource.rc"
             VALUE "ProductName", "kstat.exe"
             VALUE "ProductVersion", "1.0.0.1"
         END

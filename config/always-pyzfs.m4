@@ -1,3 +1,4 @@
+dnl # SPDX-License-Identifier: CDDL-1.0
 dnl #
 dnl # ZFS_AC_PYTHON_MODULE(module_name, [action-if-true], [action-if-false])
 dnl #
@@ -6,7 +7,7 @@ dnl # https://www.gnu.org/software/autoconf-archive/ax_python_module.html
 dnl # Required by ZFS_AC_CONFIG_ALWAYS_PYZFS.
 dnl #
 AC_DEFUN([ZFS_AC_PYTHON_MODULE], [
-	PYTHON_NAME=$(basename $PYTHON)
+	PYTHON_NAME=${PYTHON##*/}
 	AC_MSG_CHECKING([for $PYTHON_NAME module: $1])
 	AS_IF([$PYTHON -c "import $1" 2>/dev/null], [
 		AC_MSG_RESULT(yes)
@@ -18,7 +19,7 @@ AC_DEFUN([ZFS_AC_PYTHON_MODULE], [
 ])
 
 dnl #
-dnl # Determines if pyzfs can be built, requires Python 2.7 or later.
+dnl # Determines if pyzfs can be built, requires Python 3.6 or later.
 dnl #
 AC_DEFUN([ZFS_AC_CONFIG_ALWAYS_PYZFS], [
 	AC_ARG_ENABLE([pyzfs],
@@ -47,6 +48,16 @@ AC_DEFUN([ZFS_AC_CONFIG_ALWAYS_PYZFS], [
 	AC_SUBST(DEFINE_PYZFS)
 
 	dnl #
+	dnl # Autodetection disables pyzfs if kernel or srpm config
+	dnl #
+	AS_IF([test "x$enable_pyzfs" = xcheck], [
+		AS_IF([test "x$ZFS_CONFIG" = xkernel -o "x$ZFS_CONFIG" = xsrpm ], [
+				enable_pyzfs=no
+				AC_MSG_NOTICE([Disabling pyzfs for kernel/srpm config])
+		])
+	])
+
+	dnl #
 	dnl # Python "packaging" (or, failing that, "distlib") module is required to build and install pyzfs
 	dnl #
 	AS_IF([test "x$enable_pyzfs" = xcheck -o "x$enable_pyzfs" = xyes], [
@@ -62,19 +73,19 @@ AC_DEFUN([ZFS_AC_CONFIG_ALWAYS_PYZFS], [
 	])
 
 	dnl #
-	dnl # Require python-devel libraries
+	dnl # Require python3-devel libraries
 	dnl #
 	AS_IF([test "x$enable_pyzfs" = xcheck  -o "x$enable_pyzfs" = xyes], [
 		AS_CASE([$PYTHON_VERSION],
-			[3.*], [PYTHON_REQUIRED_VERSION=">= '3.4.0'"],
-			[2.*], [PYTHON_REQUIRED_VERSION=">= '2.7.0'"],
+			[3.*], [PYTHON_REQUIRED_VERSION=">= '3.6.0'"],
 			[AC_MSG_ERROR("Python $PYTHON_VERSION unknown")]
 		)
 
-		AX_PYTHON_DEVEL([$PYTHON_REQUIRED_VERSION], [
-			AS_IF([test "x$enable_pyzfs" = xyes], [
-				AC_MSG_ERROR("Python $PYTHON_REQUIRED_VERSION development library is not installed")
-			], [test "x$enable_pyzfs" != xno], [
+		AS_IF([test "x$enable_pyzfs" = xyes], [
+			AX_PYTHON_DEVEL([$PYTHON_REQUIRED_VERSION])
+		], [
+			AX_PYTHON_DEVEL([$PYTHON_REQUIRED_VERSION], [true])
+			AS_IF([test "x$ax_python_devel_found" = xno], [
 				enable_pyzfs=no
 			])
 		])

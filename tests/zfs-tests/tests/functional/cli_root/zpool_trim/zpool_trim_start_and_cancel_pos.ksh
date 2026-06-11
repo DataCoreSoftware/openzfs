@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -35,7 +36,7 @@
 DISK1=${DISKS%% *}
 
 log_must zpool create -f $TESTPOOL $DISK1
-log_must zpool trim $TESTPOOL
+log_must zpool trim -r 1 "$TESTPOOL"
 
 [[ -z "$(trim_progress $TESTPOOL $DISK1)" ]] && \
     log_fail "TRIM did not start"

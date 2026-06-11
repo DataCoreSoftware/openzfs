@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -35,8 +36,7 @@
 #define	SPEC_MAXOFFSET_T	((1LL << ((NBBY * sizeof (daddr32_t)) + \
 				DEV_BSHIFT - 1)) - 1)
 
-extern void zvol_create_minor(const char *);
-extern void zvol_create_minors_recursive(const char *);
+extern void zvol_create_minors(const char *);
 extern void zvol_remove_minors(spa_t *, const char *, boolean_t);
 extern void zvol_rename_minors(spa_t *, const char *, const char *, boolean_t);
 
@@ -50,9 +50,10 @@ extern int zvol_get_stats(objset_t *, nvlist_t *);
 extern boolean_t zvol_is_zvol(const char *);
 extern void zvol_create_cb(objset_t *, void *, cred_t *, dmu_tx_t *);
 extern int zvol_set_volsize(const char *, uint64_t);
-extern int zvol_set_snapdev(const char *, zprop_source_t, uint64_t);
-extern int zvol_set_volmode(const char *, zprop_source_t, uint64_t);
-extern zvol_state_handle_t *zvol_suspend(const char *);
+extern int zvol_set_volthreading(const char *, boolean_t);
+extern int zvol_set_common(const char *, zfs_prop_t, zprop_source_t, uint64_t);
+extern int zvol_set_ro(const char *, boolean_t);
+extern int zvol_suspend(const char *, zvol_state_handle_t **);
 extern int zvol_resume(zvol_state_handle_t *);
 extern void *zvol_tag(zvol_state_handle_t *);
 

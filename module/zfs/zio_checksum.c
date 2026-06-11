@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -91,29 +92,29 @@
  * invocation and passed to the checksum function.
  */
 
-/*ARGSUSED*/
 static void
 abd_checksum_off(abd_t *abd, uint64_t size,
     const void *ctx_template, zio_cksum_t *zcp)
 {
+	(void) abd, (void) size, (void) ctx_template;
 	ZIO_SET_CHECKSUM(zcp, 0, 0, 0, 0);
 }
 
-/*ARGSUSED*/
 static void
 abd_fletcher_2_native(abd_t *abd, uint64_t size,
     const void *ctx_template, zio_cksum_t *zcp)
 {
+	(void) ctx_template;
 	fletcher_init(zcp);
 	(void) abd_iterate_func(abd, 0, size,
 	    fletcher_2_incremental_native, zcp);
 }
 
-/*ARGSUSED*/
 static void
 abd_fletcher_2_byteswap(abd_t *abd, uint64_t size,
     const void *ctx_template, zio_cksum_t *zcp)
 {
+	(void) ctx_template;
 	fletcher_init(zcp);
 	(void) abd_iterate_func(abd, 0, size,
 	    fletcher_2_incremental_byteswap, zcp);
@@ -127,11 +128,11 @@ abd_fletcher_4_impl(abd_t *abd, uint64_t size, zio_abd_checksum_data_t *acdp)
 	fletcher_4_abd_ops.acf_fini(acdp);
 }
 
-/*ARGSUSED*/
 void
 abd_fletcher_4_native(abd_t *abd, uint64_t size,
     const void *ctx_template, zio_cksum_t *zcp)
 {
+	(void) ctx_template;
 	fletcher_4_ctx_t ctx;
 
 	zio_abd_checksum_data_t acd = {
@@ -144,11 +145,11 @@ abd_fletcher_4_native(abd_t *abd, uint64_t size,
 
 }
 
-/*ARGSUSED*/
 void
 abd_fletcher_4_byteswap(abd_t *abd, uint64_t size,
     const void *ctx_template, zio_cksum_t *zcp)
 {
+	(void) ctx_template;
 	fletcher_4_ctx_t ctx;
 
 	zio_abd_checksum_data_t acd = {
@@ -160,15 +161,21 @@ abd_fletcher_4_byteswap(abd_t *abd, uint64_t size,
 	abd_fletcher_4_impl(abd, size, &acd);
 }
 
+/*
+ * Checksum vectors.
+ *
+ * Note: you cannot change the name string for these functions, as they are
+ * embedded in on-disk data in some places (eg dedup table names).
+ */
 zio_checksum_info_t zio_checksum_table[ZIO_CHECKSUM_FUNCTIONS] = {
 	{{NULL, NULL}, NULL, NULL, 0, "inherit"},
 	{{NULL, NULL}, NULL, NULL, 0, "on"},
 	{{abd_checksum_off,		abd_checksum_off},
 	    NULL, NULL, 0, "off"},
-	{{abd_checksum_SHA256,		abd_checksum_SHA256},
+	{{abd_checksum_sha256,		abd_checksum_sha256},
 	    NULL, NULL, ZCHECKSUM_FLAG_METADATA | ZCHECKSUM_FLAG_EMBEDDED,
 	    "label"},
-	{{abd_checksum_SHA256,		abd_checksum_SHA256},
+	{{abd_checksum_sha256,		abd_checksum_sha256},
 	    NULL, NULL, ZCHECKSUM_FLAG_METADATA | ZCHECKSUM_FLAG_EMBEDDED,
 	    "gang_header"},
 	{{abd_fletcher_2_native,	abd_fletcher_2_byteswap},
@@ -177,26 +184,28 @@ zio_checksum_info_t zio_checksum_table[ZIO_CHECKSUM_FUNCTIONS] = {
 	    NULL, NULL, 0, "fletcher2"},
 	{{abd_fletcher_4_native,	abd_fletcher_4_byteswap},
 	    NULL, NULL, ZCHECKSUM_FLAG_METADATA, "fletcher4"},
-	{{abd_checksum_SHA256,		abd_checksum_SHA256},
+	{{abd_checksum_sha256,		abd_checksum_sha256},
 	    NULL, NULL, ZCHECKSUM_FLAG_METADATA | ZCHECKSUM_FLAG_DEDUP |
 	    ZCHECKSUM_FLAG_NOPWRITE, "sha256"},
 	{{abd_fletcher_4_native,	abd_fletcher_4_byteswap},
 	    NULL, NULL, ZCHECKSUM_FLAG_EMBEDDED, "zilog2"},
 	{{abd_checksum_off,		abd_checksum_off},
 	    NULL, NULL, 0, "noparity"},
-	{{abd_checksum_SHA512_native,	abd_checksum_SHA512_byteswap},
+	{{abd_checksum_sha512_native,	abd_checksum_sha512_byteswap},
 	    NULL, NULL, ZCHECKSUM_FLAG_METADATA | ZCHECKSUM_FLAG_DEDUP |
 	    ZCHECKSUM_FLAG_NOPWRITE, "sha512"},
 	{{abd_checksum_skein_native,	abd_checksum_skein_byteswap},
 	    abd_checksum_skein_tmpl_init, abd_checksum_skein_tmpl_free,
 	    ZCHECKSUM_FLAG_METADATA | ZCHECKSUM_FLAG_DEDUP |
 	    ZCHECKSUM_FLAG_SALTED | ZCHECKSUM_FLAG_NOPWRITE, "skein"},
-#if !defined(__FreeBSD__)
 	{{abd_checksum_edonr_native,	abd_checksum_edonr_byteswap},
 	    abd_checksum_edonr_tmpl_init, abd_checksum_edonr_tmpl_free,
 	    ZCHECKSUM_FLAG_METADATA | ZCHECKSUM_FLAG_SALTED |
 	    ZCHECKSUM_FLAG_NOPWRITE, "edonr"},
-#endif
+	{{abd_checksum_blake3_native,	abd_checksum_blake3_byteswap},
+	    abd_checksum_blake3_tmpl_init, abd_checksum_blake3_tmpl_free,
+	    ZCHECKSUM_FLAG_METADATA | ZCHECKSUM_FLAG_DEDUP |
+	    ZCHECKSUM_FLAG_SALTED | ZCHECKSUM_FLAG_NOPWRITE, "blake3"},
 };
 
 /*
@@ -206,17 +215,17 @@ zio_checksum_info_t zio_checksum_table[ZIO_CHECKSUM_FUNCTIONS] = {
 spa_feature_t
 zio_checksum_to_feature(enum zio_checksum cksum)
 {
-	VERIFY((cksum & ~ZIO_CHECKSUM_MASK) == 0);
+	VERIFY0((cksum & ~ZIO_CHECKSUM_MASK));
 
 	switch (cksum) {
+	case ZIO_CHECKSUM_BLAKE3:
+		return (SPA_FEATURE_BLAKE3);
 	case ZIO_CHECKSUM_SHA512:
 		return (SPA_FEATURE_SHA512);
 	case ZIO_CHECKSUM_SKEIN:
 		return (SPA_FEATURE_SKEIN);
-#if !defined(__FreeBSD__)
 	case ZIO_CHECKSUM_EDONR:
 		return (SPA_FEATURE_EDONR);
-#endif
 	default:
 		return (SPA_FEATURE_NONE);
 	}
@@ -270,7 +279,7 @@ static void
 zio_checksum_gang_verifier(zio_cksum_t *zcp, const blkptr_t *bp)
 {
 	const dva_t *dva = BP_IDENTITY(bp);
-	uint64_t txg = BP_PHYSICAL_BIRTH(bp);
+	uint64_t txg = BP_GET_PHYSICAL_BIRTH(bp);
 
 	ASSERT(BP_IS_GANG(bp));
 
@@ -355,17 +364,20 @@ zio_checksum_compute(zio_t *zio, enum zio_checksum checksum,
 		zio_eck_t eck;
 		size_t eck_offset;
 
-		bzero(&saved, sizeof (zio_cksum_t));
+		memset(&saved, 0, sizeof (zio_cksum_t));
 
 		if (checksum == ZIO_CHECKSUM_ZILOG2) {
 			zil_chain_t zilc;
 			abd_copy_to_buf(&zilc, abd, sizeof (zil_chain_t));
 
-			size = P2ROUNDUP_TYPED(zilc.zc_nused, ZIL_MIN_BLKSZ,
-			    uint64_t);
+			uint64_t nused = P2ROUNDUP_TYPED(zilc.zc_nused,
+			    ZIL_MIN_BLKSZ, uint64_t);
+			ASSERT3U(size, >=, nused);
+			size = nused;
 			eck = zilc.zc_eck;
 			eck_offset = offsetof(zil_chain_t, zc_eck);
 		} else {
+			ASSERT3U(size, >=, sizeof (zio_eck_t));
 			eck_offset = size - sizeof (zio_eck_t);
 			abd_copy_to_buf_off(&eck, abd, eck_offset,
 			    sizeof (zio_eck_t));
@@ -446,12 +458,13 @@ zio_checksum_error_impl(spa_t *spa, const blkptr_t *bp,
 				return (SET_ERROR(ECKSUM));
 			}
 
-			if (nused > size) {
+			nused = P2ROUNDUP_TYPED(nused, ZIL_MIN_BLKSZ, uint64_t);
+			if (size < nused)
 				return (SET_ERROR(ECKSUM));
-			}
-
-			size = P2ROUNDUP_TYPED(nused, ZIL_MIN_BLKSZ, uint64_t);
+			size = nused;
 		} else {
+			if (size < sizeof (zio_eck_t))
+				return (SET_ERROR(ECKSUM));
 			eck_offset = size - sizeof (zio_eck_t);
 			abd_copy_to_buf_off(&eck, abd, eck_offset,
 			    sizeof (zio_eck_t));
@@ -513,8 +526,6 @@ zio_checksum_error_impl(spa_t *spa, const blkptr_t *bp,
 	}
 
 	if (info != NULL) {
-		info->zbc_expected = expected_cksum;
-		info->zbc_actual = actual_cksum;
 		info->zbc_checksum_name = ci->ci_name;
 		info->zbc_byteswapped = byteswap;
 		info->zbc_injected = 0;
@@ -534,14 +545,39 @@ zio_checksum_error(zio_t *zio, zio_bad_cksum_t *info)
 	uint_t checksum = (bp == NULL ? zio->io_prop.zp_checksum :
 	    (BP_IS_GANG(bp) ? ZIO_CHECKSUM_GANG_HEADER : BP_GET_CHECKSUM(bp)));
 	int error;
-	uint64_t size = (bp == NULL ? zio->io_size :
-	    (BP_IS_GANG(bp) ? SPA_GANGBLOCKSIZE : BP_GET_PSIZE(bp)));
+	uint64_t size = bp ? BP_GET_PSIZE(bp) : zio->io_size;
 	uint64_t offset = zio->io_offset;
 	abd_t *data = zio->io_abd;
 	spa_t *spa = zio->io_spa;
 
+	if (bp && BP_IS_GANG(bp)) {
+		if (spa_feature_is_active(spa, SPA_FEATURE_DYNAMIC_GANG_HEADER))
+			size = zio->io_size;
+		else
+			size = SPA_OLD_GANGBLOCKSIZE;
+	}
+
 	error = zio_checksum_error_impl(spa, bp, checksum, data, size,
 	    offset, info);
+	if (error && bp && BP_IS_GANG(bp) && size > SPA_OLD_GANGBLOCKSIZE) {
+		/*
+		 * It's possible that this is an old gang block. Rerun
+		 * the checksum with the old size; if that passes, then
+		 * update the gangblocksize appropriately.
+		 */
+		error = zio_checksum_error_impl(spa, bp, checksum, data,
+		    SPA_OLD_GANGBLOCKSIZE, offset, info);
+		if (error == 0) {
+			ASSERT3U(zio->io_child_type, ==, ZIO_CHILD_VDEV);
+			zio_t *pio;
+			for (pio = zio_unique_parent(zio);
+			    pio->io_child_type != ZIO_CHILD_GANG;
+			    pio = zio_unique_parent(pio))
+				;
+			zio_gang_node_t *gn = pio->io_private;
+			gn->gn_gangblocksize = SPA_OLD_GANGBLOCKSIZE;
+		}
+	}
 
 	if (zio_injection_enabled && error == 0 && zio->io_error == 0) {
 		error = zio_handle_fault_injection(zio, ECKSUM);

@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -66,7 +67,7 @@ function zpool_split #disk_to_be_offline/online
 	# Create 2G of additional data
 	mntpnt=$(get_prop mountpoint $TESTPOOL)
 	log_must file_write -b 2097152 -c 1024 -o create -d 0 -f $mntpnt/biggerfile
-	log_must sync
+	sync_all_pools
 
 	# temporarily prevent resilvering progress, so it will not finish too early
 	log_must set_tunable32 SCAN_SUSPEND_PROGRESS 1

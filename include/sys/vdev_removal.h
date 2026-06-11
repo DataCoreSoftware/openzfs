@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -35,7 +36,7 @@ typedef struct spa_vdev_removal {
 	/* Thread performing a vdev removal. */
 	kthread_t	*svr_thread;
 	/* Segments left to copy from the current metaslab. */
-	range_tree_t	*svr_allocd_segs;
+	zfs_range_tree_t	*svr_allocd_segs;
 	kmutex_t	svr_lock;
 	kcondvar_t	svr_cv;
 	boolean_t	svr_thread_exit;
@@ -49,7 +50,7 @@ typedef struct spa_vdev_removal {
 	 * Ranges that were freed while a mapping was in flight.  This is
 	 * a subset of the ranges covered by vdev_im_new_segments.
 	 */
-	range_tree_t	*svr_frees[TXG_SIZE];
+	zfs_range_tree_t	*svr_frees[TXG_SIZE];
 
 	/*
 	 * Number of bytes which we have finished our work for
@@ -87,7 +88,7 @@ extern int spa_vdev_remove_cancel(spa_t *);
 extern void spa_vdev_removal_destroy(spa_vdev_removal_t *);
 extern uint64_t spa_remove_max_segment(spa_t *);
 
-extern int vdev_removal_max_span;
+extern uint_t vdev_removal_max_span;
 
 #ifdef	__cplusplus
 }

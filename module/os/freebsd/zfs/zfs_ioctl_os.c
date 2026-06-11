@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2020 iXsystems, Inc.
  * All rights reserved.
@@ -25,9 +26,6 @@
  *
  */
 
-#include <sys/cdefs.h>
-__FBSDID("$FreeBSD$");
-
 #include <sys/types.h>
 #include <sys/errno.h>
 #include <sys/nvpair.h>
@@ -38,10 +36,6 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_pageout.h>
 
 #include <sys/zfs_ioctl_impl.h>
-
-#if __FreeBSD_version < 1201517
-#define	vm_page_max_user_wired	vm_page_max_wired
-#endif
 
 int
 zfs_vfs_ref(zfsvfs_t **zfvp)
@@ -59,7 +53,7 @@ zfs_vfs_ref(zfsvfs_t **zfvp)
 	return (error);
 }
 
-int
+boolean_t
 zfs_vfs_held(zfsvfs_t *zfsvfs)
 {
 	return (zfsvfs->z_vfs != NULL);
@@ -99,7 +93,7 @@ zfs_ioc_nextboot(const char *unused, nvlist_t *innvl, nvlist_t *outnvl)
 	char name[MAXNAMELEN];
 	spa_t *spa;
 	vdev_t *vd;
-	char *command;
+	const char *command;
 	uint64_t pool_guid;
 	uint64_t vdev_guid;
 	int error;
@@ -114,11 +108,11 @@ zfs_ioc_nextboot(const char *unused, nvlist_t *innvl, nvlist_t *outnvl)
 	    "command", &command) != 0)
 		return (EINVAL);
 
-	mutex_enter(&spa_namespace_lock);
+	spa_namespace_enter(FTAG);
 	spa = spa_by_guid(pool_guid, vdev_guid);
 	if (spa != NULL)
 		strcpy(name, spa_name(spa));
-	mutex_exit(&spa_namespace_lock);
+	spa_namespace_exit(FTAG);
 	if (spa == NULL)
 		return (ENOENT);
 

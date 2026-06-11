@@ -28,6 +28,7 @@
  * Copyright (c) 2017 Open-E, Inc. All Rights Reserved.
  * Copyright (c) 2017, Intel Corporation.
  * Copyright (c) 2018, loli10K <ezomori.nozomu@gmail.com>
+ * Copyright (c) 2017, Jorgen Lundman <lundman@lundman.net>
  * Portions Copyright 2022 Andrew Innes <andrew.c12@gmail.com>
  */
 
@@ -438,7 +439,8 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
 	if (start_block == MAXOFFSET_T)
 		start_block = NEW_START_BLOCK;
 	slice_size -= start_block;
-	slice_size = P2ALIGN(slice_size, PARTITION_END_ALIGNMENT);
+	slice_size = P2ALIGN_TYPED(slice_size, PARTITION_END_ALIGNMENT,
+	    uint64_t);
 
 	vtoc->efi_parts[0].p_start = start_block;
 	vtoc->efi_parts[0].p_size = slice_size;

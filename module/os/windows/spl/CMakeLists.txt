@@ -1,14 +1,6 @@
 
 use_clang()
 
-file(GLOB CSOURCES CONFIGURE_DEPENDS "*.c")
-
-list(REMOVE_ITEM CSOURCES "${CMAKE_CURRENT_SOURCE_DIR}/spl-wmsum.c")
-
-set(TMH_FILE_LIST "")
-tmh_generation("${CSOURCES}" TMH_FILE_LIST)
-message(STATUS "SPLKERN:- ${TMH_FILE_LIST}")
-
 wdk_add_library(splkern
   spl-atomic.c
   spl-condvar.c
@@ -37,43 +29,73 @@ wdk_add_library(splkern
   spl-vnode.c
   spl-windows.c
   spl-xdr.c
-  ${TMH_FILE_LIST}
 )
 
-target_include_directories(splkern BEFORE PUBLIC "${CMAKE_SOURCE_DIR}/include/os/windows/" PUBLIC "${CMAKE_SOURCE_DIR}/include/os/windows/spl")
-# set(CMAKE_TOOLCHAIN_FILE $ENV{CMAKE_TOOLCHAIN_FILE})
-
-find_program(MSVC_CL_EXECUTABLE cl.exe)
-if(NOT MSVC_CL_EXECUTABLE)
-    message(FATAL_ERROR "MSVC_CL_EXECUTABLE is not set! Make sure to run CMake with a configured compiler.")
-else()
-    message(STATUS "MSVC_CL_EXECUTABLE is set to: ${MSVC_CL_EXECUTABLE}")
-endif()
-
-find_program(MSVC_LIB_EXECUTABLE lib.exe)
-if(NOT MSVC_LIB_EXECUTABLE)
-    message(FATAL_ERROR "MSVC lib.exe not found in PATH. Ensure you're using Visual Studio Command Prompt or MSVC toolchain.")
-else()
-message(STATUS "MSVC_LIB_EXECUTABLE is set to: ${MSVC_LIB_EXECUTABLE}")
-endif()
-
-set(CR_WRAPPERS_DIR "${CMAKE_BINARY_DIR}/module/os/windows/spl")
-file(MAKE_DIRECTORY "${CR_WRAPPERS_DIR}")
-
-set(CR_WRAPPERS_OBJ "${CR_WRAPPERS_DIR}/spl_cr_wrappers.obj")
-set(CR_WRAPPERS_LIB "${CR_WRAPPERS_DIR}/spl_cr_wrappers.lib")
-
-add_custom_command(
-    OUTPUT ${CR_WRAPPERS_LIB}
-    COMMAND ${MSVC_CL_EXECUTABLE} /nologo /c /Fo"${CR_WRAPPERS_OBJ}" ${CMAKE_SOURCE_DIR}/module/os/windows/spl/spl_cr_wrappers.c
-    COMMAND ${MSVC_LIB_EXECUTABLE} /nologo /OUT:${CR_WRAPPERS_LIB} /MACHINE:x64 ${CR_WRAPPERS_OBJ}
-    WORKING_DIRECTORY ${CR_WRAPPERS_DIR}
-    DEPENDS ${CMAKE_SOURCE_DIR}/module/os/windows/spl/spl_cr_wrappers.c
-    COMMENT "Building ${CR_WRAPPERS_LIB} in ${CR_WRAPPERS_DIR} using MSVC"
-)
-
-add_custom_target(cr_wrappers ALL DEPENDS ${CR_WRAPPERS_LIB})
+# spl_cr_wrappers uses MSVC-specific __readcr8() intrinsic, incompatible with clang.
+# Use the prebuilt .lib.
 add_library(spl_cr_wrappers STATIC IMPORTED GLOBAL)
 set_target_properties(spl_cr_wrappers PROPERTIES
-    IMPORTED_LOCATION ${CR_WRAPPERS_LIB})
+    IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/spl_cr_wrappers.lib")
 
+# set(CMAKE_TOOLCHAIN_FILE $ENV{CMAKE_TOOLCHAIN_FILE})
+
+target_include_directories(splkern BEFORE PUBLIC "${CMAKE_SOURCE_DIR}/include/os/windows/" PUBLIC "${CMAKE_SOURCE_DIR}/include/os/windows/spl")
+
+file(GLOB CSOURCES CONFIGURE_DEPENDS "*.c")
+
+list(REMOVE_ITEM CSOURCES "${CMAKE_CURRENT_SOURCE_DIR}/spl-wmsum.c")
+
+function(add_macro_property)
+        foreach (I ${CSOURCES})
+                get_filename_component(OUTPUT_FILE_WE ${I} NAME_WE)
+                set_source_files_properties(${I} PROPERTIES COMPILE_FLAGS -DWPPFILE=${CMAKE_SOURCE_DIR}/out/build/${OUTPUT_FILE_WE}.tmh)
+                message(STATUS "FILES_IN ======: ${CMAKE_SOURCE_DIR}/out/build/${OUTPUT_FILE_WE}.tmh") 
+        endforeach()
+endfunction()
+
+function(tracewppYYY OUTPUT_DIR SOURCE)
+        # [mlr] list of .tmh files to be generated -> TMH
+        set(WPP_DIR "${WDK_ROOT}/bin/${WDK_VERSION}")
+
+        get_filename_component(FILEN ${SOURCE} NAME)
+        set(TMH_FILEN ${FILEN}.tmh)
+        set(TMH ${OUTPUT_DIR}/${TMH_FILEN})
+        set(EXTENSIONS ".c")
+
+        # [mlr] cmake only converts the command name to the native path format. the
+        # path names to be used in arguments must be converted manually.
+
+        file(TO_NATIVE_PATH ${SOURCE} NATIVE_SOURCE)
+        file(TO_NATIVE_PATH ${WPP_DIR} NATIVE_WPP_DIR)
+        file(TO_NATIVE_PATH ${OUTPUT_DIR} NATIVE_OUTPUT_DIR)
+
+        # [mlr] note that if -preserveext: occurs after the source file specification, it has
+        # no effect.
+
+        set(TRACE "TraceEvent{FLAGS=MYDRIVER_ALL_INFO}(LEVEL, MSG, ...)")
+        set(CFGDIR "${WPP_DIR}/wppconfig/rev1")
+        set(SCAN "${WDK_ROOT}/Include/wdf/kmdf/1.9/WdfTraceEnums.h")
+        set(WPP_MACRO "WPP_INLINE __inline")
+
+        execute_process(COMMAND "${NATIVE_WPP_DIR}/${WDK_PLATFORM}/tracewpp.exe"
+ -scan:${SCAN} /D${WPP_MACRO}
+ -cfgdir:${CFGDIR} -I${CMAKE_CURRENT_BINARY_DIR} -odir:${NATIVE_OUTPUT_DIR} -km -func:${TRACE}
+ -gen:{km-default.tpl}*.tmh ${NATIVE_SOURCE})
+
+endfunction()
+
+
+function(wpp OUTPUT_DIR)
+
+        add_macro_property()
+        # [mlr] invoke tracewpp() for each source file, adding the resulting file to a list
+        # named TMH.
+        message(STATUS "OUTPUT_DIR ======: ${OUTPUT_DIR}")
+
+        foreach ( I ${CSOURCES} )
+                tracewpp(${OUTPUT_DIR} ${I})
+        endforeach()
+
+endfunction()
+
+wpp("${CMAKE_SOURCE_DIR}/out/build")

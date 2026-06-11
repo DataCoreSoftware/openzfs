@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -183,7 +184,7 @@ spa_features_check(spa_t *spa, boolean_t for_write,
 	char *buf;
 
 	zc = kmem_alloc(sizeof (zap_cursor_t), KM_SLEEP);
-	za = kmem_alloc(sizeof (zap_attribute_t), KM_SLEEP);
+	za = zap_attribute_alloc();
 	buf = kmem_alloc(MAXPATHLEN, KM_SLEEP);
 
 	supported = B_TRUE;
@@ -209,15 +210,15 @@ spa_features_check(spa_t *spa, boolean_t for_write,
 				    za->za_name, 1, MAXPATHLEN, buf) == 0)
 					desc = buf;
 
-				VERIFY(nvlist_add_string(unsup_feat,
-				    za->za_name, desc) == 0);
+				VERIFY0(nvlist_add_string(unsup_feat,
+				    za->za_name, desc));
 			}
 		}
 	}
 	zap_cursor_fini(zc);
 
 	kmem_free(buf, MAXPATHLEN);
-	kmem_free(za, sizeof (zap_attribute_t));
+	zap_attribute_free(za);
 	kmem_free(zc, sizeof (zap_cursor_t));
 
 	return (supported);
@@ -308,6 +309,7 @@ feature_sync(spa_t *spa, zfeature_info_t *feature, uint64_t refcount,
 	ASSERT(VALID_FEATURE_OR_NONE(feature->fi_feature));
 	uint64_t zapobj = (feature->fi_flags & ZFEATURE_FLAG_READONLY_COMPAT) ?
 	    spa->spa_feat_for_write_obj : spa->spa_feat_for_read_obj;
+	ASSERT(MUTEX_HELD(&spa->spa_feat_stats_lock));
 	VERIFY0(zap_update(spa->spa_meta_objset, zapobj, feature->fi_guid,
 	    sizeof (uint64_t), 1, &refcount, tx));
 
@@ -360,7 +362,9 @@ feature_enable_sync(spa_t *spa, zfeature_info_t *feature, dmu_tx_t *tx)
 	    feature->fi_guid, 1, strlen(feature->fi_desc) + 1,
 	    feature->fi_desc, tx));
 
+	mutex_enter(&spa->spa_feat_stats_lock);
 	feature_sync(spa, feature, initial_refcount, tx);
+	mutex_exit(&spa->spa_feat_stats_lock);
 
 	if (spa_feature_is_enabled(spa, SPA_FEATURE_ENABLED_TXG)) {
 		uint64_t enabling_txg = dmu_tx_get_txg(tx);
@@ -390,6 +394,13 @@ feature_enable_sync(spa_t *spa, zfeature_info_t *feature, dmu_tx_t *tx)
 	    !spa_feature_is_active(spa, SPA_FEATURE_ENCRYPTION) &&
 	    feature->fi_feature == SPA_FEATURE_BOOKMARK_V2)
 		spa->spa_errata = 0;
+
+	/*
+	 * Convert the old on-disk error log to the new format when activating
+	 * the head_errlog feature.
+	 */
+	if (feature->fi_feature == SPA_FEATURE_HEAD_ERRLOG)
+		spa_upgrade_errlog(spa, tx);
 }
 
 static void
@@ -409,6 +420,7 @@ feature_do_action(spa_t *spa, spa_feature_t fid, feature_action_t action,
 	ASSERT(dmu_tx_is_syncing(tx));
 	ASSERT3U(spa_version(spa), >=, SPA_VERSION_FEATURES);
 
+	mutex_enter(&spa->spa_feat_stats_lock);
 	VERIFY3U(feature_get_refcount(spa, feature, &refcount), !=, ENOTSUP);
 
 	switch (action) {
@@ -426,6 +438,7 @@ feature_do_action(spa_t *spa, spa_feature_t fid, feature_action_t action,
 	}
 
 	feature_sync(spa, feature, refcount, tx);
+	mutex_exit(&spa->spa_feat_stats_lock);
 }
 
 void

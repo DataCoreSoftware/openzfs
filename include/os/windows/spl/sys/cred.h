@@ -31,21 +31,15 @@
 #include <sys/types.h>
 #include <sys/vfs.h>
 
-struct ucred; // fixme
-typedef struct ucred cred_t;
+typedef struct cred {
+	uid_t	cr_uid;		/* effective user id */
+	gid_t	cr_gid;		/* effective group id */
+} cred_t;
 
 #define	kcred	(cred_t *)NULL
 #define	CRED()	(cred_t *)NULL
 #define	KUID_TO_SUID(x)	(x)
 #define	KGID_TO_SGID(x)	(x)
-
-// Older OSX API
-#if !(MAC_OS_X_VERSION_MIN_REQUIRED >= 1070)
-#define	kauth_cred_getruid(x) (x)->cr_ruid
-#define	kauth_cred_getrgid(x) (x)->cr_rgid
-#define	kauth_cred_getsvuid(x) (x)->cr_svuid
-#define	kauth_cred_getsvgid(x) (x)->cr_svgid
-#endif
 
 extern void crhold(cred_t *cr);
 extern void crfree(cred_t *cr);
@@ -63,5 +57,15 @@ extern void crgetgroupsfree(gid_t *gids);
 extern int spl_cred_ismember_gid(cred_t *cr, gid_t gid);
 
 #define	crgetsid(cred, i)	(NULL)
+
+/*
+ * SID-to-POSIX uid/gid mapping and caller-identity helpers.
+ * Implemented in spl-cred.c; callers that need the full SID definition
+ * must include <Ntifs.h> before this header (or use the opaque pointer).
+ */
+extern uid_t spl_sid_to_uid(struct _SID *sid);
+extern gid_t spl_sid_to_gid(struct _SID *sid);
+extern uid_t spl_get_caller_uid(void);
+extern gid_t spl_get_caller_gid(void);
 
 #endif  /* _SPL_CRED_H */

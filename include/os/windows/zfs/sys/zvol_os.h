@@ -18,6 +18,9 @@
  *
  * CDDL HEADER END
  */
+
+/* Copyright (c) 2015 Jorgen Lundman <lundman@lundman.net> */
+
 #ifndef _SYS_ZVOL_OS_h
 #define	_SYS_ZVOL_OS_h
 
@@ -69,7 +72,7 @@ extern int zvolRegisterDevice(zvol_state_t *zv);
 
 extern int zvolRenameDevice(zvol_state_t *zv);
 extern int zvolSetVolsize(zvol_state_t *zv);
-extern void zvol_os_attach(char *name);
+extern void zvol_os_attach(const char *name);
 extern void zvol_os_detach_zv(zvol_state_t *zv);
 extern void zvol_os_detach(char *name);
 

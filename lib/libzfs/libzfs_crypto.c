@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -18,7 +19,6 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-#include <sys/zfs_context.h>
 #include <sys/fs/zfs.h>
 #include <sys/dsl_crypt.h>
 #include <libintl.h>
@@ -37,8 +37,13 @@
 #include <curl/curl.h>
 #endif
 #include <libzfs.h>
+#include <libzutil.h>
 #include "libzfs_impl.h"
 #include "zfeature_common.h"
+
+#ifdef _WIN32
+#include <wfunopen.h>
+#endif
 
 /*
  * User keys are used to decrypt the master encryption keys of a dataset. This
@@ -210,7 +215,7 @@ get_format_prompt_string(zfs_keyformat_t format)
 /* do basic validation of the key material */
 static int
 validate_key(libzfs_handle_t *hdl, zfs_keyformat_t keyformat,
-    const char *key, size_t keylen)
+    const char *key, size_t keylen, boolean_t do_verify)
 {
 	switch (keyformat) {
 	case ZFS_KEYFORMAT_RAW:
@@ -255,7 +260,12 @@ validate_key(libzfs_handle_t *hdl, zfs_keyformat_t keyformat,
 		}
 		break;
 	case ZFS_KEYFORMAT_PASSPHRASE:
-		/* verify the length is within bounds */
+		/*
+		 * Verify the length is within bounds when setting a new key,
+		 * but not when loading an existing key.
+		 */
+		if (!do_verify)
+			break;
 		if (keylen > MAX_PASSPHRASE_LEN) {
 			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 			    "Passphrase too long (max %u)."),
@@ -390,7 +400,8 @@ get_key_interactive(libzfs_handle_t *restrict hdl, const char *fsname,
 	if (!confirm_key)
 		goto out;
 
-	if ((ret = validate_key(hdl, keyformat, buf, buflen)) != 0) {
+	if ((ret = validate_key(hdl, keyformat, buf, buflen, confirm_key)) !=
+	    0) {
 		free(buf);
 		return (ret);
 	}
@@ -486,6 +497,7 @@ get_key_material_file(libzfs_handle_t *hdl, const char *uri,
     const char *fsname, zfs_keyformat_t keyformat, boolean_t newkey,
     uint8_t **restrict buf, size_t *restrict len_out)
 {
+	(void) fsname, (void) newkey;
 	FILE *f = NULL;
 	int ret = 0;
 
@@ -496,7 +508,7 @@ get_key_material_file(libzfs_handle_t *hdl, const char *uri,
 		ret = errno;
 		errno = 0;
 		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "Failed to open key material file"));
+		    "Failed to open key material file: %s"), zfs_strerror(ret));
 		return (ret);
 	}
 
@@ -512,6 +524,7 @@ get_key_material_https(libzfs_handle_t *hdl, const char *uri,
     const char *fsname, zfs_keyformat_t keyformat, boolean_t newkey,
     uint8_t **restrict buf, size_t *restrict len_out)
 {
+	(void) fsname, (void) newkey;
 	int ret = 0;
 	FILE *key = NULL;
 	boolean_t is_http = strncmp(uri, "http:", strlen("http:")) == 0;
@@ -584,7 +597,7 @@ get_key_material_https(libzfs_handle_t *hdl, const char *uri,
 		goto end;
 	}
 
-	int kfd = -1;
+	int kfd;
 #ifdef O_TMPFILE
 	kfd = open(getenv("TMPDIR") ?: "/tmp",
 	    O_RDWR | O_TMPFILE | O_EXCL | O_CLOEXEC, 0600);
@@ -597,7 +610,7 @@ get_key_material_https(libzfs_handle_t *hdl, const char *uri,
 	    "%s/libzfs-XXXXXXXX.https", getenv("TMPDIR") ?: "/tmp") == -1) {
 		ret = ENOMEM;
 		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "%s"),
-		    strerror(ret));
+		    zfs_strerror(ret));
 		goto end;
 	}
 
@@ -606,20 +619,21 @@ get_key_material_https(libzfs_handle_t *hdl, const char *uri,
 		ret = errno;
 		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 		    "Couldn't create temporary file %s: %s"),
-		    path, strerror(ret));
+		    path, zfs_strerror(ret));
 		free(path);
 		goto end;
 	}
 	(void) unlink(path);
 	free(path);
 
+#ifdef O_TMPFILE
 kfdok:
+#endif
 	if ((key = fdopen(kfd, "r+")) == NULL) {
 		ret = errno;
-		free(path);
 		(void) close(kfd);
 		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "Couldn't reopen temporary file: %s"), strerror(ret));
+		    "Couldn't reopen temporary file: %s"), zfs_strerror(ret));
 		goto end;
 	}
 
@@ -687,7 +701,7 @@ end:
  */
 static int
 get_key_material(libzfs_handle_t *hdl, boolean_t do_verify, boolean_t newkey,
-    zfs_keyformat_t keyformat, char *keylocation, const char *fsname,
+    zfs_keyformat_t keyformat, const char *keylocation, const char *fsname,
     uint8_t **km_out, size_t *kmlen_out, boolean_t *can_retry_out)
 {
 	int ret;
@@ -750,7 +764,8 @@ get_key_material(libzfs_handle_t *hdl, boolean_t do_verify, boolean_t newkey,
 		goto error;
 	}
 
-	if ((ret = validate_key(hdl, keyformat, (const char *)km, kmlen)) != 0)
+	if ((ret = validate_key(hdl, keyformat, (const char *)km, kmlen,
+	    do_verify)) != 0)
 		goto error;
 
 	*km_out = km;
@@ -776,7 +791,7 @@ error:
 
 static int
 derive_key(libzfs_handle_t *hdl, zfs_keyformat_t format, uint64_t iters,
-    uint8_t *key_material, size_t key_material_len, uint64_t salt,
+    uint8_t *key_material, uint64_t salt,
     uint8_t **key_out)
 {
 	int ret;
@@ -785,12 +800,10 @@ derive_key(libzfs_handle_t *hdl, zfs_keyformat_t format, uint64_t iters,
 	*key_out = NULL;
 
 	key = zfs_alloc(hdl, WRAPPING_KEY_LEN);
-	if (!key)
-		return (ENOMEM);
 
 	switch (format) {
 	case ZFS_KEYFORMAT_RAW:
-		bcopy(key_material, key, WRAPPING_KEY_LEN);
+		memcpy(key, key_material, WRAPPING_KEY_LEN);
 		break;
 	case ZFS_KEYFORMAT_HEX:
 		ret = hex_key_to_raw((char *)key_material,
@@ -853,7 +866,8 @@ encryption_feature_is_enabled(zpool_handle_t *zph)
 static int
 populate_create_encryption_params_nvlists(libzfs_handle_t *hdl,
     zfs_handle_t *zhp, boolean_t newkey, zfs_keyformat_t keyformat,
-    char *keylocation, nvlist_t *props, uint8_t **wkeydata, uint_t *wkeylen)
+    const char *keylocation, nvlist_t *props, uint8_t **wkeydata,
+    uint_t *wkeylen)
 {
 	int ret;
 	uint64_t iters = 0, salt = 0;
@@ -919,8 +933,7 @@ populate_create_encryption_params_nvlists(libzfs_handle_t *hdl,
 	}
 
 	/* derive a key from the key material */
-	ret = derive_key(hdl, keyformat, iters, key_material, key_material_len,
-	    salt, &key_data);
+	ret = derive_key(hdl, keyformat, iters, key_material, salt, &key_data);
 	if (ret != 0)
 		goto error;
 
@@ -946,7 +959,7 @@ proplist_has_encryption_props(nvlist_t *props)
 {
 	int ret;
 	uint64_t intval;
-	char *strval;
+	const char *strval;
 
 	ret = nvlist_lookup_uint64(props,
 	    zfs_prop_to_name(ZFS_PROP_ENCRYPTION), &intval);
@@ -1008,10 +1021,10 @@ zfs_crypto_create(libzfs_handle_t *hdl, char *parent_name, nvlist_t *props,
     uint_t *wkeylen_out)
 {
 	int ret;
-	char errbuf[1024];
+	char errbuf[ERRBUFLEN];
 	uint64_t crypt = ZIO_CRYPT_INHERIT, pcrypt = ZIO_CRYPT_INHERIT;
 	uint64_t keyformat = ZFS_KEYFORMAT_NONE;
-	char *keylocation = NULL;
+	const char *keylocation = NULL;
 	zfs_handle_t *pzhp = NULL;
 	uint8_t *wkeydata = NULL;
 	uint_t wkeylen = 0;
@@ -1126,7 +1139,7 @@ zfs_crypto_create(libzfs_handle_t *hdl, char *parent_name, nvlist_t *props,
 
 	/* default to prompt if no keylocation is specified */
 	if (keyformat != ZFS_KEYFORMAT_NONE && keylocation == NULL) {
-		keylocation = "prompt";
+		keylocation = (char *)"prompt";
 		ret = nvlist_add_string(props,
 		    zfs_prop_to_name(ZFS_PROP_KEYLOCATION), keylocation);
 		if (ret != 0)
@@ -1178,7 +1191,8 @@ int
 zfs_crypto_clone_check(libzfs_handle_t *hdl, zfs_handle_t *origin_zhp,
     char *parent_name, nvlist_t *props)
 {
-	char errbuf[1024];
+	(void) origin_zhp, (void) parent_name;
+	char errbuf[ERRBUFLEN];
 
 	(void) snprintf(errbuf, sizeof (errbuf),
 	    dgettext(TEXT_DOMAIN, "Encryption clone error"));
@@ -1229,7 +1243,7 @@ load_keys_cb(zfs_handle_t *zhp, void *arg)
 		cb->cb_numfailed++;
 
 out:
-	(void) zfs_iter_filesystems(zhp, load_keys_cb, cb);
+	(void) zfs_iter_filesystems_v2(zhp, 0, load_keys_cb, cb);
 	zfs_close(zhp);
 
 	/* always return 0, since this function is best effort */
@@ -1241,7 +1255,7 @@ out:
  * filesystem and all of its children.
  */
 int
-zfs_crypto_attempt_load_keys(libzfs_handle_t *hdl, char *fsname)
+zfs_crypto_attempt_load_keys(libzfs_handle_t *hdl, const char *fsname)
 {
 	int ret;
 	zfs_handle_t *zhp = NULL;
@@ -1276,15 +1290,16 @@ error:
 }
 
 int
-zfs_crypto_load_key(zfs_handle_t *zhp, boolean_t noop, char *alt_keylocation)
+zfs_crypto_load_key(zfs_handle_t *zhp, boolean_t noop,
+    const char *alt_keylocation)
 {
 	int ret, attempts = 0;
-	char errbuf[1024];
+	char errbuf[ERRBUFLEN];
 	uint64_t keystatus, iters = 0, salt = 0;
 	uint64_t keyformat = ZFS_KEYFORMAT_NONE;
 	char prop_keylocation[MAXNAMELEN];
 	char prop_encroot[MAXNAMELEN];
-	char *keylocation = NULL;
+	const char *keylocation = NULL;
 	uint8_t *key_material = NULL, *key_data = NULL;
 	size_t key_material_len;
 	boolean_t is_encroot, can_retry = B_FALSE, correctible = B_FALSE;
@@ -1375,8 +1390,8 @@ try_again:
 		goto error;
 
 	/* derive a key from the key material */
-	ret = derive_key(zhp->zfs_hdl, keyformat, iters, key_material,
-	    key_material_len, salt, &key_data);
+	ret = derive_key(zhp->zfs_hdl, keyformat, iters, key_material, salt,
+	    &key_data);
 	if (ret != 0)
 		goto error;
 
@@ -1407,6 +1422,11 @@ try_again:
 			correctible = B_TRUE;
 			zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
 			    "Incorrect key provided for '%s'."),
+			    zfs_get_name(zhp));
+			break;
+		case ZFS_ERR_CRYPTO_NOTSUP:
+			zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
+			    "'%s' uses an unsupported encryption suite."),
 			    zfs_get_name(zhp));
 			break;
 		}
@@ -1444,10 +1464,155 @@ error:
 }
 
 int
+zfs_crypto_load_key_direct(zfs_handle_t *zhp, boolean_t noop,
+    const char *pass, size_t passlen)
+{
+	int ret;
+	char errbuf[ERRBUFLEN];
+	uint64_t keystatus, iters = 0, salt = 0;
+	uint64_t keyformat = ZFS_KEYFORMAT_NONE;
+	char prop_encroot[MAXNAMELEN];
+	uint8_t *key_material = NULL, *key_data = NULL;
+	size_t key_material_len;
+	boolean_t is_encroot, correctible = B_FALSE;
+
+	(void) snprintf(errbuf, sizeof (errbuf),
+	    dgettext(TEXT_DOMAIN, "Key load error"));
+
+	/* check that encryption is enabled for the pool */
+	if (!encryption_feature_is_enabled(zhp->zpool_hdl)) {
+		zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
+		    "Encryption feature not enabled."));
+		ret = EINVAL;
+		goto error;
+	}
+
+	/* Fetch the keyformat. Check that the dataset is encrypted. */
+	keyformat = zfs_prop_get_int(zhp, ZFS_PROP_KEYFORMAT);
+	if (keyformat == ZFS_KEYFORMAT_NONE) {
+		zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
+		    "'%s' is not encrypted."), zfs_get_name(zhp));
+		ret = EINVAL;
+		goto error;
+	}
+
+	/*
+	 * Fetch the key location. Check that we are working with an
+	 * encryption root.
+	 */
+	ret = zfs_crypto_get_encryption_root(zhp, &is_encroot, prop_encroot);
+	if (ret != 0) {
+		zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
+		    "Failed to get encryption root for '%s'."),
+		    zfs_get_name(zhp));
+		goto error;
+	} else if (!is_encroot) {
+		zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
+		    "Keys must be loaded for encryption root of '%s' (%s)."),
+		    zfs_get_name(zhp), prop_encroot);
+		ret = EINVAL;
+		goto error;
+	}
+
+	/* check that the key is unloaded unless this is a noop */
+	if (!noop) {
+		keystatus = zfs_prop_get_int(zhp, ZFS_PROP_KEYSTATUS);
+		if (keystatus == ZFS_KEYSTATUS_AVAILABLE) {
+			zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
+			    "Key already loaded for '%s'."), zfs_get_name(zhp));
+			ret = EEXIST;
+			goto error;
+		}
+	}
+
+	/* passphrase formats require a salt and pbkdf2_iters property */
+	if (keyformat == ZFS_KEYFORMAT_PASSPHRASE) {
+		salt = zfs_prop_get_int(zhp, ZFS_PROP_PBKDF2_SALT);
+		iters = zfs_prop_get_int(zhp, ZFS_PROP_PBKDF2_ITERS);
+	}
+
+	key_material = malloc(passlen + 1);
+	if (!key_material) {
+		ret = ENOMEM;
+		goto error;
+	}
+
+	memset(key_material, 0, passlen + 1);
+	memcpy(key_material, pass, passlen);
+
+	/* fetching and deriving the key are correctable errors. set the flag */
+	correctible = B_TRUE;
+
+	/* derive a key from the key material */
+	ret = derive_key(zhp->zfs_hdl, keyformat, iters, key_material, salt,
+	    &key_data);
+	if (ret != 0)
+		goto error;
+
+	correctible = B_FALSE;
+
+	/* pass the wrapping key and noop flag to the ioctl */
+	ret = lzc_load_key(zhp->zfs_name, noop, key_data, WRAPPING_KEY_LEN);
+	if (ret != 0) {
+		switch (ret) {
+		case EPERM:
+			zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
+			    "Permission denied."));
+			break;
+		case EINVAL:
+			zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
+			    "Invalid parameters provided for dataset %s."),
+			    zfs_get_name(zhp));
+			break;
+		case EEXIST:
+			zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
+			    "Key already loaded for '%s'."), zfs_get_name(zhp));
+			break;
+		case EBUSY:
+			zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
+			    "'%s' is busy."), zfs_get_name(zhp));
+			break;
+		case EACCES:
+			correctible = B_TRUE;
+			zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
+			    "Incorrect key provided for '%s'."),
+			    zfs_get_name(zhp));
+			break;
+		case ZFS_ERR_CRYPTO_NOTSUP:
+			zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
+			    "'%s' uses an unsupported encryption suite."),
+			    zfs_get_name(zhp));
+			break;
+		}
+		goto error;
+	}
+
+	memset(key_material, 0, passlen + 1);
+
+	free(key_material);
+	free(key_data);
+
+	return (0);
+
+error:
+	zfs_error(zhp->zfs_hdl, EZFS_CRYPTOFAILED, errbuf);
+	if (key_material != NULL) {
+		free(key_material);
+		key_material = NULL;
+	}
+	if (key_data != NULL) {
+		free(key_data);
+		key_data = NULL;
+	}
+
+	return (ret);
+}
+
+int
 zfs_crypto_unload_key(zfs_handle_t *zhp)
 {
 	int ret;
-	char errbuf[1024];
+	char errbuf[ERRBUFLEN];
 	char prop_encroot[MAXNAMELEN];
 	uint64_t keystatus, keyformat;
 	boolean_t is_encroot;
@@ -1583,7 +1748,7 @@ int
 zfs_crypto_rewrap(zfs_handle_t *zhp, nvlist_t *raw_props, boolean_t inheritkey)
 {
 	int ret;
-	char errbuf[1024];
+	char errbuf[ERRBUFLEN];
 	boolean_t is_encroot;
 	nvlist_t *props = NULL;
 	uint8_t *wkeydata = NULL;
@@ -1592,7 +1757,7 @@ zfs_crypto_rewrap(zfs_handle_t *zhp, nvlist_t *raw_props, boolean_t inheritkey)
 	uint64_t crypt, pcrypt, keystatus, pkeystatus;
 	uint64_t keyformat = ZFS_KEYFORMAT_NONE;
 	zfs_handle_t *pzhp = NULL;
-	char *keylocation = NULL;
+	const char *keylocation = NULL;
 	char origin_name[MAXNAMELEN];
 	char prop_keylocation[MAXNAMELEN];
 	char parent_name[ZFS_MAX_DATASET_NAME_LEN];
@@ -1812,4 +1977,15 @@ error:
 
 	zfs_error(zhp->zfs_hdl, EZFS_CRYPTOFAILED, errbuf);
 	return (ret);
+}
+
+boolean_t
+zfs_is_encrypted(zfs_handle_t *zhp)
+{
+	uint8_t flags = zhp->zfs_dmustats.dds_flags;
+
+	if (flags & DDS_FLAG_HAS_ENCRYPTED)
+		return ((flags & DDS_FLAG_ENCRYPTED) != 0);
+
+	return (zfs_prop_get_int(zhp, ZFS_PROP_ENCRYPTION) != ZIO_CRYPT_OFF);
 }

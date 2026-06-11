@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2007 Pawel Jakub Dawidek <pjd@FreeBSD.org>
  * All rights reserved.
@@ -57,7 +58,9 @@ extern uint64_t atomic_cas_64(volatile uint64_t *target, uint64_t cmp,
     uint64_t newval);
 #endif
 
-#define	membar_producer	atomic_thread_fence_rel
+#define	membar_consumer()		atomic_thread_fence_acq()
+#define	membar_producer()		atomic_thread_fence_rel()
+#define	membar_sync()			atomic_thread_fence_seq_cst()
 
 static __inline uint32_t
 atomic_add_32_nv(volatile uint32_t *target, int32_t delta)
@@ -165,7 +168,7 @@ atomic_dec_64_nv(volatile uint64_t *target)
 	return (atomic_add_64_nv(target, -1));
 }
 
-#if !defined(COMPAT_32BIT) && defined(__LP64__)
+#ifdef __LP64__
 static __inline void *
 atomic_cas_ptr(volatile void *target, void *cmp,  void *newval)
 {
@@ -179,7 +182,7 @@ atomic_cas_ptr(volatile void *target, void *cmp,  void *newval)
 	return ((void *)atomic_cas_32((volatile uint32_t *)target,
 	    (uint32_t)cmp, (uint32_t)newval));
 }
-#endif	/* !defined(COMPAT_32BIT) && defined(__LP64__) */
+#endif	/* __LP64__ */
 
 #else /* _STANDALONE */
 /*
@@ -188,6 +191,8 @@ atomic_cas_ptr(volatile void *target, void *cmp,  void *newval)
  */
 #undef atomic_add_64
 #define	atomic_add_64(ptr, val) *(ptr) += val
+#undef atomic_sub_64
+#define	atomic_sub_64(ptr, val) *(ptr) -= val
 #endif /* !_STANDALONE */
 
 #endif	/* !_OPENSOLARIS_SYS_ATOMIC_H_ */

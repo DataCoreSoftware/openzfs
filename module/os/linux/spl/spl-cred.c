@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (C) 2007-2010 Lawrence Livermore National Security, LLC.
  *  Copyright (C) 2007 The Regents of the University of California.
@@ -74,26 +75,13 @@ crgetngroups(const cred_t *cr)
 
 	gi = cr->group_info;
 	rc = gi->ngroups;
-#ifndef HAVE_GROUP_INFO_GID
-	/*
-	 * For Linux <= 4.8,
-	 * crgetgroups will only returns gi->blocks[0], which contains only
-	 * the first NGROUPS_PER_BLOCK groups.
-	 */
-	if (rc > NGROUPS_PER_BLOCK) {
-		WARN_ON_ONCE(1);
-		rc = NGROUPS_PER_BLOCK;
-	}
-#endif
+
 	return (rc);
 }
 
 /*
  * Return an array of supplemental gids.  The returned address is safe
  * to use as long as the caller has taken a reference with crhold().
- *
- * Linux 4.9 API change, group_info changed from 2d array via ->blocks to 1d
- * array via ->gid.
  */
 gid_t *
 crgetgroups(const cred_t *cr)
@@ -102,12 +90,8 @@ crgetgroups(const cred_t *cr)
 	gid_t *gids = NULL;
 
 	gi = cr->group_info;
-#ifdef HAVE_GROUP_INFO_GID
 	gids = KGIDP_TO_SGIDP(gi->gid);
-#else
-	if (gi->nblocks > 0)
-		gids = KGIDP_TO_SGIDP(gi->blocks[0]);
-#endif
+
 	return (gids);
 }
 
@@ -128,7 +112,7 @@ groupmember(gid_t gid, const cred_t *cr)
 uid_t
 crgetuid(const cred_t *cr)
 {
-	return (KUID_TO_SUID(cr->euid));
+	return (KUID_TO_SUID(cr->fsuid));
 }
 
 /* Return the real user id */
@@ -138,58 +122,30 @@ crgetruid(const cred_t *cr)
 	return (KUID_TO_SUID(cr->uid));
 }
 
-/* Return the saved user id */
-uid_t
-crgetsuid(const cred_t *cr)
-{
-	return (KUID_TO_SUID(cr->suid));
-}
-
-/* Return the filesystem user id */
-uid_t
-crgetfsuid(const cred_t *cr)
-{
-	return (KUID_TO_SUID(cr->fsuid));
-}
-
 /* Return the effective group id */
 gid_t
 crgetgid(const cred_t *cr)
 {
-	return (KGID_TO_SGID(cr->egid));
-}
-
-/* Return the real group id */
-gid_t
-crgetrgid(const cred_t *cr)
-{
-	return (KGID_TO_SGID(cr->gid));
-}
-
-/* Return the saved group id */
-gid_t
-crgetsgid(const cred_t *cr)
-{
-	return (KGID_TO_SGID(cr->sgid));
-}
-
-/* Return the filesystem group id */
-gid_t
-crgetfsgid(const cred_t *cr)
-{
 	return (KGID_TO_SGID(cr->fsgid));
 }
 
+/* Return the initial user ns or nop_mnt_idmap */
+zidmap_t *
+zfs_get_init_idmap(void)
+{
+#ifdef HAVE_IOPS_CREATE_IDMAP
+	return ((zidmap_t *)&nop_mnt_idmap);
+#else
+	return ((zidmap_t *)&init_user_ns);
+#endif
+}
+
+EXPORT_SYMBOL(zfs_get_init_idmap);
 EXPORT_SYMBOL(crhold);
 EXPORT_SYMBOL(crfree);
 EXPORT_SYMBOL(crgetuid);
 EXPORT_SYMBOL(crgetruid);
-EXPORT_SYMBOL(crgetsuid);
-EXPORT_SYMBOL(crgetfsuid);
 EXPORT_SYMBOL(crgetgid);
-EXPORT_SYMBOL(crgetrgid);
-EXPORT_SYMBOL(crgetsgid);
-EXPORT_SYMBOL(crgetfsgid);
 EXPORT_SYMBOL(crgetngroups);
 EXPORT_SYMBOL(crgetgroups);
 EXPORT_SYMBOL(groupmember);

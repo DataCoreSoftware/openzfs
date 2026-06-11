@@ -37,6 +37,10 @@
 #include <sys/stat.h>
 #include <corecrt_io.h>
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 #define	HTOI(H) ((int)(unsigned __int64)(H))
 #define	ITOH(I) ((HANDLE)(unsigned __int64)(I))
 
@@ -58,19 +62,23 @@ struct stat64 {
 #define	dirent64 dirent
 #define	statfs64 statfs
 
+#define	fseeko _fseeki64
 
 extern int wosix_fsync(int fd);
 extern int wosix_open(const char *path, int oflag, ...);
+extern int wosix_openat(int fd, const char *name, int flags, ...);
 extern int wosix_close(int fd);
 struct zfs_iocparm;
-extern int wosix_ioctl(int fd, unsigned long request, struct zfs_iocparm *zc);
+extern int wosix_ioctl_len(int fd, unsigned long request, void *zc, size_t len);
 extern int wosix_read(int fd, void *data, uint32_t len);
 extern int wosix_write(int fd, const void *data, uint32_t len);
 extern int wosix_isatty(int fd);
 extern int wosix_mkdir(const char *path, mode_t mode);
 extern int wosix_pwrite(int fd, const void *buf, size_t nbyte, off_t offset);
 extern int wosix_pread(int fd, void *buf, size_t nbyte, off_t offset);
+extern int pread_win(HANDLE h, void *buf, size_t nbyte, off_t offset);
 extern int wosix_stat(char *path, struct _stat64 *st);
+extern int wosix_lstat(char *path, struct _stat64 *st);
 extern int wosix_fstat(int fd, struct _stat64 *st);
 extern int wosix_fstat_blk(int fd, struct _stat64 *st);
 extern uint64_t wosix_lseek(int fd, uint64_t offset, int seek);
@@ -92,6 +100,8 @@ extern FILE *wosix_freopen(const char *path, const char *mode, FILE *stream);
 /* Technically not needed, but handle mode */
 extern FILE *wosix_fopen(const char *name, const char *mode);
 
+extern int wosix_access(const char *name, int mode);
+
 /*
  * Thin wrapper for the POSIX IO calls, to translate to HANDLEs
  *
@@ -107,7 +117,7 @@ extern FILE *wosix_fopen(const char *name, const char *mode);
 #undef  close
 #define	close	wosix_close
 #undef  ioctl
-#define	ioctl	wosix_ioctl
+#define	ioctl(FD, REQ, PTR)	wosix_ioctl_len(FD, REQ, PTR, sizeof (*(PTR)))
 #undef  lseek
 #define	lseek	wosix_lseek
 #undef  fsync
@@ -152,6 +162,8 @@ extern FILE *wosix_fopen(const char *name, const char *mode);
 #define	ftruncate	wosix_ftruncate
 #undef  socketpair
 #define	socketpair	wosix_socketpair
+#undef  dup2
+#define	dup2	wosix_dup2
 #undef  fdopen
 #define	fdopen	wosix_fdopen
 #undef  freopen
@@ -161,8 +173,15 @@ extern FILE *wosix_fopen(const char *name, const char *mode);
 #undef  pipe
 #define	pipe	wosix_pipe
 #endif
-#define	pipe2(X,Y)	wosix_pipe(X)
+#define	pipe2(X, Y)	wosix_pipe(X)
 #define	mmap wosix_mmap
 #define	munmap wosix_munmap
 #define	fopen	wosix_fopen
+#define	access	wosix_access
+#include <wfunopen.h>
+
+#ifdef  __cplusplus
+}
+#endif
+
 #endif /* WOSIX_HEADER */

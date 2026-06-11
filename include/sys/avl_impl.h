@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -7,7 +8,7 @@
  * with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -34,6 +35,7 @@
  */
 
 #include <sys/types.h>
+#include <sys/sysmacros.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -147,7 +149,9 @@ struct avl_tree {
 	int (*avl_compar)(const void *, const void *);
 	size_t avl_offset;		/* offsetof(type, avl_link_t field) */
 	ulong_t avl_numnodes;		/* number of nodes in the tree */
-	size_t avl_size;		/* sizeof user type struct */
+#ifndef _KERNEL
+	size_t avl_pad;			/* For backwards ABI compatibility. */
+#endif
 };
 
 

@@ -39,78 +39,7 @@
 
 uint64_t zfs_threads = 0;
 
-
-kthread_t*
-spl_thread_create(
-    caddr_t     stk,
-    size_t      stksize,
-    void        (*proc)(void*),
-    void* arg,
-    size_t      len,
-    int state,
-#ifdef SPL_DEBUG_THREAD
-    char* filename,
-    int line,
-#endif
-    pri_t       pri)
-{
-    NTSTATUS    status;
-    HANDLE      hThread = NULL;
-    PETHREAD    eThread = NULL;
-
-#ifdef SPL_DEBUG_THREAD
-    dprintf("Start thread pri %d\n", pri);
-#endif
-
-    status = PsCreateSystemThread(
-	&hThread,
-	THREAD_ALL_ACCESS,
-	NULL,
-	NULL,
-	NULL,
-	proc,
-	arg);
-
-    if (!NT_SUCCESS(status))
-	return NULL;
-
-    /* Convert HANDLE ETHREAD */
-    status = ObReferenceObjectByHandle(
-	hThread,
-	THREAD_ALL_ACCESS,
-	*PsThreadType,
-	KernelMode,
-	(PVOID*)&eThread,
-	NULL);
-
-    /* We no longer need the handle */
-    ZwClose(hThread);
-
-    if (!NT_SUCCESS(status))
-	return NULL;
-
-    /* Clamp priority to safe Windows range */
-    KPRIORITY newPri = (KPRIORITY)pri;
-
-    if (newPri > maxclsyspri)
-	newPri = maxclsyspri;
-
-    if (newPri < minclsyspri)
-	newPri = minclsyspri;
-
-    /* Set absolute priority */
-    KeSetPriorityThread((PKTHREAD)eThread, newPri);
-
-#ifdef SPL_DEBUG_THREAD
-    dprintf("Thread created with priority %d\n", newPri);
-#endif
-
-    atomic_inc_64(&zfs_threads);
-
-    return (kthread_t*)eThread;
-}
-
-/*kthread_t*
+kthread_t *
 spl_thread_create(
     caddr_t	stk,
     size_t	stksize,
@@ -125,50 +54,63 @@ spl_thread_create(
     pri_t	pri)
 {
 	NTSTATUS result;
-	struct _KTHREAD *thread;
 
 #ifdef SPL_DEBUG_THREAD
 	dprintf("Start thread pri %d by '%s':%d\n", pri,
 	    filename, line);
 #endif
+	HANDLE hThread = NULL;
+	PETHREAD eThread = NULL;
+
 	result = PsCreateSystemThread(
-	    (void **)&thread,
-	    0,    // DesiredAccess,
-	    NULL, // ObjectAttributes,
-	    NULL, // ProcessHandle,
-	    0,    // ClientId,
-	    proc, // StartRoutine,
-	    arg); // StartContext
+	    &hThread,
+	    0,
+	    NULL,
+	    NULL,
+	    NULL,
+	    proc,
+	    arg);
 
-	if (result != STATUS_SUCCESS)
+	if (!NT_SUCCESS(result))
 		return (NULL);
-
-	
-	if (pri > minclsyspri) {
-		// thread_precedence_policy_data_t policy;
-		// policy.importance = pri - minclsyspri;
-
-		// thread_policy_set(thread,
-		//  THREAD_PRECEDENCE_POLICY,
-		//  (thread_policy_t)&policy,
-		//  THREAD_PRECEDENCE_POLICY_COUNT);
-
-		// TODO: Windows thread priority?
-
-		// why is this call missing?
-		// KeSetBasePriorityThread(thread, 1);
-	}
 
 	atomic_inc_64(&zfs_threads);
 
-	// Convert thread handle to pethread, so it matches current_thread()
-	PETHREAD eThread;
-	ObReferenceObjectByHandle(thread, THREAD_ALL_ACCESS, 0,
-	    KernelMode, (void **)&eThread, 0);
+	result = ObReferenceObjectByHandle(
+	    hThread,
+	    0,
+	    *PsThreadType,
+	    KernelMode,
+	    (PVOID *)&eThread,
+	    NULL);
+
+	if (!NT_SUCCESS(result)) {
+		ZwClose(hThread);
+		return (NULL);
+	}
+
+	if (pri > wtqclsyspri) {
+		dprintf("Set thread attempted priority %d -- clamped\n", pri);
+		pri = defclsyspri;
+	}
+
+	if (pri >= wtqclsyspri)
+		KeSetPriorityThread((PKTHREAD)eThread, pri);
+
+	/*
+	 * Pin thread to processor group 0 to avoid cross-group
+	 * scheduling bugs on unpatched multi-group systems
+	 */
+	GROUP_AFFINITY groupAffinity = { 0 };
+	groupAffinity.Group = 0;
+	groupAffinity.Mask = (KAFFINITY)(-1);  /* all CPUs in group 0 */
+	ZwSetInformationThread(hThread, ThreadGroupInformation,
+	    &groupAffinity, sizeof (groupAffinity));
+
 	ObDereferenceObject(eThread);
-	ZwClose(thread);
+	ZwClose(hThread);
 	return ((kthread_t *)eThread);
-}*/
+}
 
 kthread_t *
 spl_current_thread(void)
@@ -177,7 +119,9 @@ spl_current_thread(void)
 	return ((kthread_t *)cur_thread);
 }
 
-void
+extern __declspec(noreturn) NTSTATUS PsTerminateSystemThread(NTSTATUS);
+
+__declspec(noreturn) void
 spl_thread_exit(void)
 {
 	atomic_dec_64(&zfs_threads);
@@ -203,4 +147,14 @@ timeout_generic(int type, void (*func)(void *), void *arg,
 	 * untimeout_generic() they would pass it back to us
 	 */
 	return ((callout_id_t)arg);
+}
+
+/*
+ * Check if the current thread is a memory reclaim thread.
+ * Everything in XNU is secret.
+ */
+int
+current_is_reclaim_thread(void)
+{
+	return (0);
 }

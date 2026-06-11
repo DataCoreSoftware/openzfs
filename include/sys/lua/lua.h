@@ -1,4 +1,4 @@
-/* BEGIN CSTYLED */
+// SPDX-License-Identifier: MIT
 /*
 ** $Id: lua.h,v 1.285.1.4 2015/02/21 14:04:50 roberto Exp $
 ** Lua - A Scripting Language
@@ -442,4 +442,3 @@ struct lua_Debug {
 
 
 #endif
-/* END CSTYLED */

@@ -102,10 +102,10 @@ windows_kstat_t windows_kstat = {
 	{"zfs_delay_min_dirty_percent",	KSTAT_DATA_INT64  },
 	{"zfs_delay_scale",				KSTAT_DATA_INT64  },
 	{"spa_asize_inflation",			KSTAT_DATA_INT64  },
-	{"zfs_prefetch_disable",		KSTAT_DATA_INT64  },
+	/* zfs_prefetch_disable removed in 2.4.1 */
 	{"zfetch_max_streams",			KSTAT_DATA_INT64  },
 	{"zfetch_min_sec_reap",			KSTAT_DATA_INT64  },
-	{"zfetch_array_rd_sz",			KSTAT_DATA_INT64  },
+	/* zfetch_array_rd_sz removed in 2.4.1 */
 	{"zfs_default_bs",				KSTAT_DATA_INT64  },
 	{"zfs_default_ibs",				KSTAT_DATA_INT64  },
 	{"metaslab_aliquot",			KSTAT_DATA_INT64  },
@@ -115,7 +115,7 @@ windows_kstat_t windows_kstat = {
 	{"zfs_txg_timeout",				KSTAT_DATA_INT64  },
 	{"zfs_adc_enable",				KSTAT_DATA_INT64  },
 	{"zfs_vdev_cache_max",			KSTAT_DATA_INT64  },
-	{"zfs_vdev_cache_size",			KSTAT_DATA_INT64  },
+	/* zfs_vdev_cache_size removed in 2.4.1 */
 	{"zfs_vdev_cache_bshift",		KSTAT_DATA_INT64  },
 	{"vdev_mirror_shift",			KSTAT_DATA_INT64  },
 	{"zfs_scrub_limit",				KSTAT_DATA_INT64  },
@@ -271,14 +271,12 @@ windows_kstat_update(kstat_t *ksp, int rw)
 		    ks->zfs_delay_scale.value.i64;
 		spa_asize_inflation =
 		    ks->spa_asize_inflation.value.i64;
-		zfs_prefetch_disable =
-		    ks->zfs_prefetch_disable.value.i64;
+		/* zfs_prefetch_disable removed in 2.4.1 */
 		zfetch_max_streams =
 		    ks->zfetch_max_streams.value.i64;
 		zfetch_min_sec_reap =
 		    ks->zfetch_min_sec_reap.value.i64;
-		zfetch_array_rd_sz =
-		    ks->zfetch_array_rd_sz.value.i64;
+		/* zfetch_array_rd_sz removed in 2.4.1 */
 		zfs_default_bs =
 		    ks->zfs_default_bs.value.i64;
 		zfs_default_ibs =
@@ -297,8 +295,7 @@ windows_kstat_update(kstat_t *ksp, int rw)
 		    ks->zfs_adc_enable.value.i64;
 		zfs_vdev_cache_max =
 		    ks->zfs_vdev_cache_max.value.i64;
-		zfs_vdev_cache_size =
-		    ks->zfs_vdev_cache_size.value.i64;
+		/* zfs_vdev_cache_size removed in 2.4.1 */
 		zfs_no_scrub_io =
 		    ks->zfs_no_scrub_io.value.i64;
 		zfs_no_scrub_prefetch =
@@ -469,14 +466,12 @@ windows_kstat_update(kstat_t *ksp, int rw)
 		    zfs_delay_scale;
 		ks->spa_asize_inflation.value.i64 =
 		    spa_asize_inflation;
-		ks->zfs_prefetch_disable.value.i64 =
-		    zfs_prefetch_disable;
+		/* zfs_prefetch_disable removed in 2.4.1 */
 		ks->zfetch_max_streams.value.i64 =
 		    zfetch_max_streams;
 		ks->zfetch_min_sec_reap.value.i64 =
 		    zfetch_min_sec_reap;
-		ks->zfetch_array_rd_sz.value.i64 =
-		    zfetch_array_rd_sz;
+		/* zfetch_array_rd_sz removed in 2.4.1 */
 		ks->zfs_default_bs.value.i64 =
 		    zfs_default_bs;
 		ks->zfs_default_ibs.value.i64 =
@@ -495,8 +490,7 @@ windows_kstat_update(kstat_t *ksp, int rw)
 		    zfs_adc_enable;
 		ks->zfs_vdev_cache_max.value.i64 =
 		    zfs_vdev_cache_max;
-		ks->zfs_vdev_cache_size.value.i64 =
-		    zfs_vdev_cache_size;
+		/* zfs_vdev_cache_size removed in 2.4.1 */
 		ks->zfs_no_scrub_io.value.i64 =
 		    zfs_no_scrub_io;
 		ks->zfs_no_scrub_prefetch.value.i64 =

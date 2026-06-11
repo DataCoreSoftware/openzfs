@@ -99,6 +99,15 @@ extern uint64_t spl_cpuid_leaf7_features(void);
 #define	ZFS_ASM_BUG()	{ ASSERT(0); } break
 
 #define	kfpu_allowed()		1
+/* SIMD context save/restore (new in 2.4) */
+extern uint32_t kfpu_state;
+#define	kfpu_begin_ctx(O) 	(O)->saveStatus = 	KeSaveExtendedProcessorState(kfpu_state, &(O)->SaveState);
+
+#define	kfpu_end_ctx(O) 	if (NT_SUCCESS(((O)->saveStatus))) 		KeRestoreExtendedProcessorState(&(O)->SaveState);
+
+/* SIMD stats stubs */
+#define	simd_stat_init()	0
+#define	simd_stat_fini()	0
 
 #endif
 
@@ -502,6 +511,33 @@ zfs_pclmulqdq_available(void)
 #elif !defined(_KERNEL)
 	return (__cpuid_has_pclmulqdq());
 #endif
+}
+/*
+ * Check if OSXSAVE is available
+ */
+static inline boolean_t
+zfs_osxsave_available(void)
+{
+#if defined(_KERNEL)
+	return (!!(spl_cpuid_features() & CPUID_FEATURE_OSXSAVE));
+#elif !defined(_KERNEL)
+	return (__cpuid_has_osxsave());
+#endif
+}
+
+/*
+ * MOVBE and SHA-NI: not yet exposed via Windows CPUID feature flags
+ */
+static inline boolean_t
+zfs_movbe_available(void)
+{
+	return (B_FALSE);
+}
+
+static inline boolean_t
+zfs_shani_available(void)
+{
+	return (B_FALSE);
 }
 
 /*

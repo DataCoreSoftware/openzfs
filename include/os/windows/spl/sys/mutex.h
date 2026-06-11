@@ -37,6 +37,7 @@
 // pre-processor, so we need to push them here as well.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
+#pragma GCC diagnostic ignored "-Wignored-attributes"
 #pragma GCC diagnostic ignored "-Wignored-pragma-intrinsic"
 #endif
 
@@ -57,9 +58,10 @@ typedef enum {
 	MUTEX_DEFAULT = 6	/* kernel default mutex */
 } kmutex_type_t;
 
+/* arm64 NEEDs this aligned */
 typedef struct {
-	KEVENT opaque;
-} mutex_t;
+	__declspec(align(8)) KEVENT opaque;
+} mutex_t; // __attribute__((aligned(8)));
 
 /*
  * Solaris kmutex defined.
@@ -72,8 +74,18 @@ typedef struct {
 typedef struct kmutex {
 	mutex_t		m_lock;
 	void		*m_owner;
-	unsigned int	m_set_event_guard;
+	/*
+	 * If this struct is changed, also change kernel_mutex_t
+	 */
+	KSPIN_LOCK	m_destroy_lock;
 	unsigned int	m_initialised;
+	/*
+	 * Fast-path optimization: m_waiters is incremented by threads that
+	 * failed the CAS in mutex_enter and are about to sleep on m_lock.
+	 * mutex_exit only acquires m_destroy_lock and calls KeSetEvent when
+	 * this is non-zero, making uncontested exit a near-free operation.
+	 */
+	volatile uint32_t m_waiters;
 } kmutex_t;
 
 #define	MUTEX_HELD(x)		(mutex_owned(x))
@@ -84,6 +96,13 @@ void spl_mutex_init(kmutex_t *mp, char *name, kmutex_type_t type, void *ibc);
 
 #define	mutex_enter spl_mutex_enter
 void spl_mutex_enter(kmutex_t *mp);
+
+/* Until we can investigate interruptible on Windows */
+static inline int mutex_enter_interruptible(kmutex_t *mp)
+{
+	spl_mutex_enter(mp);
+	return (0);
+}
 
 #define	mutex_enter_nested(A, B)	mutex_enter(A)
 #define	MUTEX_NOLOCKDEP	0

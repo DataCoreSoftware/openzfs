@@ -1,4 +1,5 @@
 #!/bin/ksh
+# SPDX-License-Identifier: CDDL-1.0
 
 #
 # This file and its contents are supplied under the terms of the
@@ -45,8 +46,7 @@ function check_feature_flag
 	pool=$2
 	expected_value=$3
 
-	value="$(zpool get -H -o property,value all $pool | \
-	    egrep "$feature" | awk '{print $2}')"
+	value="$(zpool get -H -o property,value all $pool | awk -v f="$feature" '$0 ~ f {print $2}')"
 	if [ "$value" = "$expected_value" ]; then
 		log_note "$feature verified to be $value"
 	else

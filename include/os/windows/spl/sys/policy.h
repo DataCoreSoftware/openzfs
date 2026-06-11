@@ -40,6 +40,7 @@ int secpolicy_fs_unmount(cred_t *, struct mount *);
 int secpolicy_nfs(const cred_t *);
 int secpolicy_sys_config(const cred_t *, boolean_t);
 int secpolicy_zfs(const cred_t *);
+int secpolicy_zfs_proc(const cred_t *, proc_t *);
 int secpolicy_zinject(const cred_t *);
 
 /*
@@ -81,6 +82,9 @@ int secpolicy_setid_clear(vattr_t *, const cred_t *);
 int secpolicy_basic_link(const cred_t *);
 int secpolicy_fs_mount_clearopts(const cred_t *, struct mount *);
 int secpolicy_fs_mount(const cred_t *, struct vnode *, struct mount *);
+int secpolicy_vnode_any_access(const cred_t *cr, struct vnode *vp, uid_t owner);
+int secpolicy_vnode_access2(const cred_t *cr, struct vnode *vp, uid_t owner,
+    accmode_t curmode, accmode_t wantmode);
 
 #endif	/* _KERNEL */
 

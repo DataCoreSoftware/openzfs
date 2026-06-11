@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -84,9 +85,9 @@ function cleanup
 
 	destroy_pool $TESTPOOL1
 
-	if datasetexists $TESTPOOL/$TESTFS; then
-		log_must zfs destroy -Rf $TESTPOOL/$TESTFS
-	fi
+	datasetexists $TESTPOOL/$TESTFS && \
+		destroy_dataset $TESTPOOL/$TESTFS -Rf
+
 	log_must zfs create $TESTPOOL/$TESTFS
 	log_must zfs set mountpoint=$TESTDIR $TESTPOOL/$TESTFS
 
@@ -165,10 +166,9 @@ for option in "" "-Df"; do
 					fi
 					log_note "Import with $nfs_flag and " \
 					    "$guid_flag"
-					zpool import $option ${devs[i]} \
-					    ${options[j]} $target
-					#import by GUID if import by pool name fails
-					if [[ $? != 0 ]]; then
+					if ! zpool import $option ${devs[i]} \
+					    ${options[j]} $target; then
+						# import by GUID if import by pool name fails
 						log_note "Possible pool name" \
 						    "duplicates. Try GUID import"
 						target=$guid

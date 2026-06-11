@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -42,11 +43,11 @@ verify_runnable "both"
 function cleanup
 {
 	datasetexists $TESTPOOL/$TESTFS1 && \
-		log_must zfs destroy -Rf $TESTPOOL/$TESTFS1
+		destroy_dataset $TESTPOOL/$TESTFS1 -Rf
 	datasetexists $TESTPOOL/clone1 && \
-		log_must zfs destroy -Rf $TESTPOOL/clone1
+		destroy_dataset $TESTPOOL/clone1 -Rf
 	datasetexists $TESTPOOL/clone2 && \
-		log_must zfs destroy -Rf $TESTPOOL/clone2
+		destroy_dataset $TESTPOOL/clone2 -Rf
 }
 log_onexit cleanup
 

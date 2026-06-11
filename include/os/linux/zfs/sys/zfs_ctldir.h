@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -45,7 +46,7 @@
 	(ZTOZSB(zdp)->z_ctldir != NULL))
 #define	zfs_show_ctldir(zdp)	\
 	(zfs_has_ctldir(zdp) && \
-	(ZTOZSB(zdp)->z_show_ctldir))
+	(ZTOZSB(zdp)->z_show_ctldir == ZFS_SNAPDIR_VISIBLE))
 
 extern int zfs_expire_snapshot;
 

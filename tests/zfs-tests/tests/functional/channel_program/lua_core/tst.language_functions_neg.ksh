@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -43,9 +44,7 @@ log_assert "Runtime errors in lua scripts fail as expected."
 
 typeset -i i=0
 while (( i < ${#args[*]} )); do
-	log_mustnot_checkerror_program "execution failed" $TESTPOOL - <<-EOF
-		${args[i]}
-	EOF
+	log_mustnot_checkerror_program "execution failed" $TESTPOOL - <<<"${args[i]}"
 	((i = i + 1))
 done
 

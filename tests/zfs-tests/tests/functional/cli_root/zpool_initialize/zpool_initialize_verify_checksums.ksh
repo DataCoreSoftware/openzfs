@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -42,7 +43,7 @@ DISK1=${DISKS%% *}
 
 log_must zpool create -f $TESTPOOL $DISK1
 log_must dd if=/dev/urandom of=/$TESTPOOL/file1 bs=1M count=30
-log_must sync
+sync_all_pools
 
 log_must zpool initialize $TESTPOOL
 
@@ -52,7 +53,7 @@ log_must zdb -cc $TESTPOOL
     log_fail "Initializing did not start"
 
 log_must dd if=/dev/urandom of=/$TESTPOOL/file2 bs=1M count=30
-log_must sync
+sync_all_pools
 
 log_must zdb -cc $TESTPOOL
 

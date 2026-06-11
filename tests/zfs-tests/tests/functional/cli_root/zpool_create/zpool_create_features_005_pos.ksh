@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -57,6 +58,9 @@ function check_features
 				return 1;
 			fi
 		else
+			if [[ "feature@dynamic_gang_header" == "${2}" ]]; then
+				continue
+			fi
 			# Failure other features must be enabled or active.
 			if [[ "${3}" != "enabled" && "${3}" != "active" ]]; then
 				return 2;
@@ -75,8 +79,8 @@ log_onexit cleanup
 # excluded because other features depend on them.
 set -A features \
     "hole_birth" \
-    "large_blocks"  \
     "large_dnode" \
+    "longname"  \
     "userobj_accounting"
 
 typeset -i i=0

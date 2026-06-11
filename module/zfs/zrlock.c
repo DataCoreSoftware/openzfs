@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -106,16 +107,16 @@ zrl_add_impl(zrlock_t *zrl, const char *zc)
 void
 zrl_remove(zrlock_t *zrl)
 {
-	uint32_t n;
-
 #ifdef	ZFS_DEBUG
 	if (zrl->zr_owner == curthread) {
 		zrl->zr_owner = NULL;
 		zrl->zr_caller = NULL;
 	}
+	int32_t n = atomic_dec_32_nv((uint32_t *)&zrl->zr_refcount);
+	ASSERT3S(n, >=, 0);
+#else
+	atomic_dec_32((uint32_t *)&zrl->zr_refcount);
 #endif
-	n = atomic_dec_32_nv((uint32_t *)&zrl->zr_refcount);
-	ASSERT3S((int32_t)n, >=, 0);
 }
 
 int
@@ -128,7 +129,7 @@ zrl_tryenter(zrlock_t *zrl)
 		    (uint32_t *)&zrl->zr_refcount, 0, ZRL_LOCKED);
 		if (cas == 0) {
 #ifdef	ZFS_DEBUG
-			ASSERT3P(zrl->zr_owner, ==, NULL);
+			ASSERT0P(zrl->zr_owner);
 			zrl->zr_owner = curthread;
 #endif
 			return (1);

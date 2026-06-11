@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -36,7 +37,7 @@
  * keyarr32	User key
  * keyBits	AES key size (128, 192, or 256 bits)
  */
-static void
+static void ASMABI
 aes_x86_64_generate(aes_key_t *key, const uint32_t *keyarr32, int keybits)
 {
 	key->nr = rijndael_key_setup_enc_amd64(&(key->encr_ks.ks32[0]),

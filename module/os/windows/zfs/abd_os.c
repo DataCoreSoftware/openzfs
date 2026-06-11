@@ -12,7 +12,6 @@
 /*
  * Copyright (c) 2014 by Chunwei Chen. All rights reserved.
  * Copyright (c) 2016 by Delphix. All rights reserved.
- * Copyright (c) 2020 by Jorgen Lundman. All rights reserved.
  */
 
 /*
@@ -29,10 +28,13 @@
 
 #include <sys/abd_impl.h>
 #include <sys/param.h>
+#include <sys/types.h>
 #include <sys/zio.h>
 #include <sys/zfs_context.h>
 #include <sys/zfs_znode.h>
-
+#ifdef DEBUG
+#include <sys/kmem_impl.h>
+#endif
 
 typedef struct abd_stats {
 	kstat_named_t abdstat_struct_size;
@@ -71,12 +73,12 @@ static abd_stats_t abd_stats = {
 };
 
 struct {
-        wmsum_t abdstat_struct_size;
-        wmsum_t abdstat_scatter_cnt;
-        wmsum_t abdstat_scatter_data_size;
-        wmsum_t abdstat_scatter_chunk_waste;
-        wmsum_t abdstat_linear_cnt;
-        wmsum_t abdstat_linear_data_size;
+	wmsum_t abdstat_struct_size;
+	wmsum_t abdstat_scatter_cnt;
+	wmsum_t abdstat_scatter_data_size;
+	wmsum_t abdstat_scatter_chunk_waste;
+	wmsum_t abdstat_linear_cnt;
+	wmsum_t abdstat_linear_data_size;
 } abd_sums;
 
 /*
@@ -87,11 +89,44 @@ struct {
  * will cause the machine to panic if you change it and try to access the data
  * within a scattered ABD.
  */
-size_t zfs_abd_chunk_size = 4096;
+
+#if defined(__arm64__)
+/*
+ * On ARM macOS, PAGE_SIZE is not a runtime constant!  So here we have to
+ * guess at compile time.  There a balance between fewer kmem_caches, more
+ * memory use by "tails" of medium-sized ABDs, and more memory use by
+ * accounting structures if we use 4k versus 16k.
+ *
+ * Since the original *subpage* design expected PAGE_SIZE to be constant and
+ * the pre-subpage ABDs used PAGE_SIZE without requiring it to be a
+ * compile-time constant, let's use 16k initially and adjust downwards based
+ * on feedback.
+ */
+#define	ABD_PGSIZE	16384
+#else
+#define	ABD_PGSIZE	PAGE_SIZE
+#endif
+
+#define	PAGE_MASK (ABD_PGSIZE - 1ULL)
+
+const static size_t zfs_abd_chunk_size = ABD_PGSIZE;
 
 kmem_cache_t *abd_chunk_cache;
 static kstat_t *abd_ksp;
 
+/*
+ * Sub-ABD_PGSIZE allocations are segregated into kmem caches.  This may be
+ * inefficient or counterproductive if in future the following conditions are
+ * not met.
+ */
+_Static_assert(SPA_MINBLOCKSHIFT == 9, "unexpected SPA_MINSBLOCKSHIFT != 9");
+_Static_assert(ISP2(ABD_PGSIZE), "ABD_PGSIZE unexpectedly non power of 2");
+_Static_assert(ABD_PGSIZE >= 4096, "ABD_PGSIZE unexpectedly smaller than 4096");
+_Static_assert(ABD_PGSIZE <= 16384,
+	"ABD_PGSIZE unexpectedly larger than 16384");
+
+#define	SUBPAGE_CACHE_INDICES (ABD_PGSIZE >> SPA_MINBLOCKSHIFT)
+kmem_cache_t *abd_subpage_cache[SUBPAGE_CACHE_INDICES] = { NULL };
 
 /*
  * We use a scattered SPA_MAXBLOCKSIZE sized ABD whose chunks are
@@ -102,19 +137,33 @@ static kstat_t *abd_ksp;
 abd_t *abd_zero_scatter = NULL;
 static char *abd_zero_buf = NULL;
 
-static void
-abd_free_chunk(void *c)
-{
-	kmem_cache_free(abd_chunk_cache, c);
-}
+/*
+ * zfs_abd_scatter_min_size is the minimum allocation size to use scatter
+ * ABD's for.  Smaller allocations will use linear ABD's which use
+ * zio_[data_]buf_alloc().
+ *
+ * Scatter ABD's use at least one page each, so sub-page allocations waste
+ * some space when allocated as scatter (e.g. 2KB scatter allocation wastes
+ * half of each page).  Using linear ABD's for small allocations means that
+ * they will be put on slabs which contain many allocations.
+ *
+ * Linear ABDs for multi-page allocations are easier to use, and in some cases
+ * it allows to avoid buffer copying.  But allocation and especially free
+ * of multi-page linear ABDs are expensive operations due to KVA mapping and
+ * unmapping, and with time they cause KVA fragmentations.
+ */
+static size_t zfs_abd_scatter_min_size = ABD_PGSIZE + 1;
 
-static size_t
+kmem_cache_t *abd_chunk_cache;
+static kstat_t *abd_ksp;
+
+static uint_t
 abd_chunkcnt_for_bytes(size_t size)
 {
-	return (P2ROUNDUP(size, zfs_abd_chunk_size) / zfs_abd_chunk_size);
+	return ((size + PAGE_MASK) >> PAGE_SHIFT);
 }
 
-static inline size_t
+static inline uint_t
 abd_scatter_chunkcnt(abd_t *abd)
 {
 	ASSERT(!abd_is_linear(abd));
@@ -125,24 +174,25 @@ abd_scatter_chunkcnt(abd_t *abd)
 boolean_t
 abd_size_alloc_linear(size_t size)
 {
-	return (size <= zfs_abd_chunk_size ? B_TRUE : B_FALSE);
+	return (!zfs_abd_scatter_enabled || size < zfs_abd_scatter_min_size);
 }
 
 void
 abd_update_scatter_stats(abd_t *abd, abd_stats_op_t op)
 {
-	size_t n = abd_scatter_chunkcnt(abd);
+	uint_t n = abd_scatter_chunkcnt(abd);
 	ASSERT(op == ABDSTAT_INCR || op == ABDSTAT_DECR);
+	int waste = (n << PAGE_SHIFT) - abd->abd_size;
 	if (op == ABDSTAT_INCR) {
 		ABDSTAT_BUMP(abdstat_scatter_cnt);
 		ABDSTAT_INCR(abdstat_scatter_data_size, abd->abd_size);
-		ABDSTAT_INCR(abdstat_scatter_chunk_waste,
-		    n * zfs_abd_chunk_size - abd->abd_size);
+		ABDSTAT_INCR(abdstat_scatter_chunk_waste, waste);
+		arc_space_consume(waste, ARC_SPACE_ABD_CHUNK_WASTE);
 	} else {
 		ABDSTAT_BUMPDOWN(abdstat_scatter_cnt);
 		ABDSTAT_INCR(abdstat_scatter_data_size, -(int)abd->abd_size);
-		ABDSTAT_INCR(abdstat_scatter_chunk_waste,
-		    abd->abd_size - n * zfs_abd_chunk_size);
+		ABDSTAT_INCR(abdstat_scatter_chunk_waste, -waste);
+		arc_space_return(waste, ARC_SPACE_ABD_CHUNK_WASTE);
 	}
 }
 
@@ -162,45 +212,49 @@ abd_update_linear_stats(abd_t *abd, abd_stats_op_t op)
 void
 abd_verify_scatter(abd_t *abd)
 {
-	/*
-	 * There is no scatter linear pages in FreeBSD so there is an
-	 * if an error if the ABD has been marked as a linear page.
-	 */
-	VERIFY(!abd_is_linear_page(abd));
-	VERIFY3U(ABD_SCATTER(abd).abd_offset, <,
-	    zfs_abd_chunk_size);
+	uint_t i, n;
 
-	size_t n = abd_scatter_chunkcnt(abd);
-	for (int i = 0; i < n; i++) {
-		ASSERT3P(
-		    ABD_SCATTER(abd).abd_chunks[i], !=, NULL);
+	/*
+	 * There is no scatter linear pages in FreeBSD so there is
+	 * an error if the ABD has been marked as a linear page.
+	 */
+	ASSERT(!abd_is_linear_page(abd));
+	ASSERT3U(ABD_SCATTER(abd).abd_offset, <, ABD_PGSIZE);
+	n = abd_scatter_chunkcnt(abd);
+
+	for (i = 0; i < n; i++) {
+		ASSERT3P(ABD_SCATTER(abd).abd_chunks[i], !=, NULL);
 	}
 }
 
 void
 abd_alloc_chunks(abd_t *abd, size_t size)
 {
-	size_t n = abd_chunkcnt_for_bytes(size);
-	for (int i = 0; i < n; i++) {
-		void *c = kmem_cache_alloc(abd_chunk_cache, KM_SLEEP);
-		ABD_SCATTER(abd).abd_chunks[i] = c;
+	uint_t i, n;
+
+	n = abd_chunkcnt_for_bytes(size);
+	for (i = 0; i < n; i++) {
+		ABD_SCATTER(abd).abd_chunks[i] =
+		    kmem_cache_alloc(abd_chunk_cache, KM_SLEEP);
 	}
-	ABD_SCATTER(abd).abd_chunk_size = zfs_abd_chunk_size;
 }
 
 void
 abd_free_chunks(abd_t *abd)
 {
-	size_t n = abd_scatter_chunkcnt(abd);
-	for (int i = 0; i < n; i++) {
-		abd_free_chunk(ABD_SCATTER(abd).abd_chunks[i]);
+	uint_t i, n;
+
+	n = abd_scatter_chunkcnt(abd);
+	for (i = 0; i < n; i++) {
+		kmem_cache_free(abd_chunk_cache,
+		    ABD_SCATTER(abd).abd_chunks[i]);
 	}
 }
 
 abd_t *
 abd_alloc_struct_impl(size_t size)
 {
-	size_t chunkcnt = abd_chunkcnt_for_bytes(size);
+	uint_t chunkcnt = abd_chunkcnt_for_bytes(size);
 	/*
 	 * In the event we are allocating a gang ABD, the size passed in
 	 * will be 0. We must make sure to set abd_size to the size of an
@@ -210,7 +264,9 @@ abd_alloc_struct_impl(size_t size)
 	 */
 	size_t abd_size = MAX(sizeof (abd_t),
 	    offsetof(abd_t, abd_u.abd_scatter.abd_chunks[chunkcnt]));
-	abd_t *abd = kmem_zalloc(abd_size, KM_PUSHPAGE);
+	abd_t *abd = kmem_alloc(abd_size, KM_SLEEP);
+
+	ASSERT3P(abd, !=, NULL);
 	ABDSTAT_INCR(abdstat_struct_size, abd_size);
 
 	return (abd);
@@ -223,61 +279,91 @@ abd_free_struct_impl(abd_t *abd)
 	    abd_scatter_chunkcnt(abd);
 	ssize_t size = MAX(sizeof (abd_t),
 	    offsetof(abd_t, abd_u.abd_scatter.abd_chunks[chunkcnt]));
-
 	kmem_free(abd, size);
 	ABDSTAT_INCR(abdstat_struct_size, -size);
 }
 
 /*
  * Allocate scatter ABD of size SPA_MAXBLOCKSIZE, where
- * each chunk in the scatterlist will be set to abd_zero_buf.
+ * each chunk in the scatterlist will be set to the same area.
  */
 static void
 abd_alloc_zero_scatter(void)
 {
-	size_t n = abd_chunkcnt_for_bytes(SPA_MAXBLOCKSIZE);
-	abd_zero_buf = kmem_cache_alloc(abd_chunk_cache, KM_SLEEP);
-	bzero(abd_zero_buf, zfs_abd_chunk_size);
-	abd_zero_scatter = abd_alloc_struct(SPA_MAXBLOCKSIZE);
+	uint_t i, n;
 
-	abd_zero_scatter->abd_flags |= ABD_FLAG_OWNER | ABD_FLAG_ZEROS;
+	abd_zero_buf = kmem_alloc(ABD_PGSIZE, KM_SLEEP);
+	memset(abd_zero_buf, 0, ABD_PGSIZE);
+
+	n = abd_chunkcnt_for_bytes(SPA_MAXBLOCKSIZE);
+	abd_zero_scatter = abd_alloc_struct(SPA_MAXBLOCKSIZE);
+	abd_zero_scatter->abd_flags |= ABD_FLAG_OWNER;
 	abd_zero_scatter->abd_size = SPA_MAXBLOCKSIZE;
 
 	ABD_SCATTER(abd_zero_scatter).abd_offset = 0;
-	ABD_SCATTER(abd_zero_scatter).abd_chunk_size =
-	    zfs_abd_chunk_size;
 
-	for (int i = 0; i < n; i++) {
+	for (i = 0; i < n; i++) {
 		ABD_SCATTER(abd_zero_scatter).abd_chunks[i] =
-		    abd_zero_buf;
+		    __DECONST(void *, abd_zero_buf);
 	}
 
 	ABDSTAT_BUMP(abdstat_scatter_cnt);
-	ABDSTAT_INCR(abdstat_scatter_data_size, zfs_abd_chunk_size);
+	ABDSTAT_INCR(abdstat_scatter_data_size, ABD_PGSIZE);
 }
 
 static void
 abd_free_zero_scatter(void)
 {
 	ABDSTAT_BUMPDOWN(abdstat_scatter_cnt);
-	ABDSTAT_INCR(abdstat_scatter_data_size, -(int)zfs_abd_chunk_size);
+	ABDSTAT_INCR(abdstat_scatter_data_size, -(int)ABD_PGSIZE);
 
 	abd_free_struct(abd_zero_scatter);
 	abd_zero_scatter = NULL;
-	kmem_cache_free(abd_chunk_cache, abd_zero_buf);
+
+	kmem_free(abd_zero_buf, ABD_PGSIZE);
+	abd_zero_buf = NULL;
+}
+
+static int
+abd_kstats_update(kstat_t *ksp, int rw)
+{
+	abd_stats_t *as = ksp->ks_data;
+
+	if (rw == KSTAT_WRITE)
+		return (EACCES);
+	as->abdstat_struct_size.value.ui64 =
+	    wmsum_value(&abd_sums.abdstat_struct_size);
+	as->abdstat_scatter_cnt.value.ui64 =
+	    wmsum_value(&abd_sums.abdstat_scatter_cnt);
+	as->abdstat_scatter_data_size.value.ui64 =
+	    wmsum_value(&abd_sums.abdstat_scatter_data_size);
+	as->abdstat_scatter_chunk_waste.value.ui64 =
+	    wmsum_value(&abd_sums.abdstat_scatter_chunk_waste);
+	as->abdstat_linear_cnt.value.ui64 =
+	    wmsum_value(&abd_sums.abdstat_linear_cnt);
+	as->abdstat_linear_data_size.value.ui64 =
+	    wmsum_value(&abd_sums.abdstat_linear_data_size);
+	return (0);
 }
 
 void
 abd_init(void)
 {
-	abd_chunk_cache = kmem_cache_create("abd_chunk", zfs_abd_chunk_size,
-	    MIN(PAGE_SIZE, 4096),
-	    NULL, NULL, NULL, NULL, abd_arena, KMC_NOTOUCH);
+	abd_chunk_cache = kmem_cache_create("abd_chunk", ABD_PGSIZE, 0,
+	    NULL, NULL, NULL, NULL, 0, KMC_NODEBUG | KMC_RECLAIMABLE);
+
+	wmsum_init(&abd_sums.abdstat_struct_size, 0);
+	wmsum_init(&abd_sums.abdstat_scatter_cnt, 0);
+	wmsum_init(&abd_sums.abdstat_scatter_data_size, 0);
+	wmsum_init(&abd_sums.abdstat_scatter_chunk_waste, 0);
+	wmsum_init(&abd_sums.abdstat_linear_cnt, 0);
+	wmsum_init(&abd_sums.abdstat_linear_data_size, 0);
 
 	abd_ksp = kstat_create("zfs", 0, "abdstats", "misc", KSTAT_TYPE_NAMED,
 	    sizeof (abd_stats) / sizeof (kstat_named_t), KSTAT_FLAG_VIRTUAL);
 	if (abd_ksp != NULL) {
 		abd_ksp->ks_data = &abd_stats;
+		abd_ksp->ks_update = abd_kstats_update;
 		kstat_install(abd_ksp);
 	}
 
@@ -294,6 +380,13 @@ abd_fini(void)
 		abd_ksp = NULL;
 	}
 
+	wmsum_fini(&abd_sums.abdstat_struct_size);
+	wmsum_fini(&abd_sums.abdstat_scatter_cnt);
+	wmsum_fini(&abd_sums.abdstat_scatter_data_size);
+	wmsum_fini(&abd_sums.abdstat_scatter_chunk_waste);
+	wmsum_fini(&abd_sums.abdstat_linear_cnt);
+	wmsum_fini(&abd_sums.abdstat_linear_data_size);
+
 	kmem_cache_destroy(abd_chunk_cache);
 	abd_chunk_cache = NULL;
 }
@@ -302,7 +395,7 @@ void
 abd_free_linear_page(abd_t *abd)
 {
 	/*
-	 * FreeBSD does not have have scatter linear pages
+	 * FreeBSD does not have scatter linear pages
 	 * so there is an error.
 	 */
 	VERIFY(0);
@@ -325,22 +418,17 @@ abd_alloc_for_io(size_t size, boolean_t is_metadata)
 }
 
 abd_t *
-abd_get_offset_scatter(abd_t *abd, abd_t *sabd, size_t off, size_t size)
+abd_get_offset_scatter(abd_t *abd, abd_t *sabd, size_t off,
+    size_t size)
 {
 	abd_verify(sabd);
-	VERIFY3U(off, <=, sabd->abd_size);
+	ASSERT3U(off, <=, sabd->abd_size);
 
 	size_t new_offset = ABD_SCATTER(sabd).abd_offset + off;
-
-	/*
-	 * chunkcnt is abd_chunkcnt_for_bytes(size), which rounds
-	 * up to the nearest chunk, but we also must take care
-	 * of the offset *in the leading chunk*
-	 */
 	size_t chunkcnt = abd_chunkcnt_for_bytes(
-	    (new_offset % zfs_abd_chunk_size) + size);
+	    (new_offset & PAGE_MASK) + size);
 
-	VERIFY3U(chunkcnt, <=, abd_scatter_chunkcnt(sabd));
+	ASSERT3U(chunkcnt, <=, abd_scatter_chunkcnt(sabd));
 
 	/*
 	 * If an abd struct is provided, it is only the minimum size.  If we
@@ -353,7 +441,7 @@ abd_get_offset_scatter(abd_t *abd, abd_t *sabd, size_t off, size_t size)
 	}
 
 	if (abd == NULL)
-		abd = abd_alloc_struct(chunkcnt * zfs_abd_chunk_size);
+		abd = abd_alloc_struct(chunkcnt << PAGE_SHIFT);
 
 	/*
 	 * Even if this buf is filesystem metadata, we only track that
@@ -361,32 +449,53 @@ abd_get_offset_scatter(abd_t *abd, abd_t *sabd, size_t off, size_t size)
 	 * this case. Therefore, we don't ever use ABD_FLAG_META here.
 	 */
 
-	ABD_SCATTER(abd).abd_offset = new_offset % zfs_abd_chunk_size;
-	ABD_SCATTER(abd).abd_chunk_size = zfs_abd_chunk_size;
+	ABD_SCATTER(abd).abd_offset = new_offset & PAGE_MASK;
 
 	/* Copy the scatterlist starting at the correct offset */
 	(void) memcpy(&ABD_SCATTER(abd).abd_chunks,
-	    &ABD_SCATTER(sabd).abd_chunks[new_offset /
-	    zfs_abd_chunk_size],
+	    &ABD_SCATTER(sabd).abd_chunks[new_offset >> PAGE_SHIFT],
 	    chunkcnt * sizeof (void *));
 
 	return (abd);
 }
 
-static inline size_t
-abd_iter_scatter_chunk_offset(struct abd_iter *aiter)
+/*
+ * Allocate a scatter ABD structure from user pages.
+ */
+abd_t *
+abd_alloc_from_pages(vm_page_t *pages, unsigned long offset, uint64_t size)
 {
-	ASSERT(!abd_is_linear(aiter->iter_abd));
-	return ((ABD_SCATTER(aiter->iter_abd).abd_offset +
-	    aiter->iter_pos) % zfs_abd_chunk_size);
-}
+	VERIFY3U(size, <=, DMU_MAX_ACCESS);
+	ASSERT3U(offset, <, PAGE_SIZE);
+	ASSERT3P(pages, !=, NULL);
+	abd_t *abd = NULL;
+#if 0
+	abd = abd_alloc_struct(size);
+	abd->abd_flags |= ABD_FLAG_OWNER | ABD_FLAG_FROM_PAGES;
+	abd->abd_size = size;
 
-static inline size_t
-abd_iter_scatter_chunk_index(struct abd_iter *aiter)
-{
-	ASSERT(!abd_is_linear(aiter->iter_abd));
-	return ((ABD_SCATTER(aiter->iter_abd).abd_offset +
-	    aiter->iter_pos) / zfs_abd_chunk_size);
+	if ((offset + size) <= PAGE_SIZE) {
+		/*
+		 * There is only a single page worth of data, so we will just
+		 * use  a linear ABD. We have to make sure to take into account
+		 * the offset though. In all other cases our offset will be 0
+		 * as we are always PAGE_SIZE aligned.
+		 */
+		abd->abd_flags |= ABD_FLAG_LINEAR | ABD_FLAG_LINEAR_PAGE;
+		ABD_LINEAR_BUF(abd) = (char *)zfs_map_page(pages[0],
+		    &abd->abd_u.abd_linear.sf) + offset;
+	} else {
+		ABD_SCATTER(abd).abd_offset = offset;
+		ASSERT0(ABD_SCATTER(abd).abd_offset);
+
+		/*
+		 * Setting the ABD's abd_chunks to point to the user pages.
+		 */
+		for (int i = 0; i < abd_chunkcnt_for_bytes(size); i++)
+			ABD_SCATTER(abd).abd_chunks[i] = pages[i];
+	}
+#endif
+	return (abd);
 }
 
 /*
@@ -397,10 +506,8 @@ abd_iter_init(struct abd_iter *aiter, abd_t *abd)
 {
 	ASSERT(!abd_is_gang(abd));
 	abd_verify(abd);
+	memset(aiter, 0, sizeof (struct abd_iter));
 	aiter->iter_abd = abd;
-	aiter->iter_pos = 0;
-	aiter->iter_mapaddr = NULL;
-	aiter->iter_mapsize = 0;
 }
 
 /*
@@ -439,29 +546,25 @@ void
 abd_iter_map(struct abd_iter *aiter)
 {
 	void *paddr;
-	size_t offset = 0;
 
 	ASSERT3P(aiter->iter_mapaddr, ==, NULL);
 	ASSERT0(aiter->iter_mapsize);
-
-	/* Panic if someone has changed zfs_abd_chunk_size */
-	IMPLY(!abd_is_linear(aiter->iter_abd), zfs_abd_chunk_size ==
-	    ABD_SCATTER(aiter->iter_abd).abd_chunk_size);
 
 	/* There's nothing left to iterate over, so do nothing */
 	if (abd_iter_at_end(aiter))
 		return;
 
-	if (abd_is_linear(aiter->iter_abd)) {
-		offset = aiter->iter_pos;
-		aiter->iter_mapsize = aiter->iter_abd->abd_size - offset;
-		paddr = ABD_LINEAR_BUF(aiter->iter_abd);
+	abd_t *abd = aiter->iter_abd;
+	size_t offset = aiter->iter_pos;
+	if (abd_is_linear(abd)) {
+		aiter->iter_mapsize = abd->abd_size - offset;
+		paddr = ABD_LINEAR_BUF(abd);
 	} else {
-		size_t index = abd_iter_scatter_chunk_index(aiter);
-		offset = abd_iter_scatter_chunk_offset(aiter);
-		aiter->iter_mapsize = MIN(zfs_abd_chunk_size - offset,
-		    aiter->iter_abd->abd_size - aiter->iter_pos);
-		paddr = ABD_SCATTER(aiter->iter_abd).abd_chunks[index];
+		offset += ABD_SCATTER(abd).abd_offset;
+		paddr = ABD_SCATTER(abd).abd_chunks[offset >> PAGE_SHIFT];
+		offset &= PAGE_MASK;
+		aiter->iter_mapsize = MIN(ABD_PGSIZE - offset,
+		    abd->abd_size - aiter->iter_pos);
 	}
 	aiter->iter_mapaddr = (char *)paddr + offset;
 }
@@ -473,12 +576,10 @@ abd_iter_map(struct abd_iter *aiter)
 void
 abd_iter_unmap(struct abd_iter *aiter)
 {
-	/* There's nothing left to unmap, so do nothing */
-	if (abd_iter_at_end(aiter))
-		return;
-
-	ASSERT3P(aiter->iter_mapaddr, !=, NULL);
-	ASSERT3U(aiter->iter_mapsize, >, 0);
+	if (!abd_iter_at_end(aiter)) {
+		ASSERT3P(aiter->iter_mapaddr, !=, NULL);
+		ASSERT3U(aiter->iter_mapsize, >, 0);
+	}
 
 	aiter->iter_mapaddr = NULL;
 	aiter->iter_mapsize = 0;
@@ -487,5 +588,92 @@ abd_iter_unmap(struct abd_iter *aiter)
 void
 abd_cache_reap_now(void)
 {
-	kmem_cache_reap_now(abd_chunk_cache);
+	/*
+	 * This function is called by arc_kmem_reap_soon(), which also invokes
+	 * kmem_cache_reap_now() on several other kmem caches.
+	 *
+	 * kmem_cache_reap_now() now operates on all kmem caches at each
+	 * invocation (ignoring its kmem_cache_t argument except for an ASSERT
+	 * in DEBUG builds) by invoking kmem_reap().  Previously
+	 * kmem_cache_reap_now() would clearing the caches magazine working
+	 * set and starting a reap immediately and without regard to the
+	 * kmem_reaping compare-and-swap flag.
+	 *
+	 * Previously in this function we would call kmem_cache_reap_now() for
+	 * each of the abd_chunk and subpage kmem caches.  Now, since this
+	 * function is called after several kmem_cache_reap_now(), it
+	 * can be a noop.
+	 */
 }
+
+/*
+ * Borrow a raw buffer from an ABD without copying the contents of the ABD
+ * into the buffer. If the ABD is scattered, this will alloate a raw buffer
+ * whose contents are undefined. To copy over the existing data in the ABD, use
+ * abd_borrow_buf_copy() instead.
+ */
+void *
+abd_borrow_buf(abd_t *abd, size_t n)
+{
+	void *buf;
+	abd_verify(abd);
+	ASSERT3U(abd->abd_size, >=, 0);
+	if (abd_is_linear(abd)) {
+		buf = abd_to_buf(abd);
+	} else {
+		buf = zio_buf_alloc(n);
+	}
+#ifdef ZFS_DEBUG
+	(void) zfs_refcount_add_many(&abd->abd_children, n, buf);
+#endif
+	return (buf);
+}
+
+void *
+abd_borrow_buf_copy(abd_t *abd, size_t n)
+{
+	void *buf = abd_borrow_buf(abd, n);
+	if (!abd_is_linear(abd)) {
+		abd_copy_to_buf(buf, abd, n);
+	}
+	return (buf);
+}
+
+/*
+ * Return a borrowed raw buffer to an ABD. If the ABD is scattered, this will
+ * no change the contents of the ABD and will ASSERT that you didn't modify
+ * the buffer since it was borrowed. If you want any changes you made to buf to
+ * be copied back to abd, use abd_return_buf_copy() instead.
+ */
+void
+abd_return_buf(abd_t *abd, void *buf, size_t n)
+{
+	abd_verify(abd);
+	ASSERT3U(abd->abd_size, >=, n);
+#ifdef ZFS_DEBUG
+	(void) zfs_refcount_remove_many(&abd->abd_children, n, buf);
+#endif
+	if (abd_is_linear(abd)) {
+		ASSERT3P(buf, ==, abd_to_buf(abd));
+	} else {
+		ASSERT0(abd_cmp_buf(abd, buf, n));
+		zio_buf_free(buf, n);
+	}
+}
+
+void
+abd_return_buf_copy(abd_t *abd, void *buf, size_t n)
+{
+	if (!abd_is_linear(abd)) {
+		abd_copy_from_buf(abd, buf, n);
+	}
+	abd_return_buf(abd, buf, n);
+}
+
+/* Tunable Parameters */
+module_param(zfs_abd_scatter_enabled, int, 0644);
+MODULE_PARM_DESC(zfs_abd_scatter_enabled,
+	"Toggle whether ABD allocations must be linear.");
+module_param(zfs_abd_scatter_min_size, int, 0644);
+MODULE_PARM_DESC(zfs_abd_scatter_min_size,
+	"Minimum size of scatter allocations.");

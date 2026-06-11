@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -28,7 +29,6 @@
 #include <libintl.h>
 #include <sys/types.h>
 #include <sys/inttypes.h>
-#include <sys/note.h>
 #include <stdarg.h>
 #include "libnvpair.h"
 
@@ -71,7 +71,7 @@ struct nvlist_printops {
 	DEFINEOP(print_int64, int64_t);
 	DEFINEOP(print_uint64, uint64_t);
 	DEFINEOP(print_double, double);
-	DEFINEOP(print_string, char *);
+	DEFINEOP(print_string, const char *);
 	DEFINEOP(print_hrtime, hrtime_t);
 	DEFINEOP(print_nvlist, nvlist_t *);
 	DEFINEARROP(print_boolean_array, boolean_t *);
@@ -84,7 +84,7 @@ struct nvlist_printops {
 	DEFINEARROP(print_uint32_array, uint32_t *);
 	DEFINEARROP(print_int64_array, int64_t *);
 	DEFINEARROP(print_uint64_array, uint64_t *);
-	DEFINEARROP(print_string_array, char **);
+	DEFINEARROP(print_string_array, const char **);
 	DEFINEARROP(print_nvlist_array, nvlist_t **);
 };
 
@@ -191,15 +191,26 @@ static int \
 nvprint_##type_and_variant(nvlist_prtctl_t pctl, void *private, \
     nvlist_t *nvl, const char *name, vtype value) \
 { \
+	(void) private; \
+	(void) nvl; \
 	FILE *fp = pctl->nvprt_fp; \
-	NOTE(ARGUNUSED(private)) \
-	NOTE(ARGUNUSED(nvl)) \
 	indent(pctl, 1); \
 	(void) fprintf(fp, pctl->nvprt_nmfmt, name); \
 	(void) fprintf(fp, vfmt, (ptype)value); \
 	return (1); \
 }
 
+/*
+ * Workaround for GCC 12+ with UBSan enabled deficencies.
+ *
+ * GCC 12+ invoked with -fsanitize=undefined incorrectly reports the code
+ * below as violating -Wformat-overflow.
+ */
+#if defined(__GNUC__) && !defined(__clang__) && \
+	defined(ZFS_UBSAN_ENABLED) && defined(HAVE_FORMAT_OVERFLOW)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-overflow"
+#endif
 NVLIST_PRTFUNC(boolean, int, int, "%d")
 NVLIST_PRTFUNC(boolean_value, boolean_t, int, "%d")
 NVLIST_PRTFUNC(byte, uchar_t, uchar_t, "0x%2.2x")
@@ -212,8 +223,12 @@ NVLIST_PRTFUNC(uint32, uint32_t, uint32_t, "0x%x")
 NVLIST_PRTFUNC(int64, int64_t, longlong_t, "%lld")
 NVLIST_PRTFUNC(uint64, uint64_t, u_longlong_t, "0x%llx")
 NVLIST_PRTFUNC(double, double, double, "0x%f")
-NVLIST_PRTFUNC(string, char *, char *, "%s")
+NVLIST_PRTFUNC(string, const char *, const char *, "%s")
 NVLIST_PRTFUNC(hrtime, hrtime_t, hrtime_t, "0x%llx")
+#if defined(__GNUC__) && !defined(__clang__) && \
+	defined(ZFS_UBSAN_ENABLED) && defined(HAVE_FORMAT_OVERFLOW)
+#pragma GCC diagnostic pop
+#endif
 
 /*
  * Generate functions to print array-valued nvlist members.
@@ -224,10 +239,10 @@ static int \
 nvaprint_##type_and_variant(nvlist_prtctl_t pctl, void *private, \
     nvlist_t *nvl, const char *name, vtype *valuep, uint_t count) \
 { \
+	(void) private; \
+	(void) nvl; \
 	FILE *fp = pctl->nvprt_fp; \
 	uint_t i; \
-	NOTE(ARGUNUSED(private)) \
-	NOTE(ARGUNUSED(nvl)) \
 	for (i = 0; i < count; i++) { \
 		if (i == 0 || pctl->nvprt_btwnarrfmt_nl) { \
 			indent(pctl, 1); \
@@ -252,13 +267,13 @@ NVLIST_ARRPRTFUNC(int32_array, int32_t, int32_t, "%d")
 NVLIST_ARRPRTFUNC(uint32_array, uint32_t, uint32_t, "0x%x")
 NVLIST_ARRPRTFUNC(int64_array, int64_t, longlong_t, "%lld")
 NVLIST_ARRPRTFUNC(uint64_array, uint64_t, u_longlong_t, "0x%llx")
-NVLIST_ARRPRTFUNC(string_array, char *, char *, "%s")
+NVLIST_ARRPRTFUNC(string_array, const char *, const char *, "%s")
 
-/*ARGSUSED*/
 static int
 nvprint_nvlist(nvlist_prtctl_t pctl, void *private,
     nvlist_t *nvl, const char *name, nvlist_t *value)
 {
+	(void) private, (void) nvl;
 	FILE *fp = pctl->nvprt_fp;
 
 	indent(pctl, 1);
@@ -274,11 +289,11 @@ nvprint_nvlist(nvlist_prtctl_t pctl, void *private,
 	return (1);
 }
 
-/*ARGSUSED*/
 static int
 nvaprint_nvlist_array(nvlist_prtctl_t pctl, void *private,
     nvlist_t *nvl, const char *name, nvlist_t **valuep, uint_t count)
 {
+	(void) private, (void) nvl;
 	FILE *fp = pctl->nvprt_fp;
 	uint_t i;
 
@@ -369,7 +384,7 @@ nvlist_prtctl_setfmt(nvlist_prtctl_t pctl, enum nvlist_prtctl_fmt which,
 			pctl->nvprt_btwnarrfmt_nl = 0;
 		} else {
 			pctl->nvprt_btwnarrfmt = fmt;
-			pctl->nvprt_btwnarrfmt_nl = (strstr(fmt, "\n") != NULL);
+			pctl->nvprt_btwnarrfmt_nl = (strchr(fmt, '\n') != NULL);
 		}
 		break;
 
@@ -384,13 +399,13 @@ nvlist_prtctl_dofmt(nvlist_prtctl_t pctl, enum nvlist_prtctl_fmt which, ...)
 {
 	FILE *fp = pctl->nvprt_fp;
 	va_list ap;
-	char *name;
+	const char *name;
 
 	va_start(ap, which);
 
 	switch (which) {
 	case NVLIST_FMT_MEMBER_NAME:
-		name = va_arg(ap, char *);
+		name = va_arg(ap, const char *);
 		(void) fprintf(fp, pctl->nvprt_nmfmt, name);
 		break;
 
@@ -439,7 +454,7 @@ NVLIST_PRINTCTL_REPLACE(uint32, uint32_t)
 NVLIST_PRINTCTL_REPLACE(int64, int64_t)
 NVLIST_PRINTCTL_REPLACE(uint64, uint64_t)
 NVLIST_PRINTCTL_REPLACE(double, double)
-NVLIST_PRINTCTL_REPLACE(string, char *)
+NVLIST_PRINTCTL_REPLACE(string, const char *)
 NVLIST_PRINTCTL_REPLACE(hrtime, hrtime_t)
 NVLIST_PRINTCTL_REPLACE(nvlist, nvlist_t *)
 
@@ -463,7 +478,7 @@ NVLIST_PRINTCTL_AREPLACE(int32_array, int32_t *)
 NVLIST_PRINTCTL_AREPLACE(uint32_array, uint32_t *)
 NVLIST_PRINTCTL_AREPLACE(int64_array, int64_t *)
 NVLIST_PRINTCTL_AREPLACE(uint64_array, uint64_t *)
-NVLIST_PRINTCTL_AREPLACE(string_array, char **)
+NVLIST_PRINTCTL_AREPLACE(string_array, const char **)
 NVLIST_PRINTCTL_AREPLACE(nvlist_array, nvlist_t **)
 
 /*
@@ -566,7 +581,7 @@ static void
 nvlist_print_with_indent(nvlist_t *nvl, nvlist_prtctl_t pctl)
 {
 	FILE *fp = pctl->nvprt_fp;
-	char *name;
+	const char *name;
 	uint_t nelem;
 	nvpair_t *nvp;
 
@@ -656,7 +671,7 @@ nvlist_print_with_indent(nvlist_t *nvl, nvlist_prtctl_t pctl)
 			break;
 		}
 		case DATA_TYPE_STRING: {
-			char *val;
+			const char *val;
 			(void) nvpair_value_string(nvp, &val);
 			RENDER(pctl, string, nvl, name, val);
 			break;
@@ -722,7 +737,7 @@ nvlist_print_with_indent(nvlist_t *nvl, nvlist_prtctl_t pctl)
 			break;
 		}
 		case DATA_TYPE_STRING_ARRAY: {
-			char **val;
+			const char **val;
 			(void) nvpair_value_string_array(nvp, &val, &nelem);
 			ARENDER(pctl, string_array, nvl, name, val, nelem);
 			break;
@@ -768,159 +783,6 @@ nvlist_prt(nvlist_t *nvl, nvlist_prtctl_t pctl)
 	nvlist_print_with_indent(nvl, pctl);
 }
 
-#define	NVP(elem, type, vtype, ptype, format) { \
-	vtype	value; \
-\
-	(void) nvpair_value_##type(elem, &value); \
-	(void) printf("%*s%s: " format "\n", indent, "", \
-	    nvpair_name(elem), (ptype)value); \
-}
-
-#define	NVPA(elem, type, vtype, ptype, format) { \
-	uint_t	i, count; \
-	vtype	*value;  \
-\
-	(void) nvpair_value_##type(elem, &value, &count); \
-	for (i = 0; i < count; i++) { \
-		(void) printf("%*s%s[%d]: " format "\n", indent, "", \
-		    nvpair_name(elem), i, (ptype)value[i]); \
-	} \
-}
-
-/*
- * Similar to nvlist_print() but handles arrays slightly differently.
- */
-void
-dump_nvlist(nvlist_t *list, int indent)
-{
-	nvpair_t	*elem = NULL;
-	boolean_t	bool_value;
-	nvlist_t	*nvlist_value;
-	nvlist_t	**nvlist_array_value;
-	uint_t		i, count;
-
-	if (list == NULL) {
-		return;
-	}
-
-	while ((elem = nvlist_next_nvpair(list, elem)) != NULL) {
-		switch (nvpair_type(elem)) {
-		case DATA_TYPE_BOOLEAN:
-			(void) printf("%*s%s\n", indent, "", nvpair_name(elem));
-			break;
-
-		case DATA_TYPE_BOOLEAN_VALUE:
-			(void) nvpair_value_boolean_value(elem, &bool_value);
-			(void) printf("%*s%s: %s\n", indent, "",
-			    nvpair_name(elem), bool_value ? "true" : "false");
-			break;
-
-		case DATA_TYPE_BYTE:
-			NVP(elem, byte, uchar_t, int, "%u");
-			break;
-
-		case DATA_TYPE_INT8:
-			NVP(elem, int8, int8_t, int, "%d");
-			break;
-
-		case DATA_TYPE_UINT8:
-			NVP(elem, uint8, uint8_t, int, "%u");
-			break;
-
-		case DATA_TYPE_INT16:
-			NVP(elem, int16, int16_t, int, "%d");
-			break;
-
-		case DATA_TYPE_UINT16:
-			NVP(elem, uint16, uint16_t, int, "%u");
-			break;
-
-		case DATA_TYPE_INT32:
-			NVP(elem, int32, int32_t, long, "%ld");
-			break;
-
-		case DATA_TYPE_UINT32:
-			NVP(elem, uint32, uint32_t, ulong_t, "%lu");
-			break;
-
-		case DATA_TYPE_INT64:
-			NVP(elem, int64, int64_t, longlong_t, "%lld");
-			break;
-
-		case DATA_TYPE_UINT64:
-			NVP(elem, uint64, uint64_t, u_longlong_t, "%llu");
-			break;
-
-		case DATA_TYPE_STRING:
-			NVP(elem, string, char *, char *, "'%s'");
-			break;
-
-		case DATA_TYPE_BYTE_ARRAY:
-			NVPA(elem, byte_array, uchar_t, int, "%u");
-			break;
-
-		case DATA_TYPE_INT8_ARRAY:
-			NVPA(elem, int8_array, int8_t, int, "%d");
-			break;
-
-		case DATA_TYPE_UINT8_ARRAY:
-			NVPA(elem, uint8_array, uint8_t, int, "%u");
-			break;
-
-		case DATA_TYPE_INT16_ARRAY:
-			NVPA(elem, int16_array, int16_t, int, "%d");
-			break;
-
-		case DATA_TYPE_UINT16_ARRAY:
-			NVPA(elem, uint16_array, uint16_t, int, "%u");
-			break;
-
-		case DATA_TYPE_INT32_ARRAY:
-			NVPA(elem, int32_array, int32_t, long, "%ld");
-			break;
-
-		case DATA_TYPE_UINT32_ARRAY:
-			NVPA(elem, uint32_array, uint32_t, ulong_t, "%lu");
-			break;
-
-		case DATA_TYPE_INT64_ARRAY:
-			NVPA(elem, int64_array, int64_t, longlong_t, "%lld");
-			break;
-
-		case DATA_TYPE_UINT64_ARRAY:
-			NVPA(elem, uint64_array, uint64_t, u_longlong_t,
-			    "%llu");
-			break;
-
-		case DATA_TYPE_STRING_ARRAY:
-			NVPA(elem, string_array, char *, char *, "'%s'");
-			break;
-
-		case DATA_TYPE_NVLIST:
-			(void) nvpair_value_nvlist(elem, &nvlist_value);
-			(void) printf("%*s%s:\n", indent, "",
-			    nvpair_name(elem));
-			dump_nvlist(nvlist_value, indent + 4);
-			break;
-
-		case DATA_TYPE_NVLIST_ARRAY:
-			(void) nvpair_value_nvlist_array(elem,
-			    &nvlist_array_value, &count);
-			for (i = 0; i < count; i++) {
-				(void) printf("%*s%s[%u]:\n", indent, "",
-				    nvpair_name(elem), i);
-				dump_nvlist(nvlist_array_value[i], indent + 4);
-			}
-			break;
-
-		default:
-			(void) printf(dgettext(TEXT_DOMAIN, "bad config type "
-			    "%d for %s\n"), nvpair_type(elem),
-			    nvpair_name(elem));
-		}
-	}
-}
-
 /*
  * ======================================================================
  * |									|
@@ -947,11 +809,11 @@ dump_nvlist(nvlist_t *list, int indent)
  */
 int
 nvpair_value_match_regex(nvpair_t *nvp, int ai,
-    char *value, regex_t *value_regex, char **ep)
+    const char *value, regex_t *value_regex, const char **ep)
 {
-	char	*evalue;
-	uint_t	a_len;
-	int	sr;
+	const char	*evalue;
+	uint_t		a_len;
+	int		sr;
 
 	if (ep)
 		*ep = NULL;
@@ -979,7 +841,7 @@ nvpair_value_match_regex(nvpair_t *nvp, int ai,
 	sr = EOF;
 	switch (nvpair_type(nvp)) {
 	case DATA_TYPE_STRING: {
-		char	*val;
+		const char *val;
 
 		/* check string value for match */
 		if (nvpair_value_string(nvp, &val) == 0) {
@@ -995,7 +857,7 @@ nvpair_value_match_regex(nvpair_t *nvp, int ai,
 		break;
 	}
 	case DATA_TYPE_STRING_ARRAY: {
-		char **val_array;
+		const char **val_array;
 
 		/* check indexed string value of array for match */
 		if ((nvpair_value_string_array(nvp, &val_array, &a_len) == 0) &&
@@ -1271,7 +1133,34 @@ nvpair_value_match_regex(nvpair_t *nvp, int ai,
 }
 
 int
-nvpair_value_match(nvpair_t *nvp, int ai, char *value, char **ep)
+nvpair_value_match(nvpair_t *nvp, int ai, const char *value, const char **ep)
 {
 	return (nvpair_value_match_regex(nvp, ai, value, NULL, ep));
+}
+
+/*
+ * Similar to nvlist_print() but handles arrays slightly differently.
+ */
+void
+dump_nvlist(nvlist_t *list, int indent)
+{
+	int len;
+	char *buf;
+
+	len = nvlist_snprintf(NULL, 0, list, indent);
+	len++;	/* Add null terminator */
+
+	buf = malloc(len);
+	if (buf == NULL)
+		return;
+
+	(void) nvlist_snprintf(buf, len, list, indent);
+
+	/*
+	 * fputs does not have limitations on the size of the buffer being
+	 * printed (unlike printf).
+	 */
+	fputs(buf, stdout);
+
+	free(buf);
 }

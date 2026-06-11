@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -25,6 +26,10 @@
 #ifndef	_SYS_ZFS_SYSFS_H
 #define	_SYS_ZFS_SYSFS_H extern __attribute__((visibility("default")))
 
+struct zfs_mod_supported_features;
+struct zfs_mod_supported_features *zfs_mod_list_supported(const char *scope);
+void zfs_mod_list_supported_free(struct zfs_mod_supported_features *);
+
 #ifdef _KERNEL
 
 void zfs_sysfs_init(void);
@@ -35,10 +40,12 @@ void zfs_sysfs_fini(void);
 #define	zfs_sysfs_init()
 #define	zfs_sysfs_fini()
 
-_SYS_ZFS_SYSFS_H boolean_t zfs_mod_supported(const char *, const char *);
+_SYS_ZFS_SYSFS_H boolean_t zfs_mod_supported(const char *, const char *,
+    const struct zfs_mod_supported_features *);
 #endif
 
 #define	ZFS_SYSFS_POOL_PROPERTIES	"properties.pool"
+#define	ZFS_SYSFS_VDEV_PROPERTIES	"properties.vdev"
 #define	ZFS_SYSFS_DATASET_PROPERTIES	"properties.dataset"
 #define	ZFS_SYSFS_KERNEL_FEATURES	"features.kernel"
 #define	ZFS_SYSFS_POOL_FEATURES		"features.pool"

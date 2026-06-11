@@ -72,7 +72,7 @@ extern uint64_t physmem;
 
 void *zfs_kmem_alloc(size_t size, int kmflags);
 void *zfs_kmem_zalloc(size_t size, int kmflags);
-void zfs_kmem_free(void *buf, size_t size);
+void zfs_kmem_free(const void *buf, size_t size);
 
 void spl_kmem_init(uint64_t);
 void spl_kmem_thread_init();
@@ -104,6 +104,7 @@ uint64_t spl_free_last_pressure_wrapper(void);
 #define	KMC_IDENTIFIER	0x00400000	/* internal use only */
 #define	KMC_PREFILL	0x00800000
 #define	KMC_ARENA_SLAB	0x01000000	/* use a bigger kmem cache */
+#define	KMC_RECLAIMABLE	0x0
 
 struct kmem_cache;
 
@@ -128,7 +129,7 @@ kmem_cache_t *kmem_cache_create(char *name, size_t bufsize, size_t align,
     void *_private, struct vmem *vmp, int cflags);
 void kmem_cache_destroy(kmem_cache_t *cache);
 void *kmem_cache_alloc(kmem_cache_t *cache, int flags);
-void kmem_cache_free(kmem_cache_t *cache, void *buf);
+void kmem_cache_free(kmem_cache_t *cache, const void *buf);
 void kmem_cache_free_to_slab(kmem_cache_t *cache, void *buf);
 void kmem_cache_reap_now(kmem_cache_t *cache);
 void kmem_depot_ws_zero(kmem_cache_t *cache);
@@ -144,6 +145,8 @@ extern char *kmem_asprintf(const char *fmt, ...);
 extern char *kmem_strdup(const char *str);
 extern void kmem_strfree(char *str);
 extern char *kmem_vasprintf(const char *fmt, va_list ap);
+extern int kmem_scnprintf(char *restrict str, size_t size,
+    const char *restrict fmt, ...);
 extern char *kmem_strstr(const char *in, const char *str);
 extern void strident_canon(char *s, size_t n);
 extern uint64_t spl_kmem_cache_inuse(kmem_cache_t *cache);

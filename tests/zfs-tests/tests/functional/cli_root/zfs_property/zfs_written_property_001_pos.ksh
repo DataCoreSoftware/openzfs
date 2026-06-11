@@ -1,4 +1,5 @@
 #!/bin/ksh
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -36,7 +37,7 @@
 function cleanup
 {
 	for ds in $datasets; do
-		datasetexists $ds && log_must zfs destroy -R $TESTPOOL/$TESTFS1
+		datasetexists $ds && destroy_dataset $TESTPOOL/$TESTFS1 -R
 	done
 }
 function get_prop_mb
@@ -163,6 +164,7 @@ before_clone=$(get_prop written $TESTPOOL/$TESTFS1)
 log_must zfs clone $TESTPOOL/$TESTFS1@snap1 $TESTPOOL/$TESTFS1/snap1.clone
 log_must dd if=/dev/urandom of=/$TESTPOOL/$TESTFS1/snap1.clone/testfile bs=1M \
     count=40
+sync_pool
 after_clone=$(get_prop written $TESTPOOL/$TESTFS1)
 within_percent $before_clone $after_clone 99.5 || \
     log_fail "unexpected written for clone $before_clone $after_clone"
@@ -217,12 +219,11 @@ for ds in $datasets; do
 	sync_pool
 done
 recursive_output=$(zfs get -p -r written@current $TESTPOOL | \
-    grep -v $TESTFS1@ | grep -v $TESTFS2@ | grep -v $TESTFS3@ | \
-    grep -v "VALUE" | grep -v "-")
+    grep -ve $TESTFS1@ -e $TESTFS2@ -e $TESTFS3@ -e "VALUE" | grep -v "-")
 expected="$((20 * mb_block))"
 for ds in $datasets; do
 	writtenat=$(echo "$recursive_output" | grep -v $ds/)
-	writtenat=$(echo "$writtenat" | grep $ds | awk '{print $3}')
+	writtenat=$(echo "$writtenat" | awk -v ds="$ds" '$0 ~ ds {print $3}')
 	within_percent $writtenat $expected 99.5 || \
 	    log_fail "Unexpected written@ value on $ds"
 done

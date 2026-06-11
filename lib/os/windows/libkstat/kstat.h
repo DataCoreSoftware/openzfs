@@ -27,7 +27,7 @@
 #define	_KSTAT_H
 
 #include <sys/types.h>
-#include <sys/kstat.h>
+#include "kstat_kernel.h"
 
 #ifdef	__cplusplus
 extern "C" {

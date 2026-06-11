@@ -52,6 +52,14 @@ struct timespec;
 #define	NSEC2SEC(n) ((n) / (NANOSEC / SEC))
 #define	SEC2NSEC(m) ((hrtime_t)(m) * (NANOSEC / SEC))
 
+static inline hrtime_t
+getlrtime(void)
+{
+	LARGE_INTEGER freq;
+	LARGE_INTEGER c = KeQueryPerformanceCounter(&freq);
+	return (hrtime_t)((c.QuadPart * 1000000000LL) / freq.QuadPart);
+}
+
 /* Already defined in include/linux/time.h */
 #undef CLOCK_THREAD_CPUTIME_ID
 #undef CLOCK_REALTIME
@@ -89,8 +97,6 @@ extern void hrt2ts(hrtime_t hrt, struct timespec *tsp);
 #define	SEC_TO_TICK(sec)	((sec) * hz)
 #define	NSEC_TO_TICK(nsec)	((nsec) / (NANOSEC / hz))
 
-#define	NSEC2USEC(n)    ((n) / (NANOSEC / MICROSEC))
-
 /*
  * ZFS time is 2* 64bit values, which are seconds, and nanoseconds since 1970
  * Windows time is 1 64bit value; representing the number of
@@ -109,8 +115,8 @@ extern void hrt2ts(hrtime_t hrt, struct timespec *tsp);
 	(WT) = ((UT)[1]) + ((UT)[0] * 10000000ULL) + 116444736000000000ULL; \
 	} while (0)
 
-#define	TIME_UNIX_TO_WINDOWS_EX(SEC, USEC, WT) do { \
-	(WT) = (USEC) + ((SEC) * 10000000ULL) + 116444736000000000ULL; \
+#define	TIME_UNIX_TO_WINDOWS_EX(SEC, NSEC, WT) do { \
+	(WT) = (NSEC) + ((SEC) * 10000000ULL) + 116444736000000000ULL; \
 	} while (0)
 
 #endif  /* _SPL_TIME_H */

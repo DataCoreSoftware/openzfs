@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -22,7 +23,6 @@
 /*
  * Copyright (c) 2012, 2020 by Delphix. All rights reserved.
  * Copyright (c) 2013 Steven Hartland. All rights reserved.
- * Copyright (c) 2017 Datto Inc.
  * Copyright 2017 RackTop Systems.
  * Copyright (c) 2017 Open-E, Inc. All Rights Reserved.
  * Copyright (c) 2019, 2020 by Christian Schwarz. All rights reserved.
@@ -94,9 +94,26 @@
 #include <sys/stat.h>
 #include <sys/zfs_ioctl.h>
 
+#if __FreeBSD__
+#define	BIG_PIPE_SIZE (64 * 1024) /* From sys/pipe.h */
+#endif
+
+#ifdef _WIN32
+/*
+ * 64k aswell
+ * https://stackoverflow.com/q/33553837
+ * https://docs.microsoft.com/en-au/windows/win32/api/namedpipeapi/
+ * nf-namedpipeapi-transactnamedpipe
+ */
+#define	BIG_PIPE_SIZE (64 * 1024)
+#endif
+#include "libzfs_core_impl.h"
+
 static int g_fd = -1;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_refcount;
+
+static int g_ioc_trace = 0;
 
 #ifdef ZFS_DEBUG
 static zfs_ioc_t fail_ioc_cmd = ZFS_IOC_LAST;
@@ -150,6 +167,10 @@ libzfs_core_init(void)
 #ifdef ZFS_DEBUG
 	libzfs_core_debug_ioc();
 #endif
+
+	if (getenv("ZFS_IOC_TRACE"))
+		g_ioc_trace = 1;
+
 	(void) pthread_mutex_unlock(&g_lock);
 	return (0);
 }
@@ -167,6 +188,42 @@ libzfs_core_fini(void)
 		g_fd = -1;
 	}
 	(void) pthread_mutex_unlock(&g_lock);
+}
+
+int
+lzc_ioctl_fd(int fd, unsigned long ioc, zfs_cmd_t *zc)
+{
+	if (!g_ioc_trace)
+		return (lzc_ioctl_fd_os(fd, ioc, zc));
+
+	nvlist_t *nvl;
+
+	fprintf(stderr, "=== lzc_ioctl: call: ioc=0x%lx name=%s\n",
+	    ioc, zc->zc_name[0] ? zc->zc_name : "[none]");
+	if (zc->zc_nvlist_src) {
+		nvl = fnvlist_unpack(
+		    (void *)(uintptr_t)zc->zc_nvlist_src,
+		    zc->zc_nvlist_src_size);
+		nvlist_print(stderr, nvl);
+		fnvlist_free(nvl);
+	}
+
+	int rc = lzc_ioctl_fd_os(fd, ioc, zc);
+	int err = errno;
+
+	fprintf(stderr, "=== lzc_ioctl: result: ioc=0x%lx name=%s "
+	    "rc=%d errno=%d\n", ioc, zc->zc_name[0] ? zc->zc_name : "[none]",
+	    rc, (rc < 0 ? err : 0));
+	if (rc >= 0 && zc->zc_nvlist_dst) {
+		nvl = fnvlist_unpack(
+		    (void *)(uintptr_t)zc->zc_nvlist_dst,
+		    zc->zc_nvlist_dst_size);
+		nvlist_print(stderr, nvl);
+		fnvlist_free(nvl);
+	}
+
+	errno = err;
+	return (rc);
 }
 
 static int
@@ -211,7 +268,7 @@ lzc_ioctl(zfs_ioc_t ioc, const char *name,
 		}
 	}
 
-	while (zfs_ioctl_fd(g_fd, ioc, &zc) != 0) {
+	while (lzc_ioctl_fd(g_fd, ioc, &zc) != 0) {
 		/*
 		 * If ioctl exited with ENOMEM, we retry the ioctl after
 		 * increasing the size of the destination nvlist.
@@ -244,6 +301,13 @@ out:
 		fnvlist_pack_free(packed, size);
 	free((void *)(uintptr_t)zc.zc_nvlist_dst);
 	return (error);
+}
+
+int
+lzc_scrub(zfs_ioc_t ioc, const char *name,
+    nvlist_t *source, nvlist_t **resultp)
+{
+	return (lzc_ioctl(ioc, name, source, resultp));
 }
 
 int
@@ -300,7 +364,7 @@ lzc_promote(const char *fsname, char *snapnamebuf, int snapnamelen)
 	VERIFY3S(g_fd, !=, -1);
 
 	(void) strlcpy(zc.zc_name, fsname, sizeof (zc.zc_name));
-	if (zfs_ioctl_fd(g_fd, ZFS_IOC_PROMOTE, &zc) != 0) {
+	if (lzc_ioctl_fd(g_fd, ZFS_IOC_PROMOTE, &zc) != 0) {
 		int error = errno;
 		if (error == EEXIST && snapnamebuf != NULL)
 			(void) strlcpy(snapnamebuf, zc.zc_string, snapnamelen);
@@ -319,7 +383,7 @@ lzc_rename(const char *source, const char *target)
 	VERIFY3S(g_fd, !=, -1);
 	(void) strlcpy(zc.zc_name, source, sizeof (zc.zc_name));
 	(void) strlcpy(zc.zc_value, target, sizeof (zc.zc_value));
-	error = zfs_ioctl_fd(g_fd, ZFS_IOC_RENAME, &zc);
+	error = lzc_ioctl_fd(g_fd, ZFS_IOC_RENAME, &zc);
 	if (error != 0)
 		error = errno;
 	return (error);
@@ -470,7 +534,7 @@ lzc_exists(const char *dataset)
 	VERIFY3S(g_fd, !=, -1);
 
 	(void) strlcpy(zc.zc_name, dataset, sizeof (zc.zc_name));
-	return (zfs_ioctl_fd(g_fd, ZFS_IOC_OBJSET_STATS, &zc) == 0);
+	return (lzc_ioctl_fd(g_fd, ZFS_IOC_OBJSET_STATS, &zc) == 0);
 }
 
 /*
@@ -478,10 +542,10 @@ lzc_exists(const char *dataset)
  * It was added to preserve the function signature in case it is
  * needed in the future.
  */
-/*ARGSUSED*/
 int
 lzc_sync(const char *pool_name, nvlist_t *innvl, nvlist_t **outnvl)
 {
+	(void) outnvl;
 	return (lzc_ioctl(ZFS_IOC_POOL_SYNC, pool_name, innvl, NULL));
 }
 
@@ -588,6 +652,137 @@ lzc_get_holds(const char *snapname, nvlist_t **holdsp)
 	return (lzc_ioctl(ZFS_IOC_GET_HOLDS, snapname, NULL, holdsp));
 }
 
+int
+lzc_get_props(const char *poolname, nvlist_t **props)
+{
+	return (lzc_ioctl(ZFS_IOC_POOL_GET_PROPS, poolname, NULL, props));
+}
+
+static unsigned int
+max_pipe_buffer(int infd)
+{
+#if __linux__
+	static unsigned int max;
+	if (max == 0) {
+		max = 1048576; /* fs/pipe.c default */
+
+		FILE *procf = fopen("/proc/sys/fs/pipe-max-size", "re");
+		if (procf != NULL) {
+			if (fscanf(procf, "%u", &max) <= 0) {
+				/* ignore error: max untouched if parse fails */
+			}
+			fclose(procf);
+		}
+	}
+
+	unsigned int cur = fcntl(infd, F_GETPIPE_SZ);
+	/*
+	 * Sadly, Linux has an unfixed deadlock if you do SETPIPE_SZ on a pipe
+	 * with data in it.
+	 * cf. #13232, https://bugzilla.kernel.org/show_bug.cgi?id=212295
+	 *
+	 * And since the problem is in waking up the writer, there's nothing
+	 * we can do about it from here.
+	 *
+	 * So if people want to, they can set this, but they
+	 * may regret it...
+	 */
+	if (getenv("ZFS_SET_PIPE_MAX") == NULL)
+		return (cur);
+	if (cur < max && fcntl(infd, F_SETPIPE_SZ, max) != -1)
+		cur = max;
+	return (cur);
+#else
+	/* FreeBSD automatically resizes */
+	(void) infd;
+	return (BIG_PIPE_SIZE);
+#endif
+}
+
+#if __linux__
+struct send_worker_ctx {
+	int from;	/* read end of pipe, with send data; closed on exit */
+	int to;		/* original arbitrary output fd; mustn't be a pipe */
+};
+
+static void *
+send_worker(void *arg)
+{
+	struct send_worker_ctx *ctx = arg;
+	unsigned int bufsiz = max_pipe_buffer(ctx->from);
+	ssize_t rd;
+
+	for (;;) {
+		rd = splice(ctx->from, NULL, ctx->to, NULL, bufsiz,
+		    SPLICE_F_MOVE | SPLICE_F_MORE);
+		if ((rd == -1 && errno != EINTR) || rd == 0)
+			break;
+	}
+	int err = (rd == -1) ? errno : 0;
+	close(ctx->from);
+	return ((void *)(uintptr_t)err);
+}
+#endif
+
+/*
+ * Since Linux 5.10, 4d03e3cc59828c82ee89ea6e27a2f3cdf95aaadf
+ * ("fs: don't allow kernel reads and writes without iter ops"),
+ * ZFS_IOC_SEND* will EINVAL when writing to /dev/null, /dev/zero, &c.
+ *
+ * This wrapper transparently executes func() with a pipe
+ * by spawning a thread to copy from that pipe to the original output
+ * in the background.
+ *
+ * Returns the error from func(), if nonzero,
+ * otherwise the error from the thread.
+ *
+ * No-op if orig_fd is -1, already a pipe (but the buffer size is bumped),
+ * and on not-Linux; as such, it is safe to wrap/call wrapped functions
+ * in a wrapped context.
+ */
+int
+lzc_send_wrapper(int (*func)(int, void *), int orig_fd, void *data)
+{
+#if __linux__
+	struct stat sb;
+	if (orig_fd != -1 && fstat(orig_fd, &sb) == -1)
+		return (errno);
+	if (orig_fd == -1 || S_ISFIFO(sb.st_mode)) {
+		if (orig_fd != -1)
+			(void) max_pipe_buffer(orig_fd);
+		return (func(orig_fd, data));
+	}
+	if ((fcntl(orig_fd, F_GETFL) & O_ACCMODE) == O_RDONLY)
+		return (errno = EBADF);
+
+	int rw[2];
+	if (pipe2(rw, O_CLOEXEC) == -1)
+		return (errno);
+
+	int err;
+	pthread_t send_thread;
+	struct send_worker_ctx ctx = {.from = rw[0], .to = orig_fd};
+	if ((err = pthread_create(&send_thread, NULL, send_worker, &ctx))
+	    != 0) {
+		close(rw[0]);
+		close(rw[1]);
+		return (errno = err);
+	}
+
+	err = func(rw[1], data);
+
+	void *send_err;
+	close(rw[1]);
+	pthread_join(send_thread, &send_err);
+	if (err == 0 && send_err != 0)
+		errno = err = (uintptr_t)send_err;
+
+	return (err);
+#else
+	return (func(orig_fd, data));
+#endif
+}
+
 /*
  * Generate a zfs send stream for the specified snapshot and write it to
  * the specified file descriptor.
@@ -658,9 +853,11 @@ lzc_send_resume(const char *snapname, const char *from, int fd,
  * redactnv: nvlist of string -> boolean(ignored) containing the names of all
  * the snapshots that we should redact with respect to.
  * redactbook: Name of the redaction bookmark to create.
+ *
+ * Pre-wrapped.
  */
-int
-lzc_send_resume_redacted(const char *snapname, const char *from, int fd,
+static int
+lzc_send_resume_redacted_cb_impl(const char *snapname, const char *from, int fd,
     enum lzc_send_flags flags, uint64_t resumeobj, uint64_t resumeoff,
     const char *redactbook)
 {
@@ -693,6 +890,40 @@ lzc_send_resume_redacted(const char *snapname, const char *from, int fd,
 	return (err);
 }
 
+struct lzc_send_resume_redacted {
+	const char *snapname;
+	const char *from;
+	enum lzc_send_flags flags;
+	uint64_t resumeobj;
+	uint64_t resumeoff;
+	const char *redactbook;
+};
+
+static int
+lzc_send_resume_redacted_cb(int fd, void *arg)
+{
+	struct lzc_send_resume_redacted *zsrr = arg;
+	return (lzc_send_resume_redacted_cb_impl(zsrr->snapname, zsrr->from,
+	    fd, zsrr->flags, zsrr->resumeobj, zsrr->resumeoff,
+	    zsrr->redactbook));
+}
+
+int
+lzc_send_resume_redacted(const char *snapname, const char *from, int fd,
+    enum lzc_send_flags flags, uint64_t resumeobj, uint64_t resumeoff,
+    const char *redactbook)
+{
+	struct lzc_send_resume_redacted zsrr = {
+		.snapname = snapname,
+		.from = from,
+		.flags = flags,
+		.resumeobj = resumeobj,
+		.resumeoff = resumeoff,
+		.redactbook = redactbook,
+	};
+	return (lzc_send_wrapper(lzc_send_resume_redacted_cb, fd, &zsrr));
+}
+
 /*
  * "from" can be NULL, a snapshot, or a bookmark.
  *
@@ -708,9 +939,11 @@ lzc_send_resume_redacted(const char *snapname, const char *from, int fd,
  * significantly more I/O and be less efficient than a send space estimation on
  * an equivalent snapshot. This process is also used if redact_snaps is
  * non-null.
+ *
+ * Pre-wrapped.
  */
-int
-lzc_send_space_resume_redacted(const char *snapname, const char *from,
+static int
+lzc_send_space_resume_redacted_cb_impl(const char *snapname, const char *from,
     enum lzc_send_flags flags, uint64_t resumeobj, uint64_t resumeoff,
     uint64_t resume_bytes, const char *redactbook, int fd, uint64_t *spacep)
 {
@@ -745,6 +978,45 @@ lzc_send_space_resume_redacted(const char *snapname, const char *from,
 		*spacep = fnvlist_lookup_uint64(result, "space");
 	nvlist_free(result);
 	return (err);
+}
+
+struct lzc_send_space_resume_redacted {
+	const char *snapname;
+	const char *from;
+	enum lzc_send_flags flags;
+	uint64_t resumeobj;
+	uint64_t resumeoff;
+	uint64_t resume_bytes;
+	const char *redactbook;
+	uint64_t *spacep;
+};
+
+static int
+lzc_send_space_resume_redacted_cb(int fd, void *arg)
+{
+	struct lzc_send_space_resume_redacted *zssrr = arg;
+	return (lzc_send_space_resume_redacted_cb_impl(zssrr->snapname,
+	    zssrr->from, zssrr->flags, zssrr->resumeobj, zssrr->resumeoff,
+	    zssrr->resume_bytes, zssrr->redactbook, fd, zssrr->spacep));
+}
+
+int
+lzc_send_space_resume_redacted(const char *snapname, const char *from,
+    enum lzc_send_flags flags, uint64_t resumeobj, uint64_t resumeoff,
+    uint64_t resume_bytes, const char *redactbook, int fd, uint64_t *spacep)
+{
+	struct lzc_send_space_resume_redacted zssrr = {
+		.snapname = snapname,
+		.from = from,
+		.flags = flags,
+		.resumeobj = resumeobj,
+		.resumeoff = resumeoff,
+		.resume_bytes = resume_bytes,
+		.redactbook = redactbook,
+		.spacep = spacep,
+	};
+	return (lzc_send_wrapper(lzc_send_space_resume_redacted_cb,
+	    fd, &zssrr));
 }
 
 int
@@ -785,7 +1057,7 @@ recv_read(int fd, void *buf, int ilen)
 static int
 recv_impl(const char *snapname, nvlist_t *recvdprops, nvlist_t *localprops,
     uint8_t *wkeydata, uint_t wkeylen, const char *origin, boolean_t force,
-    boolean_t resumable, boolean_t raw, int input_fd,
+    boolean_t heal, boolean_t resumable, boolean_t raw, int input_fd,
     const dmu_replay_record_t *begin_record, uint64_t *read_bytes,
     uint64_t *errflags, nvlist_t **errors)
 {
@@ -814,6 +1086,16 @@ recv_impl(const char *snapname, nvlist_t *recvdprops, nvlist_t *localprops,
 	}
 
 	/*
+	 * It is not uncommon for gigabytes to be processed by zfs receive.
+	 * Speculatively increase the buffer size if supported by the platform.
+	 */
+	struct stat sb;
+	if (fstat(input_fd, &sb) == -1)
+		return (errno);
+	if (S_ISFIFO(sb.st_mode))
+		(void) max_pipe_buffer(input_fd);
+
+	/*
 	 * The begin_record is normally a non-byteswapped BEGIN record.
 	 * For resumable streams it may be set to any non-byteswapped
 	 * dmu_replay_record_t.
@@ -830,7 +1112,7 @@ recv_impl(const char *snapname, nvlist_t *recvdprops, nvlist_t *localprops,
 	/*
 	 * All receives with a payload should use the new interface.
 	 */
-	if (resumable || raw || wkeydata != NULL || payload) {
+	if (resumable || heal || raw || wkeydata != NULL || payload) {
 		nvlist_t *outnvl = NULL;
 		nvlist_t *innvl = fnvlist_alloc();
 
@@ -870,6 +1152,8 @@ recv_impl(const char *snapname, nvlist_t *recvdprops, nvlist_t *localprops,
 		if (resumable)
 			fnvlist_add_boolean(innvl, "resumable");
 
+		if (heal)
+			fnvlist_add_boolean(innvl, "heal");
 
 		error = lzc_ioctl(ZFS_IOC_RECV_NEW, fsname, innvl, &outnvl);
 
@@ -892,7 +1176,8 @@ recv_impl(const char *snapname, nvlist_t *recvdprops, nvlist_t *localprops,
 		fnvlist_free(outnvl);
 	} else {
 		zfs_cmd_t zc = {"\0"};
-		char *packed = NULL;
+		char *rp_packed = NULL;
+		char *lp_packed = NULL;
 		size_t size;
 
 		ASSERT3S(g_refcount, >, 0);
@@ -901,14 +1186,14 @@ recv_impl(const char *snapname, nvlist_t *recvdprops, nvlist_t *localprops,
 		(void) strlcpy(zc.zc_value, snapname, sizeof (zc.zc_value));
 
 		if (recvdprops != NULL) {
-			packed = fnvlist_pack(recvdprops, &size);
-			zc.zc_nvlist_src = (uint64_t)(uintptr_t)packed;
+			rp_packed = fnvlist_pack(recvdprops, &size);
+			zc.zc_nvlist_src = (uint64_t)(uintptr_t)rp_packed;
 			zc.zc_nvlist_src_size = size;
 		}
 
 		if (localprops != NULL) {
-			packed = fnvlist_pack(localprops, &size);
-			zc.zc_nvlist_conf = (uint64_t)(uintptr_t)packed;
+			lp_packed = fnvlist_pack(localprops, &size);
+			zc.zc_nvlist_conf = (uint64_t)(uintptr_t)lp_packed;
 			zc.zc_nvlist_conf_size = size;
 		}
 
@@ -927,7 +1212,7 @@ recv_impl(const char *snapname, nvlist_t *recvdprops, nvlist_t *localprops,
 		zc.zc_nvlist_dst = (uint64_t)(uintptr_t)
 		    malloc(zc.zc_nvlist_dst_size);
 
-		error = zfs_ioctl_fd(g_fd, ZFS_IOC_RECV, &zc);
+		error = lzc_ioctl_fd(g_fd, ZFS_IOC_RECV, &zc);
 		if (error != 0) {
 			error = errno;
 		} else {
@@ -943,8 +1228,10 @@ recv_impl(const char *snapname, nvlist_t *recvdprops, nvlist_t *localprops,
 				    zc.zc_nvlist_dst_size, errors, KM_SLEEP));
 		}
 
-		if (packed != NULL)
-			fnvlist_pack_free(packed, size);
+		if (rp_packed != NULL)
+			fnvlist_pack_free(rp_packed, size);
+		if (lp_packed != NULL)
+			fnvlist_pack_free(lp_packed, size);
 		free((void *)(uintptr_t)zc.zc_nvlist_dst);
 	}
 
@@ -969,7 +1256,7 @@ lzc_receive(const char *snapname, nvlist_t *props, const char *origin,
     boolean_t force, boolean_t raw, int fd)
 {
 	return (recv_impl(snapname, props, NULL, NULL, 0, origin, force,
-	    B_FALSE, raw, fd, NULL, NULL, NULL, NULL));
+	    B_FALSE, B_FALSE, raw, fd, NULL, NULL, NULL, NULL));
 }
 
 /*
@@ -983,7 +1270,7 @@ lzc_receive_resumable(const char *snapname, nvlist_t *props, const char *origin,
     boolean_t force, boolean_t raw, int fd)
 {
 	return (recv_impl(snapname, props, NULL, NULL, 0, origin, force,
-	    B_TRUE, raw, fd, NULL, NULL, NULL, NULL));
+	    B_FALSE, B_TRUE, raw, fd, NULL, NULL, NULL, NULL));
 }
 
 /*
@@ -1006,7 +1293,7 @@ lzc_receive_with_header(const char *snapname, nvlist_t *props,
 		return (EINVAL);
 
 	return (recv_impl(snapname, props, NULL, NULL, 0, origin, force,
-	    resumable, raw, fd, begin_record, NULL, NULL, NULL));
+	    B_FALSE, resumable, raw, fd, begin_record, NULL, NULL, NULL));
 }
 
 /*
@@ -1034,8 +1321,9 @@ lzc_receive_one(const char *snapname, nvlist_t *props,
     uint64_t *read_bytes, uint64_t *errflags, uint64_t *action_handle,
     nvlist_t **errors)
 {
+	(void) action_handle, (void) cleanup_fd;
 	return (recv_impl(snapname, props, NULL, NULL, 0, origin, force,
-	    resumable, raw, input_fd, begin_record,
+	    B_FALSE, resumable, raw, input_fd, begin_record,
 	    read_bytes, errflags, errors));
 }
 
@@ -1055,8 +1343,29 @@ lzc_receive_with_cmdprops(const char *snapname, nvlist_t *props,
     uint64_t *read_bytes, uint64_t *errflags, uint64_t *action_handle,
     nvlist_t **errors)
 {
+	(void) action_handle, (void) cleanup_fd;
 	return (recv_impl(snapname, props, cmdprops, wkeydata, wkeylen, origin,
-	    force, resumable, raw, input_fd, begin_record,
+	    force, B_FALSE, resumable, raw, input_fd, begin_record,
+	    read_bytes, errflags, errors));
+}
+
+/*
+ * Like lzc_receive_with_cmdprops, but allows the caller to pass an additional
+ * 'heal' argument.
+ *
+ * The heal arguments tells us to heal the provided snapshot using the provided
+ * send stream
+ */
+int lzc_receive_with_heal(const char *snapname, nvlist_t *props,
+    nvlist_t *cmdprops, uint8_t *wkeydata, uint_t wkeylen, const char *origin,
+    boolean_t force, boolean_t heal, boolean_t resumable, boolean_t raw,
+    int input_fd, const dmu_replay_record_t *begin_record, int cleanup_fd,
+    uint64_t *read_bytes, uint64_t *errflags, uint64_t *action_handle,
+    nvlist_t **errors)
+{
+	(void) action_handle, (void) cleanup_fd;
+	return (recv_impl(snapname, props, cmdprops, wkeydata, wkeylen, origin,
+	    force, heal, resumable, raw, input_fd, begin_record,
 	    read_bytes, errflags, errors));
 }
 
@@ -1377,6 +1686,26 @@ lzc_pool_checkpoint_discard(const char *pool)
 }
 
 /*
+ * Load the requested data type for the specified pool.
+ */
+int
+lzc_pool_prefetch(const char *pool, zpool_prefetch_type_t type)
+{
+	int error;
+	nvlist_t *result = NULL;
+	nvlist_t *args = fnvlist_alloc();
+
+	fnvlist_add_int32(args, ZPOOL_PREFETCH_TYPE, type);
+
+	error = lzc_ioctl(ZFS_IOC_POOL_PREFETCH, pool, args, &result);
+
+	fnvlist_free(args);
+	fnvlist_free(result);
+
+	return (error);
+}
+
+/*
  * Executes a read-only channel program.
  *
  * A read-only channel program works programmatically the same way as a
@@ -1394,6 +1723,18 @@ lzc_channel_program_nosync(const char *pool, const char *program,
 {
 	return (lzc_channel_program_impl(pool, program, B_FALSE, timeout,
 	    memlimit, argnvl, outnvl));
+}
+
+int
+lzc_get_vdev_prop(const char *poolname, nvlist_t *innvl, nvlist_t **outnvl)
+{
+	return (lzc_ioctl(ZFS_IOC_VDEV_GET_PROPS, poolname, innvl, outnvl));
+}
+
+int
+lzc_set_vdev_prop(const char *poolname, nvlist_t *innvl, nvlist_t **outnvl)
+{
+	return (lzc_ioctl(ZFS_IOC_VDEV_SET_PROPS, poolname, innvl, outnvl));
 }
 
 /*
@@ -1641,4 +1982,26 @@ int
 lzc_get_bootenv(const char *pool, nvlist_t **outnvl)
 {
 	return (lzc_ioctl(ZFS_IOC_GET_BOOTENV, pool, NULL, outnvl));
+}
+
+/*
+ * Prune the specified amount from the pool's dedup table.
+ */
+int
+lzc_ddt_prune(const char *pool, zpool_ddt_prune_unit_t unit, uint64_t amount)
+{
+	int error;
+
+	nvlist_t *result = NULL;
+	nvlist_t *args = fnvlist_alloc();
+
+	fnvlist_add_int32(args, DDT_PRUNE_UNIT, unit);
+	fnvlist_add_uint64(args, DDT_PRUNE_AMOUNT, amount);
+
+	error = lzc_ioctl(ZFS_IOC_DDT_PRUNE, pool, args, &result);
+
+	fnvlist_free(args);
+	fnvlist_free(result);
+
+	return (error);
 }

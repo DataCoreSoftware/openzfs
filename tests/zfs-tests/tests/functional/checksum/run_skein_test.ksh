@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 
 #
 # This file and its contents are supplied under the terms of the
@@ -25,6 +26,6 @@
 log_assert "Run the tests for the Skein hash algorithm."
 
 freq=$(get_cpu_freq)
-log_must $STF_SUITE/tests/functional/checksum/skein_test $freq
+log_must skein_test $freq
 
 log_pass "Skein tests passed."

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2010 Pawel Jakub Dawidek <pjd@FreeBSD.org>
  * All rights reserved.
@@ -24,9 +25,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
-__FBSDID("$FreeBSD$");
-
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/jail.h>
@@ -42,19 +40,6 @@ ddi_strtol(const char *str, char **nptr, int base, long *result)
 {
 
 	*result = strtol(str, nptr, base);
-	return (0);
-}
-
-int
-ddi_strtoul(const char *str, char **nptr, int base, unsigned long *result)
-{
-
-	if (str == hw_serial) {
-		*result = prison0.pr_hostid;
-		return (0);
-	}
-
-	*result = strtoul(str, nptr, base);
 	return (0);
 }
 

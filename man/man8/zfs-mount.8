@@ -1,3 +1,4 @@
+.\" SPDX-License-Identifier: CDDL-1.0
 .\"
 .\" CDDL HEADER START
 .\"
@@ -6,7 +7,7 @@
 .\" You may not use this file except in compliance with the License.
 .\"
 .\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or http://www.opensolaris.org/os/licensing.
+.\" or https://opensource.org/licenses/CDDL-1.0.
 .\" See the License for the specific language governing permissions
 .\" and limitations under the License.
 .\"
@@ -29,7 +30,7 @@
 .\" Copyright 2018 Nexenta Systems, Inc.
 .\" Copyright 2019 Joyent, Inc.
 .\"
-.Dd February 16, 2019
+.Dd October 12, 2024
 .Dt ZFS-MOUNT 8
 .Os
 .
@@ -39,11 +40,12 @@
 .Sh SYNOPSIS
 .Nm zfs
 .Cm mount
+.Op Fl j
 .Nm zfs
 .Cm mount
 .Op Fl Oflv
 .Op Fl o Ar options
-.Fl a Ns | Ns Ar filesystem
+.Fl a Ns | Ns Fl R Ar filesystem Ns | Ns Ar filesystem
 .Nm zfs
 .Cm unmount
 .Op Fl fu
@@ -54,14 +56,19 @@
 .It Xo
 .Nm zfs
 .Cm mount
+.Op Fl j
 .Xc
 Displays all ZFS file systems currently mounted.
+.Bl -tag -width "-j"
+.It Fl j , -json
+Displays all mounted file systems in JSON format.
+.El
 .It Xo
 .Nm zfs
 .Cm mount
 .Op Fl Oflv
 .Op Fl o Ar options
-.Fl a Ns | Ns Ar filesystem
+.Fl a Ns | Ns Fl R Ar filesystem Ns | Ns Ar filesystem
 .Xc
 Mount ZFS filesystem on a path described by its
 .Sy mountpoint
@@ -83,6 +90,8 @@ for more information.
 .It Fl a
 Mount all available ZFS file systems.
 Invoked automatically as part of the boot process if configured.
+.It Fl R
+Mount the specified filesystems along with all their children.
 .It Ar filesystem
 Mount the specified filesystem.
 .It Fl o Ar options
@@ -104,7 +113,8 @@ this will cause the terminal to interactively block after asking for the key.
 .It Fl v
 Report mount progress.
 .It Fl f
-Attempt to force mounting of all filesystems, even those that couldn't normally be mounted (e.g. redacted datasets).
+Attempt to force mounting of all filesystems, even those that couldn't normally
+be mounted (e.g. redacted datasets).
 .El
 .It Xo
 .Nm zfs

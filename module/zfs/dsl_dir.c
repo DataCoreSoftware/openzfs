@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -26,6 +27,8 @@
  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
  * Copyright (c) 2016 Actifio, Inc. All rights reserved.
  * Copyright (c) 2018, loli10K <ezomori.nozomu@gmail.com>. All rights reserved.
+ * Copyright (c) 2023 Hewlett Packard Enterprise Development LP.
+ * Copyright (c) 2025, Rob Norris <robn@despairlabs.com>
  */
 
 #include <sys/dmu.h>
@@ -52,6 +55,15 @@
 #include <sys/zthr.h>
 #include "zfs_namecheck.h"
 #include "zfs_prop.h"
+
+/*
+ * This controls if we verify the ZVOL quota or not.
+ * Currently, quotas are not implemented for ZVOLs.
+ * The quota size is the size of the ZVOL.
+ * The size of the volume already implies the ZVOL size quota.
+ * The quota mechanism can introduce a significant performance drop.
+ */
+static int zvol_enforce_quotas = B_TRUE;
 
 /*
  * Filesystem and Snapshot Limits
@@ -121,8 +133,6 @@
  * dsl_dir_init_fs_ss_count().
  */
 
-extern inline dsl_dir_phys_t *dsl_dir_phys(dsl_dir_t *dd);
-
 static uint64_t dsl_dir_space_towrite(dsl_dir_t *dd);
 
 typedef struct ddulrt_arg {
@@ -141,8 +151,8 @@ dsl_dir_evict_async(void *dbu)
 
 	for (t = 0; t < TXG_SIZE; t++) {
 		ASSERT(!txg_list_member(&dp->dp_dirty_dirs, dd, t));
-		ASSERT(dd->dd_tempreserved[t] == 0);
-		ASSERT(dd->dd_space_towrite[t] == 0);
+		ASSERT0(dd->dd_tempreserved[t]);
+		ASSERT0(dd->dd_space_towrite[t]);
 	}
 
 	if (dd->dd_parent)
@@ -162,7 +172,7 @@ dsl_dir_evict_async(void *dbu)
 
 int
 dsl_dir_hold_obj(dsl_pool_t *dp, uint64_t ddobj,
-    const char *tail, void *tag, dsl_dir_t **ddp)
+    const char *tail, const void *tag, dsl_dir_t **ddp)
 {
 	dmu_buf_t *dbuf;
 	dsl_dir_t *dd;
@@ -172,10 +182,8 @@ dsl_dir_hold_obj(dsl_pool_t *dp, uint64_t ddobj,
 	ASSERT(dsl_pool_config_held(dp));
 
 	err = dmu_bonus_hold(dp->dp_meta_objset, ddobj, tag, &dbuf);
-	if (err != 0) {
-		dprintf("%s:%d: Returning %d\n", __func__, __LINE__, err);
+	if (err != 0)
 		return (err);
-	}
 	dd = dmu_buf_get_user(dbuf);
 
 	dmu_object_info_from_db(dbuf, &doi);
@@ -211,17 +219,12 @@ dsl_dir_hold_obj(dsl_pool_t *dp, uint64_t ddobj,
 			}
 		}
 
-		dsl_dir_snap_cmtime_update(dd);
-
 		if (dsl_dir_phys(dd)->dd_parent_obj) {
 			err = dsl_dir_hold_obj(dp,
 			    dsl_dir_phys(dd)->dd_parent_obj, NULL, dd,
 			    &dd->dd_parent);
-			if (err != 0) {
-				dprintf("%s:%d: Jumping to errout\n",
-				    __func__, __LINE__);
+			if (err != 0)
 				goto errout;
-			}
 			if (tail) {
 #ifdef ZFS_DEBUG
 				uint64_t foundobj;
@@ -238,13 +241,11 @@ dsl_dir_hold_obj(dsl_pool_t *dp, uint64_t ddobj,
 				err = zap_value_search(dp->dp_meta_objset,
 				    dsl_dir_phys(dd->dd_parent)->
 				    dd_child_dir_zapobj,
-				    ddobj, 0, dd->dd_myname);
+				    ddobj, 0, dd->dd_myname,
+				    sizeof (dd->dd_myname));
 			}
-			if (err != 0) {
-				dprintf("%s:%d: Jumping to errout\n",
-				    __func__, __LINE__);
+			if (err != 0)
 				goto errout;
-			}
 		} else {
 			(void) strlcpy(dd->dd_myname, spa_name(dp->dp_spa),
 			    sizeof (dd->dd_myname));
@@ -262,11 +263,8 @@ dsl_dir_hold_obj(dsl_pool_t *dp, uint64_t ddobj,
 			err = dmu_bonus_hold(dp->dp_meta_objset,
 			    dsl_dir_phys(dd)->dd_origin_obj, FTAG,
 			    &origin_bonus);
-			if (err != 0) {
-				dprintf("%s:%d: Jumping to errout\n", __func__,
-				    __LINE__);
+			if (err != 0)
 				goto errout;
-			}
 			origin_phys = origin_bonus->db_data;
 			dd->dd_origin_txg =
 			    origin_phys->ds_creation_txg;
@@ -276,11 +274,23 @@ dsl_dir_hold_obj(dsl_pool_t *dp, uint64_t ddobj,
 				err = zap_lookup(dp->dp_meta_objset,
 				    dd->dd_object, DD_FIELD_LIVELIST,
 				    sizeof (uint64_t), 1, &obj);
-				if (err == 0)
-					dsl_dir_livelist_open(dd, obj);
-				else if (err != ENOENT)
+				if (err == 0) {
+					err = dsl_dir_livelist_open(dd, obj);
+					if (err != 0)
+						goto errout;
+				} else if (err != ENOENT)
 					goto errout;
 			}
+		}
+
+		if (dsl_dir_is_zapified(dd)) {
+			inode_timespec_t t = {0};
+			(void) zap_lookup(dp->dp_meta_objset, ddobj,
+			    DD_FIELD_SNAPSHOTS_CHANGED,
+			    sizeof (uint64_t),
+			    sizeof (inode_timespec_t) / sizeof (uint64_t),
+			    &t);
+			dd->dd_snap_cmtime = t;
 		}
 
 		dmu_buf_init_user(&dd->dd_dbu, NULL, dsl_dir_evict_async,
@@ -316,7 +326,6 @@ dsl_dir_hold_obj(dsl_pool_t *dp, uint64_t ddobj,
 	ASSERT3U(dd->dd_object, ==, ddobj);
 	ASSERT3P(dd->dd_dbuf, ==, dbuf);
 	*ddp = dd;
-	TraceEvent(8, "%s:%d: Returning 0\n", __func__, __LINE__);
 	return (0);
 
 errout:
@@ -330,12 +339,11 @@ errout:
 	mutex_destroy(&dd->dd_lock);
 	kmem_free(dd, sizeof (dsl_dir_t));
 	dmu_buf_rele(dbuf, tag);
-	dprintf("%s:%d: Returning %d\n", __func__, __LINE__, err);
 	return (err);
 }
 
 void
-dsl_dir_rele(dsl_dir_t *dd, void *tag)
+dsl_dir_rele(dsl_dir_t *dd, const void *tag)
 {
 	dprintf_dd(dd, "%s\n", "");
 	spa_close(dd->dd_pool->dp_spa, tag);
@@ -350,7 +358,7 @@ dsl_dir_rele(dsl_dir_t *dd, void *tag)
  * the spa.
  */
 void
-dsl_dir_async_rele(dsl_dir_t *dd, void *tag)
+dsl_dir_async_rele(dsl_dir_t *dd, const void *tag)
 {
 	dprintf_dd(dd, "%s\n", "");
 	spa_async_close(dd->dd_pool->dp_spa, tag);
@@ -411,11 +419,8 @@ getcomponent(const char *path, char *component, const char **nextp)
 {
 	char *p;
 
-	TraceEvent(8, "%s:%d: path = %s\n", __func__, __LINE__,
-	    (path ? path : "NULL"));
 	if ((path == NULL) || (path[0] == '\0'))
 		return (SET_ERROR(ENOENT));
-
 	/* This would be a good place to reserve some namespace... */
 	p = strpbrk(path, "/@");
 	if (p && (p[1] == '/' || p[1] == '@')) {
@@ -429,20 +434,16 @@ getcomponent(const char *path, char *component, const char **nextp)
 		 * and it had better have something after the @.
 		 */
 		if (p != NULL &&
-		    (p[0] != '@' || strpbrk(path + 1, "/@") || p[1] == '\0'))
+		    (p[0] != '@' || strpbrk(path+1, "/@") || p[1] == '\0'))
 			return (SET_ERROR(EINVAL));
-
 		if (strlen(path) >= ZFS_MAX_DATASET_NAME_LEN)
 			return (SET_ERROR(ENAMETOOLONG));
-
 		(void) strlcpy(component, path, ZFS_MAX_DATASET_NAME_LEN);
 		p = NULL;
 	} else if (p[0] == '/') {
 		if (p - path >= ZFS_MAX_DATASET_NAME_LEN)
 			return (SET_ERROR(ENAMETOOLONG));
-
-		(void) strncpy(component, path, p - path);
-		component[p - path] = '\0';
+		(void) strlcpy(component, path, p - path + 1);
 		p++;
 	} else if (p[0] == '@') {
 		/*
@@ -451,17 +452,13 @@ getcomponent(const char *path, char *component, const char **nextp)
 		 */
 		if (strchr(path, '/'))
 			return (SET_ERROR(EINVAL));
-
 		if (p - path >= ZFS_MAX_DATASET_NAME_LEN)
 			return (SET_ERROR(ENAMETOOLONG));
-
-		(void) strncpy(component, path, p - path);
-		component[p - path] = '\0';
+		(void) strlcpy(component, path, p - path + 1);
 	} else {
 		panic("invalid p=%p", (void *)p);
 	}
 	*nextp = p;
-	TraceEvent(8, "%s:%d: Returning 0\n", __func__, __LINE__);
 	return (0);
 }
 
@@ -473,7 +470,7 @@ getcomponent(const char *path, char *component, const char **nextp)
  * (*tail)[0] == '@' means that the last component is a snapshot.
  */
 int
-dsl_dir_hold(dsl_pool_t *dp, const char *name, void *tag,
+dsl_dir_hold(dsl_pool_t *dp, const char *name, const void *tag,
     dsl_dir_t **ddp, const char **tailp)
 {
 	char *buf;
@@ -498,7 +495,6 @@ dsl_dir_hold(dsl_pool_t *dp, const char *name, void *tag,
 
 	err = dsl_dir_hold_obj(dp, dp->dp_root_dir_obj, NULL, tag, &dd);
 	if (err != 0) {
-		dprintf("%s:%d: Jumping to error\n", __func__, __LINE__);
 		goto error;
 	}
 
@@ -510,7 +506,7 @@ dsl_dir_hold(dsl_pool_t *dp, const char *name, void *tag,
 		ASSERT(next[0] != '\0');
 		if (next[0] == '@')
 			break;
-		TraceEvent(5, "looking up %s in obj%lld\n",
+		dprintf("looking up %s in obj%lld\n",
 		    buf, (longlong_t)dsl_dir_phys(dd)->dd_child_dir_zapobj);
 
 		err = zap_lookup(dp->dp_meta_objset,
@@ -543,6 +539,7 @@ dsl_dir_hold(dsl_pool_t *dp, const char *name, void *tag,
 	    (tailp == NULL || (nextnext && nextnext[0] != '\0'))) {
 		/* bad path name */
 		dsl_dir_rele(dd, tag);
+		dprintf("next=%p (%s) tail=%p\n", next, next?next:"", tailp);
 		err = SET_ERROR(ENOENT);
 	}
 	if (tailp != NULL)
@@ -551,7 +548,6 @@ dsl_dir_hold(dsl_pool_t *dp, const char *name, void *tag,
 		*ddp = dd;
 error:
 	kmem_free(buf, ZFS_MAX_DATASET_NAME_LEN);
-	TraceEvent(5, "%s:%d: Returning %d\n", __func__, __LINE__, err);
 	return (err);
 }
 
@@ -595,7 +591,7 @@ dsl_dir_init_fs_ss_count(dsl_dir_t *dd, dmu_tx_t *tx)
 		return;
 
 	zc = kmem_alloc(sizeof (zap_cursor_t), KM_SLEEP);
-	za = kmem_alloc(sizeof (zap_attribute_t), KM_SLEEP);
+	za = zap_attribute_alloc();
 
 	/* Iterate my child dirs */
 	for (zap_cursor_init(zc, os, dsl_dir_phys(dd)->dd_child_dir_zapobj);
@@ -644,7 +640,7 @@ dsl_dir_init_fs_ss_count(dsl_dir_t *dd, dmu_tx_t *tx)
 	dsl_dataset_rele(ds, FTAG);
 
 	kmem_free(zc, sizeof (zap_cursor_t));
-	kmem_free(za, sizeof (zap_attribute_t));
+	zap_attribute_free(za);
 
 	/* we're in a sync task, update counts */
 	dmu_buf_will_dirty(dd->dd_dbuf, tx);
@@ -764,7 +760,7 @@ typedef enum {
 
 static enforce_res_t
 dsl_enforce_ds_ss_limits(dsl_dir_t *dd, zfs_prop_t prop,
-    cred_t *cr, proc_t *proc)
+    cred_t *cr)
 {
 	enforce_res_t enforce = ENFORCE_ALWAYS;
 	uint64_t obj;
@@ -779,13 +775,7 @@ dsl_enforce_ds_ss_limits(dsl_dir_t *dd, zfs_prop_t prop,
 	if (crgetzoneid(cr) != GLOBAL_ZONEID)
 		return (ENFORCE_ALWAYS);
 
-	/*
-	 * We are checking the saved credentials of the user process, which is
-	 * not the current process.  Note that we can't use secpolicy_zfs(),
-	 * because it only works if the cred is that of the current process (on
-	 * Linux).
-	 */
-	if (secpolicy_zfs_proc(cr, proc) == 0)
+	if (secpolicy_zfs(cr) == 0)
 		return (ENFORCE_NEVER);
 #endif
 
@@ -820,11 +810,11 @@ dsl_enforce_ds_ss_limits(dsl_dir_t *dd, zfs_prop_t prop,
  */
 int
 dsl_fs_ss_limit_check(dsl_dir_t *dd, uint64_t delta, zfs_prop_t prop,
-    dsl_dir_t *ancestor, cred_t *cr, proc_t *proc)
+    dsl_dir_t *ancestor, cred_t *cr)
 {
 	objset_t *os = dd->dd_pool->dp_meta_objset;
 	uint64_t limit, count;
-	char *count_prop;
+	const char *count_prop;
 	enforce_res_t enforce;
 	int err = 0;
 
@@ -852,7 +842,7 @@ dsl_fs_ss_limit_check(dsl_dir_t *dd, uint64_t delta, zfs_prop_t prop,
 	 * are allowed to change the limit on the current dataset, but there
 	 * is another limit in the tree above.
 	 */
-	enforce = dsl_enforce_ds_ss_limits(dd, prop, cr, proc);
+	enforce = dsl_enforce_ds_ss_limits(dd, prop, cr);
 	if (enforce == ENFORCE_NEVER)
 		return (0);
 
@@ -896,7 +886,7 @@ dsl_fs_ss_limit_check(dsl_dir_t *dd, uint64_t delta, zfs_prop_t prop,
 
 	if (dd->dd_parent != NULL)
 		err = dsl_fs_ss_limit_check(dd->dd_parent, delta, prop,
-		    ancestor, cr, proc);
+		    ancestor, cr);
 
 	return (err);
 }
@@ -1283,6 +1273,7 @@ dsl_dir_tempreserve_impl(dsl_dir_t *dd, uint64_t asize, boolean_t netfree,
 	uint64_t quota;
 	struct tempreserve *tr;
 	int retval;
+	uint64_t ext_quota;
 	uint64_t ref_rsrv;
 
 top_of_function:
@@ -1326,7 +1317,9 @@ top_of_function:
 	 * If this transaction will result in a net free of space,
 	 * we want to let it through.
 	 */
-	if (ignorequota || netfree || dsl_dir_phys(dd)->dd_quota == 0)
+	if (ignorequota || netfree || dsl_dir_phys(dd)->dd_quota == 0 ||
+	    (tx->tx_objset && dmu_objset_type(tx->tx_objset) == DMU_OST_ZVOL &&
+	    zvol_enforce_quotas == B_FALSE))
 		quota = UINT64_MAX;
 	else
 		quota = dsl_dir_phys(dd)->dd_quota;
@@ -1341,7 +1334,6 @@ top_of_function:
 	 * we're very close to full, this will allow a steady trickle of
 	 * removes to get through.
 	 */
-	uint64_t deferred = 0;
 	if (dd->dd_parent == NULL) {
 		uint64_t avail = dsl_pool_unreserved_space(dd->dd_pool,
 		    (netfree) ?
@@ -1356,22 +1348,31 @@ top_of_function:
 	/*
 	 * If they are requesting more space, and our current estimate
 	 * is over quota, they get to try again unless the actual
-	 * on-disk is over quota and there are no pending changes (which
-	 * may free up space for us).
+	 * on-disk is over quota and there are no pending changes
+	 * or deferred frees (which may free up space for us).
 	 */
-	if (used_on_disk + est_inflight >= quota) {
-		if (est_inflight > 0 || used_on_disk < quota ||
-		    (retval == ENOSPC && used_on_disk < quota + deferred))
-			retval = ERESTART;
-		dprintf_dd(dd, "failing: used=%lluK inflight = %lluK "
-		    "quota=%lluK tr=%lluK err=%d\n",
-		    (u_longlong_t)used_on_disk>>10,
-		    (u_longlong_t)est_inflight>>10,
-		    (u_longlong_t)quota>>10, (u_longlong_t)asize>>10, retval);
+	ext_quota = quota >> 5;
+	if (quota == UINT64_MAX)
+		ext_quota = 0;
+
+	if (used_on_disk >= quota) {
+		if (retval == ENOSPC && (used_on_disk - quota) <
+		    dsl_pool_deferred_space(dd->dd_pool)) {
+			retval = SET_ERROR(ERESTART);
+		}
+		/* Quota exceeded */
 		mutex_exit(&dd->dd_lock);
 		DMU_TX_STAT_BUMP(dmu_tx_quota);
-
-		return (SET_ERROR(retval));
+		return (retval);
+	} else if (used_on_disk + est_inflight >= quota + ext_quota) {
+		dprintf_dd(dd, "failing: used=%lluK inflight = %lluK "
+		    "quota=%lluK tr=%lluK\n",
+		    (u_longlong_t)used_on_disk>>10,
+		    (u_longlong_t)est_inflight>>10,
+		    (u_longlong_t)quota>>10, (u_longlong_t)asize>>10);
+		mutex_exit(&dd->dd_lock);
+		DMU_TX_STAT_BUMP(dmu_tx_quota);
+		return (SET_ERROR(ERESTART));
 	}
 
 	/* We need to up our estimated delta before dropping dd_lock */
@@ -1399,10 +1400,9 @@ top_of_function:
 		ignorequota = (dsl_dir_phys(dd)->dd_head_dataset_obj == 0);
 		first = B_FALSE;
 		goto top_of_function;
-
-	} else {
-		return (0);
 	}
+
+	return (0);
 }
 
 /*
@@ -1450,6 +1450,8 @@ dsl_dir_tempreserve_space(dsl_dir_t *dd, uint64_t lsize, uint64_t asize,
 			    MSEC2NSEC(10), MSEC2NSEC(10));
 			err = SET_ERROR(ERESTART);
 		}
+
+		ASSERT3U(err, ==, ERESTART);
 	}
 
 	if (err == 0) {
@@ -1481,7 +1483,7 @@ dsl_dir_tempreserve_clear(void *tr_cookie, dmu_tx_t *tx)
 	if (tr_cookie == NULL)
 		return;
 
-	while ((tr = list_head(tr_list)) != NULL) {
+	while ((tr = list_remove_head(tr_list)) != NULL) {
 		if (tr->tr_ds) {
 			mutex_enter(&tr->tr_ds->dd_lock);
 			ASSERT3U(tr->tr_ds->dd_tempreserved[txgidx], >=,
@@ -1491,7 +1493,6 @@ dsl_dir_tempreserve_clear(void *tr_cookie, dmu_tx_t *tx)
 		} else {
 			arc_tempreserve_clear(tr->tr_size);
 		}
-		list_remove(tr_list, tr);
 		kmem_free(tr, sizeof (struct tempreserve));
 	}
 
@@ -1539,6 +1540,11 @@ dsl_dir_diduse_space(dsl_dir_t *dd, dd_used_t type,
 {
 	int64_t accounted_delta;
 
+	ASSERT(dmu_tx_is_syncing(tx));
+	ASSERT(type < DD_USED_NUM);
+
+	dmu_buf_will_dirty(dd->dd_dbuf, tx);
+
 	/*
 	 * dsl_dataset_set_refreservation_sync_impl() calls this with
 	 * dd_lock held, so that it can atomically update
@@ -1547,36 +1553,28 @@ dsl_dir_diduse_space(dsl_dir_t *dd, dd_used_t type,
 	 * consistently.
 	 */
 	boolean_t needlock = !MUTEX_HELD(&dd->dd_lock);
-
-	ASSERT(dmu_tx_is_syncing(tx));
-	ASSERT(type < DD_USED_NUM);
-
-	dmu_buf_will_dirty(dd->dd_dbuf, tx);
-
 	if (needlock)
 		mutex_enter(&dd->dd_lock);
-	accounted_delta =
-	    parent_delta(dd, dsl_dir_phys(dd)->dd_used_bytes, used);
-	ASSERT(used >= 0 || dsl_dir_phys(dd)->dd_used_bytes >= -used);
-	ASSERT(compressed >= 0 ||
-	    dsl_dir_phys(dd)->dd_compressed_bytes >= -compressed);
+	dsl_dir_phys_t *ddp = dsl_dir_phys(dd);
+	accounted_delta = parent_delta(dd, ddp->dd_used_bytes, used);
+	ASSERT(used >= 0 || ddp->dd_used_bytes >= -used);
+	ASSERT(compressed >= 0 || ddp->dd_compressed_bytes >= -compressed);
 	ASSERT(uncompressed >= 0 ||
-	    dsl_dir_phys(dd)->dd_uncompressed_bytes >= -uncompressed);
-	dsl_dir_phys(dd)->dd_used_bytes += used;
-	dsl_dir_phys(dd)->dd_uncompressed_bytes += uncompressed;
-	dsl_dir_phys(dd)->dd_compressed_bytes += compressed;
+	    ddp->dd_uncompressed_bytes >= -uncompressed);
+	ddp->dd_used_bytes += used;
+	ddp->dd_uncompressed_bytes += uncompressed;
+	ddp->dd_compressed_bytes += compressed;
 
-	if (dsl_dir_phys(dd)->dd_flags & DD_FLAG_USED_BREAKDOWN) {
-		ASSERT(used > 0 ||
-		    dsl_dir_phys(dd)->dd_used_breakdown[type] >= -used);
-		dsl_dir_phys(dd)->dd_used_breakdown[type] += used;
+	if (ddp->dd_flags & DD_FLAG_USED_BREAKDOWN) {
+		ASSERT(used >= 0 || ddp->dd_used_breakdown[type] >= -used);
+		ddp->dd_used_breakdown[type] += used;
 #ifdef ZFS_DEBUG
 		{
 			dd_used_t t;
 			uint64_t u = 0;
 			for (t = 0; t < DD_USED_NUM; t++)
-				u += dsl_dir_phys(dd)->dd_used_breakdown[t];
-			ASSERT3U(u, ==, dsl_dir_phys(dd)->dd_used_bytes);
+				u += ddp->dd_used_breakdown[t];
+			ASSERT3U(u, ==, ddp->dd_used_bytes);
 		}
 #endif
 	}
@@ -1584,11 +1582,9 @@ dsl_dir_diduse_space(dsl_dir_t *dd, dd_used_t type,
 		mutex_exit(&dd->dd_lock);
 
 	if (dd->dd_parent != NULL) {
-		dsl_dir_diduse_space(dd->dd_parent, DD_USED_CHILD,
-		    accounted_delta, compressed, uncompressed, tx);
-		dsl_dir_transfer_space(dd->dd_parent,
-		    used - accounted_delta,
-		    DD_USED_CHILD_RSRV, DD_USED_CHILD, tx);
+		dsl_dir_diduse_transfer_space(dd->dd_parent,
+		    accounted_delta, compressed, uncompressed,
+		    used, DD_USED_CHILD_RSRV, DD_USED_CHILD, tx);
 	}
 }
 
@@ -1600,19 +1596,70 @@ dsl_dir_transfer_space(dsl_dir_t *dd, int64_t delta,
 	ASSERT(oldtype < DD_USED_NUM);
 	ASSERT(newtype < DD_USED_NUM);
 
+	dsl_dir_phys_t *ddp = dsl_dir_phys(dd);
 	if (delta == 0 ||
-	    !(dsl_dir_phys(dd)->dd_flags & DD_FLAG_USED_BREAKDOWN))
+	    !(ddp->dd_flags & DD_FLAG_USED_BREAKDOWN))
 		return;
 
 	dmu_buf_will_dirty(dd->dd_dbuf, tx);
 	mutex_enter(&dd->dd_lock);
 	ASSERT(delta > 0 ?
-	    dsl_dir_phys(dd)->dd_used_breakdown[oldtype] >= delta :
-	    dsl_dir_phys(dd)->dd_used_breakdown[newtype] >= -delta);
-	ASSERT(dsl_dir_phys(dd)->dd_used_bytes >= ABS(delta));
-	dsl_dir_phys(dd)->dd_used_breakdown[oldtype] -= delta;
-	dsl_dir_phys(dd)->dd_used_breakdown[newtype] += delta;
+	    ddp->dd_used_breakdown[oldtype] >= delta :
+	    ddp->dd_used_breakdown[newtype] >= -delta);
+	ASSERT(ddp->dd_used_bytes >= ABS(delta));
+	ddp->dd_used_breakdown[oldtype] -= delta;
+	ddp->dd_used_breakdown[newtype] += delta;
 	mutex_exit(&dd->dd_lock);
+}
+
+void
+dsl_dir_diduse_transfer_space(dsl_dir_t *dd, int64_t used,
+    int64_t compressed, int64_t uncompressed, int64_t tonew,
+    dd_used_t oldtype, dd_used_t newtype, dmu_tx_t *tx)
+{
+	int64_t accounted_delta;
+
+	ASSERT(dmu_tx_is_syncing(tx));
+	ASSERT(oldtype < DD_USED_NUM);
+	ASSERT(newtype < DD_USED_NUM);
+
+	dmu_buf_will_dirty(dd->dd_dbuf, tx);
+
+	mutex_enter(&dd->dd_lock);
+	dsl_dir_phys_t *ddp = dsl_dir_phys(dd);
+	accounted_delta = parent_delta(dd, ddp->dd_used_bytes, used);
+	ASSERT(used >= 0 || ddp->dd_used_bytes >= -used);
+	ASSERT(compressed >= 0 || ddp->dd_compressed_bytes >= -compressed);
+	ASSERT(uncompressed >= 0 ||
+	    ddp->dd_uncompressed_bytes >= -uncompressed);
+	ddp->dd_used_bytes += used;
+	ddp->dd_uncompressed_bytes += uncompressed;
+	ddp->dd_compressed_bytes += compressed;
+
+	if (ddp->dd_flags & DD_FLAG_USED_BREAKDOWN) {
+		ASSERT(tonew - used <= 0 ||
+		    ddp->dd_used_breakdown[oldtype] >= tonew - used);
+		ASSERT(tonew >= 0 ||
+		    ddp->dd_used_breakdown[newtype] >= -tonew);
+		ddp->dd_used_breakdown[oldtype] -= tonew - used;
+		ddp->dd_used_breakdown[newtype] += tonew;
+#ifdef ZFS_DEBUG
+		{
+			dd_used_t t;
+			uint64_t u = 0;
+			for (t = 0; t < DD_USED_NUM; t++)
+				u += ddp->dd_used_breakdown[t];
+			ASSERT3U(u, ==, ddp->dd_used_bytes);
+		}
+#endif
+	}
+	mutex_exit(&dd->dd_lock);
+
+	if (dd->dd_parent != NULL) {
+		dsl_dir_diduse_transfer_space(dd->dd_parent,
+		    accounted_delta, compressed, uncompressed,
+		    used, DD_USED_CHILD_RSRV, DD_USED_CHILD, tx);
+	}
 }
 
 typedef struct dsl_dir_set_qr_arg {
@@ -1864,7 +1911,6 @@ typedef struct dsl_dir_rename_arg {
 	const char *ddra_oldname;
 	const char *ddra_newname;
 	cred_t *ddra_cred;
-	proc_t *ddra_proc;
 } dsl_dir_rename_arg_t;
 
 typedef struct dsl_valid_rename_arg {
@@ -1872,10 +1918,10 @@ typedef struct dsl_valid_rename_arg {
 	int nest_delta;
 } dsl_valid_rename_arg_t;
 
-/* ARGSUSED */
 static int
 dsl_valid_rename(dsl_pool_t *dp, dsl_dataset_t *ds, void *arg)
 {
+	(void) dp;
 	dsl_valid_rename_arg_t *dvra = arg;
 	char namebuf[ZFS_MAX_DATASET_NAME_LEN];
 
@@ -2043,8 +2089,7 @@ dsl_dir_rename_check(void *arg, dmu_tx_t *tx)
 		}
 
 		error = dsl_dir_transfer_possible(dd->dd_parent,
-		    newparent, fs_cnt, ss_cnt, myspace,
-		    ddra->ddra_cred, ddra->ddra_proc);
+		    newparent, fs_cnt, ss_cnt, myspace, ddra->ddra_cred);
 		if (error != 0) {
 			dsl_dir_rele(newparent, FTAG);
 			dsl_dir_rele(dd, FTAG);
@@ -2161,22 +2206,27 @@ dsl_dir_rename_sync(void *arg, dmu_tx_t *tx)
 int
 dsl_dir_rename(const char *oldname, const char *newname)
 {
+	cred_t *cr = CRED();
+	crhold(cr);
+
 	dsl_dir_rename_arg_t ddra;
 
 	ddra.ddra_oldname = oldname;
 	ddra.ddra_newname = newname;
-	ddra.ddra_cred = CRED();
-	ddra.ddra_proc = curproc;
+	ddra.ddra_cred = cr;
 
-	return (dsl_sync_task(oldname,
+	int err = dsl_sync_task(oldname,
 	    dsl_dir_rename_check, dsl_dir_rename_sync, &ddra,
-	    3, ZFS_SPACE_CHECK_RESERVED));
+	    3, ZFS_SPACE_CHECK_RESERVED);
+
+	crfree(cr);
+	return (err);
 }
 
 int
 dsl_dir_transfer_possible(dsl_dir_t *sdd, dsl_dir_t *tdd,
     uint64_t fs_cnt, uint64_t ss_cnt, uint64_t space,
-    cred_t *cr, proc_t *proc)
+    cred_t *cr)
 {
 	dsl_dir_t *ancestor;
 	int64_t adelta;
@@ -2190,11 +2240,11 @@ dsl_dir_transfer_possible(dsl_dir_t *sdd, dsl_dir_t *tdd,
 		return (SET_ERROR(ENOSPC));
 
 	err = dsl_fs_ss_limit_check(tdd, fs_cnt, ZFS_PROP_FILESYSTEM_LIMIT,
-	    ancestor, cr, proc);
+	    ancestor, cr);
 	if (err != 0)
 		return (err);
 	err = dsl_fs_ss_limit_check(tdd, ss_cnt, ZFS_PROP_SNAPSHOT_LIMIT,
-	    ancestor, cr, proc);
+	    ancestor, cr);
 	if (err != 0)
 		return (err);
 
@@ -2214,13 +2264,25 @@ dsl_dir_snap_cmtime(dsl_dir_t *dd)
 }
 
 void
-dsl_dir_snap_cmtime_update(dsl_dir_t *dd)
+dsl_dir_snap_cmtime_update(dsl_dir_t *dd, dmu_tx_t *tx)
 {
+	dsl_pool_t *dp = dmu_tx_pool(tx);
 	inode_timespec_t t;
-
 	gethrestime(&t);
+
 	mutex_enter(&dd->dd_lock);
 	dd->dd_snap_cmtime = t;
+	if (spa_feature_is_enabled(dp->dp_spa,
+	    SPA_FEATURE_EXTENSIBLE_DATASET)) {
+		objset_t *mos = dd->dd_pool->dp_meta_objset;
+		uint64_t ddobj = dd->dd_object;
+		dsl_dir_zapify(dd, tx);
+		VERIFY0(zap_update(mos, ddobj,
+		    DD_FIELD_SNAPSHOTS_CHANGED,
+		    sizeof (uint64_t),
+		    sizeof (inode_timespec_t) / sizeof (uint64_t),
+		    &t, tx));
+	}
 	mutex_exit(&dd->dd_lock);
 }
 
@@ -2240,15 +2302,18 @@ dsl_dir_is_zapified(dsl_dir_t *dd)
 	return (doi.doi_type == DMU_OTN_ZAP_METADATA);
 }
 
-void
+int
 dsl_dir_livelist_open(dsl_dir_t *dd, uint64_t obj)
 {
 	objset_t *mos = dd->dd_pool->dp_meta_objset;
 	ASSERT(spa_feature_is_active(dd->dd_pool->dp_spa,
 	    SPA_FEATURE_LIVELIST));
-	dsl_deadlist_open(&dd->dd_livelist, mos, obj);
+	int err = dsl_deadlist_open(&dd->dd_livelist, mos, obj);
+	if (err != 0)
+		return (err);
 	bplist_create(&dd->dd_pending_allocs);
 	bplist_create(&dd->dd_pending_frees);
+	return (0);
 }
 
 void
@@ -2374,6 +2439,7 @@ dsl_dir_activity_in_progress(dsl_dir_t *dd, dsl_dataset_t *ds,
 		 * The delete queue is ZPL specific, and libzpool doesn't have
 		 * it. It doesn't make sense to wait for it.
 		 */
+		(void) ds;
 		*in_progress = B_FALSE;
 		break;
 #endif
@@ -2426,3 +2492,6 @@ dsl_dir_cancel_waiters(dsl_dir_t *dd)
 EXPORT_SYMBOL(dsl_dir_set_quota);
 EXPORT_SYMBOL(dsl_dir_set_reservation);
 #endif
+
+ZFS_MODULE_PARAM(zfs, , zvol_enforce_quotas, INT, ZMOD_RW,
+	"Enable strict ZVOL quota enforcment");

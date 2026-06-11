@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 #
 # Copyright 2015 ClusterHQ
 #
@@ -43,6 +44,7 @@ from ._constants import (
     ZFS_ERR_DEVRM_IN_PROGRESS,
     ZFS_ERR_VDEV_TOO_BIG,
     ZFS_ERR_WRONG_PARENT,
+    ZFS_ERR_RAIDZ_EXPAND_IN_PROGRESS,
     zfs_errno
 )
 
@@ -469,6 +471,8 @@ def lzc_receive_translate_errors(
         raise lzc_exc.ReadOnlyPool(_pool_name(snapname))
     if ret == errno.EAGAIN:
         raise lzc_exc.SuspendedPool(_pool_name(snapname))
+    if ret == errno.EACCES:
+        raise lzc_exc.EncryptionKeyNotLoaded()
     if ret == ECKSUM:
         raise lzc_exc.BadStream()
     if ret == ZFS_ERR_WRONG_PARENT:
@@ -594,6 +598,8 @@ def lzc_pool_checkpoint_translate_error(ret, name, discard=False):
         raise lzc_exc.DeviceRemovalRunning()
     if ret == ZFS_ERR_VDEV_TOO_BIG:
         raise lzc_exc.DeviceTooBig()
+    if ret == ZFS_ERR_RAIDZ_EXPAND_IN_PROGRESS:
+        raise lzc_exc.RaidzExpansionRunning()
     if discard:
         raise _generic_exception(
             ret, name, "Failed to discard pool checkpoint")

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -168,13 +169,14 @@ spa_history_write(spa_t *spa, void *buf, uint64_t len, spa_history_phys_t *shpp,
 	phys_eof = spa_history_log_to_phys(shpp->sh_eof, shpp);
 	firstwrite = MIN(len, shpp->sh_phys_max_off - phys_eof);
 	shpp->sh_eof += len;
-	dmu_write(mos, spa->spa_history, phys_eof, firstwrite, buf, tx);
+	dmu_write(mos, spa->spa_history, phys_eof, firstwrite, buf, tx,
+	    DMU_READ_NO_PREFETCH);
 
 	len -= firstwrite;
 	if (len > 0) {
 		/* write out the rest at the beginning of physical file */
 		dmu_write(mos, spa->spa_history, shpp->sh_pool_create_len,
-		    len, (char *)buf + firstwrite, tx);
+		    len, (char *)buf + firstwrite, tx, DMU_READ_NO_PREFETCH);
 	}
 
 	return (0);
@@ -199,7 +201,7 @@ spa_history_log_notify(spa_t *spa, nvlist_t *nvl)
 {
 	nvlist_t *hist_nvl = fnvlist_alloc();
 	uint64_t uint64;
-	char *string;
+	const char *string;
 
 	if (nvlist_lookup_string(nvl, ZPOOL_HIST_CMD, &string) == 0)
 		fnvlist_add_string(hist_nvl, ZFS_EV_HIST_CMD, string);
@@ -248,7 +250,6 @@ spa_history_log_notify(spa_t *spa, nvlist_t *nvl)
 /*
  * Write out a history event.
  */
-/*ARGSUSED*/
 static void
 spa_history_log_sync(void *arg, dmu_tx_t *tx)
 {
@@ -387,13 +388,16 @@ spa_history_log_nvl(spa_t *spa, nvlist_t *nvl)
 	}
 
 	tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
-	err = dmu_tx_assign(tx, TXG_WAIT);
+	err = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (err) {
 		dmu_tx_abort(tx);
 		dprintf("%s:%d: Returning error %d\n", __func__, __LINE__,
 		    err);
 		return (err);
 	}
+
+	ASSERT3UF(tx->tx_txg, <=, spa_final_dirty_txg(spa),
+	    "Logged %s after final txg was set!", "nvlist");
 
 	VERIFY0(nvlist_dup(nvl, &nvarg, KM_SLEEP));
 	if (spa_history_zone() != NULL) {
@@ -533,6 +537,9 @@ log_internal(nvlist_t *nvl, const char *operation, spa_t *spa,
 		return;
 	}
 
+	ASSERT3UF(tx->tx_txg, <=, spa_final_dirty_txg(spa),
+	    "Logged after final txg was set: %s %s", operation, fmt);
+
 	msg = kmem_vasprintf(fmt, adx);
 	fnvlist_add_string(nvl, ZPOOL_HIST_INT_STR, msg);
 	kmem_strfree(msg);
@@ -560,7 +567,7 @@ spa_history_log_internal(spa_t *spa, const char *operation,
 	/* create a tx if we didn't get one */
 	if (tx == NULL) {
 		htx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
-		if (dmu_tx_assign(htx, TXG_WAIT) != 0) {
+		if (dmu_tx_assign(htx, DMU_TX_WAIT) != 0) {
 			dmu_tx_abort(htx);
 			return;
 		}

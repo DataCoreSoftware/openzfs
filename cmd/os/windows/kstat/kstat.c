@@ -53,7 +53,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/list.h>
@@ -779,7 +778,7 @@ ks_value_print(ks_nvpair_t *nvpair)
 /*
  * Print a single instance.
  */
-/*ARGSUSED*/
+
 static void
 ks_instance_print(ks_instance_t *ksi, ks_nvpair_t *nvpair, boolean_t last)
 {

@@ -25,15 +25,9 @@
  *
  */
 
-/*
- * Provides an implementation of the union of Illumos and OSX UIO struct
- * and API calls. That is to say the OsX API calls are kept, to keep
- * the UIO structure as opaque, but the internals are more like Illumos
- * to avoid the OsX 32bit vs 64bit logic.
- */
-
 #include <sys/uio.h>
 #include <sys/kmem.h>
+#include <sys/zfs_debug.h>
 
 static int
 zfs_uiomove_iov(void *p, size_t n, zfs_uio_rw_t rw, zfs_uio_t *uio)
@@ -47,9 +41,9 @@ zfs_uiomove_iov(void *p, size_t n, zfs_uio_rw_t rw, zfs_uio_t *uio)
 		switch (uio->uio_segflg) {
 		case UIO_SYSSPACE:
 			if (rw == UIO_READ)
-				bcopy(p, iov->iov_base + skip, cnt);
+				memcpy(iov->iov_base + skip, p, cnt);
 			else
-				bcopy(iov->iov_base + skip, (void *)p,
+				memcpy((void *)p, iov->iov_base + skip,
 				    cnt);
 			break;
 		default:
@@ -93,7 +87,7 @@ zfs_uiocopy(const char *p, size_t n, enum uio_rw rw, zfs_uio_t *uio,
 
 	zfs_uio_t uio_copy;
 
-	bcopy(uio, &uio_copy, sizeof (zfs_uio_t));
+	memcpy(&uio_copy, uio, sizeof (zfs_uio_t));
 	result = zfs_uiomove_iov((void *)p, n, rw, &uio_copy);
 
 	*cbytes = uio->uio_resid - uio_copy.uio_resid;
@@ -121,4 +115,42 @@ int
 zfs_uio_prefaultpages(ssize_t n, zfs_uio_t *uio)
 {
 	return (0);
+}
+
+/*
+ * Check if the uio is page-aligned in memory.
+ */
+boolean_t
+zfs_uio_page_aligned(zfs_uio_t *uio)
+{
+	for (int i = zfs_uio_iovcnt(uio); i > 0; i--) {
+		uintptr_t addr = (uintptr_t)zfs_uio_iovbase(uio, i);
+		size_t size = zfs_uio_iovlen(uio, i);
+		if ((addr & (PAGE_SIZE - 1)) || (size & (PAGE_SIZE - 1))) {
+			return (B_FALSE);
+		}
+	}
+
+	return (B_TRUE);
+}
+
+void
+zfs_uio_free_dio_pages(zfs_uio_t *uio, zfs_uio_rw_t rw)
+{
+	(void) uio;
+	(void) rw;
+}
+
+/*
+ * This function holds user pages into the kernel. In the event that the user
+ * pages are not successfully held an error value is returned.
+ *
+ * On success, 0 is returned.
+ */
+int
+zfs_uio_get_dio_pages_alloc(zfs_uio_t *uio, zfs_uio_rw_t rw)
+{
+	(void) uio;
+	(void) rw;
+	return (ENOTSUP);
 }

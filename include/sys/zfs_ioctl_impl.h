@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -24,8 +25,7 @@
 #define	_ZFS_IOCTL_IMPL_H_
 
 extern kmutex_t zfsdev_state_lock;
-extern zfsdev_state_t *zfsdev_state_list;
-extern unsigned long zfs_max_nvlist_src_size;
+extern uint64_t zfs_max_nvlist_src_size;
 
 typedef int zfs_ioc_legacy_func_t(zfs_cmd_t *);
 typedef int zfs_ioc_func_t(const char *, nvlist_t *, nvlist_t *);

@@ -1,4 +1,4 @@
-/* BEGIN CSTYLED */
+// SPDX-License-Identifier: MIT
 /*
 ** $Id: lparser.c,v 2.130.1.1 2013/04/12 18:48:47 roberto Exp $
 ** Lua Parser
@@ -1640,4 +1640,3 @@ Closure *luaY_parser (lua_State *L, ZIO *z, Mbuffer *buff,
   lua_assert(dyd->actvar.n == 0 && dyd->gt.n == 0 && dyd->label.n == 0);
   return cl;  /* it's on the stack too */
 }
-/* END CSTYLED */

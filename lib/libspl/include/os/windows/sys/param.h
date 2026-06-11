@@ -29,6 +29,8 @@
 
 #include <unistd.h>
 #include <limits.h>
+#include <sys/cdefs.h>
+#include <sys/debug.h>
 
 /*
  * File system parameters and macros.
@@ -61,6 +63,15 @@
 #define	PAGESIZE	(8192) // SYSTEM_INFO.dwPageSize;
 #endif /* PAGESIZE */
 
+#define	MAXHOSTNAMELEN 256
+
 #define	NBBY				8
+
+#define	ptob(x)		((x) * PAGESIZE)
+
+
+#ifndef hz
+#define	hz	119  /* ticks/sec: matches gethrtime() >> 23 approximation */
+#endif
 
 #endif

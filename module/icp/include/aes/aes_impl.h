@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -36,6 +37,7 @@ extern "C" {
 
 #include <sys/zfs_context.h>
 #include <sys/crypto/common.h>
+#include <sys/asm_linkage.h>
 
 /* Similar to sysmacros.h IS_P2ALIGNED, but checks two pointers: */
 #define	IS_P2ALIGNED2(v, w, a) \
@@ -83,14 +85,7 @@ extern "C" {
 
 /* AES key size definitions */
 #define	AES_MINBITS		128
-#define	AES_MINBYTES		((AES_MINBITS) >> 3)
 #define	AES_MAXBITS		256
-#define	AES_MAXBYTES		((AES_MAXBITS) >> 3)
-
-#define	AES_MIN_KEY_BYTES	((AES_MINBITS) >> 3)
-#define	AES_MAX_KEY_BYTES	((AES_MAXBITS) >> 3)
-#define	AES_192_KEY_BYTES	24
-#define	AES_IV_LEN		16
 
 /* AES key schedule may be implemented with 32- or 64-bit elements: */
 #define	AES_32BIT_KS		32
@@ -113,13 +108,22 @@ typedef struct aes_impl_ops aes_impl_ops_t;
  * coded in aesni-gcm-x86_64, so please don't change (or adjust accordingly).
  */
 typedef struct aes_key aes_key_t;
+
 struct aes_key {
 	aes_ks_t	encr_ks;  /* encryption key schedule */
 	aes_ks_t	decr_ks;  /* decryption key schedule */
 #ifdef __amd64
 	long double	align128; /* Align fields above for Intel AES-NI */
 #endif	/* __amd64 */
+#ifdef _WIN32
+	/*
+	 * We need to align with aesni-gcm-x64_64.S that pulls this out
+	 * of the struct, and it is aligned to 128 on posix somehow.
+	 */
+	const aes_impl_ops_t	_Alignas(16) *ops;
+#else
 	const aes_impl_ops_t	*ops;	/* ops associated with this schedule */
+#endif
 	int		nr;	  /* number of rounds (10, 12, or 14) */
 	int		type;	  /* key schedule size (32 or 64 bits) */
 };
@@ -155,13 +159,8 @@ extern int aes_decrypt_contiguous_blocks(void *ctx, char *data, size_t length,
 #ifdef _AES_IMPL
 
 typedef enum aes_mech_type {
-	AES_ECB_MECH_INFO_TYPE,		/* SUN_CKM_AES_ECB */
-	AES_CBC_MECH_INFO_TYPE,		/* SUN_CKM_AES_CBC */
-	AES_CBC_PAD_MECH_INFO_TYPE,	/* SUN_CKM_AES_CBC_PAD */
-	AES_CTR_MECH_INFO_TYPE,		/* SUN_CKM_AES_CTR */
 	AES_CCM_MECH_INFO_TYPE,		/* SUN_CKM_AES_CCM */
 	AES_GCM_MECH_INFO_TYPE,		/* SUN_CKM_AES_GCM */
-	AES_GMAC_MECH_INFO_TYPE		/* SUN_CKM_AES_GMAC */
 } aes_mech_type_t;
 
 #endif /* _AES_IMPL */
@@ -174,10 +173,11 @@ typedef enum aes_mech_type {
  * @aes_dec_f Function decrypts one block
  * @aes_will_work_f Function tests whether method will function
  */
-typedef void 		(*aes_generate_f)(aes_key_t *, const uint32_t *, int);
-typedef void		(*aes_encrypt_f)(const uint32_t[], int,
+typedef void 		ASMABI (*aes_generate_f)(aes_key_t *,
+    const uint32_t *, int);
+typedef void		ASMABI (*aes_encrypt_f)(const uint32_t[], int,
     const uint32_t[4], uint32_t[4]);
-typedef void		(*aes_decrypt_f)(const uint32_t[], int,
+typedef void		ASMABI (*aes_decrypt_f)(const uint32_t[], int,
     const uint32_t[4], uint32_t[4]);
 typedef boolean_t	(*aes_will_work_f)(void);
 
@@ -197,13 +197,13 @@ extern const aes_impl_ops_t aes_generic_impl;
 extern const aes_impl_ops_t aes_x86_64_impl;
 
 /* These functions are used to execute amd64 instructions for AMD or Intel: */
-extern int rijndael_key_setup_enc_amd64(uint32_t rk[],
+extern ASMABI int rijndael_key_setup_enc_amd64(uint32_t rk[],
 	const uint32_t cipherKey[], int keyBits);
-extern int rijndael_key_setup_dec_amd64(uint32_t rk[],
+extern ASMABI int rijndael_key_setup_dec_amd64(uint32_t rk[],
 	const uint32_t cipherKey[], int keyBits);
-extern void aes_encrypt_amd64(const uint32_t rk[], int Nr,
+extern ASMABI void aes_encrypt_amd64(const uint32_t rk[], int Nr,
 	const uint32_t pt[4], uint32_t ct[4]);
-extern void aes_decrypt_amd64(const uint32_t rk[], int Nr,
+extern ASMABI void aes_decrypt_amd64(const uint32_t rk[], int Nr,
 	const uint32_t ct[4], uint32_t pt[4]);
 #endif
 #if defined(__x86_64) && defined(HAVE_AES)

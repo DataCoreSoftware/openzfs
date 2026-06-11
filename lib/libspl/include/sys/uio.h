@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -7,7 +8,7 @@
  * with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -40,23 +41,29 @@
 #ifndef	_LIBSPL_SYS_UIO_H
 #define	_LIBSPL_SYS_UIO_H
 
+#include <sys/sysmacros.h>
 #include <sys/types.h>
+
 #ifndef _WIN32
 #include_next <sys/uio.h>
+#endif
+
+#ifdef __APPLE__
+#include <sys/_types/_iovec_t.h>
 #endif
 
 #include <stdint.h>
 typedef struct iovec iovec_t;
 
-#if defined(__linux__) || defined(_WIN32)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
 typedef enum zfs_uio_rw {
 	UIO_READ =	0,
 	UIO_WRITE =	1,
 } zfs_uio_rw_t;
 
 typedef enum zfs_uio_seg {
-	UIO_USERSPACE =	0,
-	UIO_SYSSPACE =	1,
+    UIO_USERSPACE = 0,
+    UIO_SYSSPACE = 1,
 } zfs_uio_seg_t;
 
 #elif defined(__FreeBSD__)
@@ -80,6 +87,31 @@ typedef struct zfs_uio {
 #define	zfs_uio_iovlen(uio, idx)	(uio)->uio_iov[(idx)].iov_len
 #define	zfs_uio_iovbase(uio, idx)	(uio)->uio_iov[(idx)].iov_base
 
+static inline boolean_t
+zfs_dio_page_aligned(void *buf)
+{
+	return ((((unsigned long long)(buf) & (PAGESIZE - 1)) == 0) ?
+	    B_TRUE : B_FALSE);
+}
+
+static inline boolean_t
+zfs_dio_offset_aligned(uint64_t offset, uint64_t blksz)
+{
+	return ((IS_P2ALIGNED(offset, blksz)) ? B_TRUE : B_FALSE);
+}
+
+static inline boolean_t
+zfs_dio_size_aligned(uint64_t size, uint64_t blksz)
+{
+	return (((size % blksz) == 0) ? B_TRUE : B_FALSE);
+}
+
+static inline boolean_t
+zfs_dio_aligned(uint64_t offset, uint64_t size, uint64_t blksz)
+{
+	return ((zfs_dio_offset_aligned(offset, blksz) &&
+	    zfs_dio_size_aligned(size, blksz)) ? B_TRUE : B_FALSE);
+}
 
 static inline void
 zfs_uio_iov_at_index(zfs_uio_t *uio, uint_t idx, void **base, uint64_t *len)
@@ -100,7 +132,7 @@ zfs_uio_isuserspace(zfs_uio_t *uio)
 }
 
 static inline void
-zfs_uio_advance(zfs_uio_t *uio, size_t size)
+zfs_uio_advance(zfs_uio_t *uio, ssize_t size)
 {
 	uio->uio_resid -= size;
 	uio->uio_loffset += size;

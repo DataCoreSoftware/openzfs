@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -62,9 +63,9 @@
 #include <sys/vdev_impl.h>
 #include <sys/fs/zfs.h>
 
-#include <thread_pool.h>
 #include <libzutil.h>
 #include <libnvpair.h>
+#include <libzfs.h>
 
 #include "zutil_import.h"
 
@@ -167,27 +168,19 @@ zpool_open_func(void *arg)
 	 * Add additional entries for paths described by this label.
 	 */
 	if (rn->rn_labelpaths) {
-		char *path = NULL;
-		char *devid = NULL;
-		char *env = NULL;
+		const char *path = NULL;
+		const char *devid = NULL;
 		rdsk_node_t *slice;
 		avl_index_t where;
-		int timeout;
 		int error;
 
 		if (label_paths(rn->rn_hdl, rn->rn_config, &path, &devid))
 			return;
 
-		env = getenv("ZPOOL_IMPORT_UDEV_TIMEOUT_MS");
-		if ((env == NULL) || sscanf(env, "%d", &timeout) != 1 ||
-		    timeout < 0) {
-			timeout = DISK_LABEL_WAIT;
-		}
-
 		/*
 		 * Allow devlinks to stabilize so all paths are available.
 		 */
-		zpool_label_disk_wait(rn->rn_name, timeout);
+		zpool_disk_wait(rn->rn_name);
 
 		if (path != NULL) {
 			slice = zutil_alloc(hdl, sizeof (rdsk_node_t));
@@ -263,36 +256,36 @@ zpool_default_search_paths(size_t *count)
  * index in the passed 'order' variable, otherwise return an error.
  */
 static int
-zfs_path_order(char *name, int *order)
+zfs_path_order(const char *name, int *order)
 {
-	int i, error = ENOENT;
-	char *dir, *env, *envdup, *tmp = NULL;
+	const char *env = getenv("ZPOOL_IMPORT_PATH");
 
-	env = getenv("ZPOOL_IMPORT_PATH");
 	if (env) {
-		envdup = strdup(env);
-		for (dir = strtok_r(envdup, ":", &tmp), i = 0;
-		    dir != NULL;
-		    dir = strtok_r(NULL, ":", &tmp), i++) {
-			if (strncmp(name, dir, strlen(dir)) == 0) {
-				*order = i;
-				error = 0;
+		for (int i = 0; ; ++i) {
+			env += strspn(env, ":");
+			size_t dirlen = strcspn(env, ":");
+			if (dirlen) {
+				if (strncmp(name, env, dirlen) == 0) {
+					*order = i;
+					return (0);
+				}
+
+				env += dirlen;
+			} else
 				break;
-			}
 		}
-		free(envdup);
 	} else {
-		for (i = 0; i < ARRAY_SIZE(zpool_default_import_path); i++) {
+		for (int i = 0; i < ARRAY_SIZE(zpool_default_import_path);
+		    ++i) {
 			if (strncmp(name, zpool_default_import_path[i],
 			    strlen(zpool_default_import_path[i])) == 0) {
 				*order = i;
-				error = 0;
-				break;
+				return (0);
 			}
 		}
 	}
 
-	return (error);
+	return (ENOENT);
 }
 
 /*
@@ -327,7 +320,9 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 		return (EINVAL);
 	}
 
-	error = blkid_dev_set_search(iter, "TYPE", "zfs_member");
+	/* Only const char *s since 2.32 */
+	error = blkid_dev_set_search(iter,
+	    (char *)"TYPE", (char *)"zfs_member");
 	if (error != 0) {
 		blkid_dev_iterate_end(iter);
 		blkid_put_cache(cache);
@@ -559,17 +554,17 @@ udev_device_is_ready(struct udev_device *dev)
 
 #else
 
-/* ARGSUSED */
 int
 zfs_device_get_devid(struct udev_device *dev, char *bufptr, size_t buflen)
 {
+	(void) dev, (void) bufptr, (void) buflen;
 	return (ENODATA);
 }
 
-/* ARGSUSED */
 int
 zfs_device_get_physical(struct udev_device *dev, char *bufptr, size_t buflen)
 {
+	(void) dev, (void) bufptr, (void) buflen;
 	return (ENODATA);
 }
 
@@ -579,9 +574,8 @@ zfs_device_get_physical(struct udev_device *dev, char *bufptr, size_t buflen)
  * Wait up to timeout_ms for udev to set up the device node.  The device is
  * considered ready when libudev determines it has been initialized, all of
  * the device links have been verified to exist, and it has been allowed to
- * settle.  At this point the device the device can be accessed reliably.
- * Depending on the complexity of the udev rules this process could take
- * several seconds.
+ * settle.  At this point the device can be accessed reliably. Depending on
+ * the complexity of the udev rules this process could take several seconds.
  */
 int
 zpool_label_disk_wait(const char *path, int timeout_ms)
@@ -681,6 +675,20 @@ zpool_label_disk_wait(const char *path, int timeout_ms)
 }
 
 /*
+ * Simplified version of zpool_label_disk_wait() where we wait for a device
+ * to appear using the default timeouts.
+ */
+int
+zpool_disk_wait(const char *path)
+{
+	int timeout;
+	timeout = zpool_getenv_int("ZPOOL_IMPORT_UDEV_TIMEOUT_MS",
+	    DISK_LABEL_WAIT);
+
+	return (zpool_label_disk_wait(path, timeout));
+}
+
+/*
  * Encode the persistent devices strings
  * used for the vdev disk label
  */
@@ -753,8 +761,83 @@ no_dev:
 
 	return (ret);
 #else
+	(void) path;
+	(void) ds;
+	(void) wholedisk;
 	return (ENOENT);
 #endif
+}
+
+/*
+ * Rescan the enclosure sysfs path for turning on enclosure LEDs and store it
+ * in the nvlist * (if applicable).  Like:
+ *    vdev_enc_sysfs_path: '/sys/class/enclosure/11:0:1:0/SLOT 4'
+ *
+ * If an old path was in the nvlist, and the rescan can not find a new path,
+ * then keep the old path, since the disk may have been removed.
+ *
+ * path: The vdev path (value from ZPOOL_CONFIG_PATH)
+ * key: The nvlist_t name (like ZPOOL_CONFIG_VDEV_ENC_SYSFS_PATH)
+ */
+void
+update_vdev_config_dev_sysfs_path(nvlist_t *nv, const char *path,
+    const char *key)
+{
+	char *upath, *spath;
+	const char *oldpath = NULL;
+
+	(void) nvlist_lookup_string(nv, key, &oldpath);
+
+	/* Add enclosure sysfs path (if disk is in an enclosure). */
+	upath = zfs_get_underlying_path(path);
+	spath = zfs_get_enclosure_sysfs_path(upath);
+
+	if (spath) {
+		(void) nvlist_add_string(nv, key, spath);
+	} else {
+		/*
+		 * We couldn't dynamically scan the disk's enclosure sysfs path.
+		 * This could be because the disk went away.  If there's an old
+		 * enclosure sysfs path in the nvlist, then keep using it.
+		 */
+		if (!oldpath) {
+			(void) nvlist_remove_all(nv, key);
+		}
+	}
+
+	free(upath);
+	free(spath);
+}
+
+/*
+ * This will get called for each leaf vdev.
+ */
+static int
+sysfs_path_pool_vdev_iter_f(void *hdl_data, nvlist_t *nv, void *data)
+{
+	(void) hdl_data, (void) data;
+
+	const char *path = NULL;
+	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &path) != 0)
+		return (1);
+
+	/* Rescan our enclosure sysfs path for this vdev */
+	update_vdev_config_dev_sysfs_path(nv, path,
+	    ZPOOL_CONFIG_VDEV_ENC_SYSFS_PATH);
+	return (0);
+}
+
+/*
+ * Given an nvlist for our pool (with vdev tree), iterate over all the
+ * leaf vdevs and update their ZPOOL_CONFIG_VDEV_ENC_SYSFS_PATH.
+ */
+void
+update_vdevs_config_dev_sysfs_path(nvlist_t *config)
+{
+	nvlist_t *nvroot = NULL;
+	verify(nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE,
+	    &nvroot) == 0);
+	for_each_vdev_in_nvlist(nvroot, sysfs_path_pool_vdev_iter_f, NULL);
 }
 
 /*
@@ -781,9 +864,8 @@ void
 update_vdev_config_dev_strs(nvlist_t *nv)
 {
 	vdev_dev_strs_t vds;
-	char *env, *type, *path;
+	const char *env, *type, *path;
 	uint64_t wholedisk = 0;
-	char *upath, *spath;
 
 	/*
 	 * For the benefit of legacy ZFS implementations, allow
@@ -830,18 +912,8 @@ update_vdev_config_dev_strs(nvlist_t *nv)
 			(void) nvlist_add_string(nv, ZPOOL_CONFIG_PHYS_PATH,
 			    vds.vds_devphys);
 		}
-
-		/* Add enclosure sysfs path (if disk is in an enclosure). */
-		upath = zfs_get_underlying_path(path);
-		spath = zfs_get_enclosure_sysfs_path(upath);
-		if (spath)
-			nvlist_add_string(nv, ZPOOL_CONFIG_VDEV_ENC_SYSFS_PATH,
-			    spath);
-		else
-			nvlist_remove_all(nv, ZPOOL_CONFIG_VDEV_ENC_SYSFS_PATH);
-
-		free(upath);
-		free(spath);
+		update_vdev_config_dev_sysfs_path(nv, path,
+		    ZPOOL_CONFIG_VDEV_ENC_SYSFS_PATH);
 	} else {
 		/* Clear out any stale entries. */
 		(void) nvlist_remove_all(nv, ZPOOL_CONFIG_DEVID);

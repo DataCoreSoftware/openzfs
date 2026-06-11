@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -22,6 +23,7 @@
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2012, 2018 by Delphix. All rights reserved.
  * Copyright (c) 2016 Actifio, Inc. All rights reserved.
+ * Copyright (c) 2025, Klara, Inc.
  */
 
 #include <assert.h>
@@ -31,15 +33,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <libzutil.h>
 #include <sys/crypto/icp.h>
 #include <sys/processor.h>
 #include <sys/rrwlock.h>
 #include <sys/spa.h>
+#include <sys/spa_impl.h>
+#include <sys/sid.h>
 #include <sys/stat.h>
 #include <sys/systeminfo.h>
 #include <sys/time.h>
-#include <sys/utsname.h>
+#include <sys/tsd.h>
+
+#include <libspl.h>
+#include <libzpool.h>
 #include <sys/zfs_context.h>
 #include <sys/zfs_onexit.h>
 #include <sys/zfs_vfsops.h>
@@ -55,410 +63,19 @@
  * Emulation of kernel services in userland.
  */
 
-uint64_t physmem;
-char hw_serial[HW_HOSTID_LEN];
-struct utsname hw_utsname;
+uint32_t hostid;
 
 /* If set, all blocks read will be copied to the specified directory. */
 char *vn_dumpdir = NULL;
 
-/* this only exists to have its address taken */
-struct proc p0;
-
-/*
- * =========================================================================
- * threads
- * =========================================================================
- *
- * TS_STACK_MIN is dictated by the minimum allowed pthread stack size.  While
- * TS_STACK_MAX is somewhat arbitrary, it was selected to be large enough for
- * the expected stack depth while small enough to avoid exhausting address
- * space with high thread counts.
- */
-#define	TS_STACK_MIN	MAX(PTHREAD_STACK_MIN, 32768)
-#define	TS_STACK_MAX	(256 * 1024)
-
-/*ARGSUSED*/
-kthread_t *
-zk_thread_create(void (*func)(void *), void *arg, size_t stksize, int state)
-{
-	pthread_attr_t attr;
-	pthread_t tid;
-	char *stkstr;
-	int detachstate = PTHREAD_CREATE_DETACHED;
-
-	VERIFY0(pthread_attr_init(&attr));
-
-	if (state & TS_JOINABLE)
-		detachstate = PTHREAD_CREATE_JOINABLE;
-
-	VERIFY0(pthread_attr_setdetachstate(&attr, detachstate));
-
-	/*
-	 * We allow the default stack size in user space to be specified by
-	 * setting the ZFS_STACK_SIZE environment variable.  This allows us
-	 * the convenience of observing and debugging stack overruns in
-	 * user space.  Explicitly specified stack sizes will be honored.
-	 * The usage of ZFS_STACK_SIZE is discussed further in the
-	 * ENVIRONMENT VARIABLES sections of the ztest(1) man page.
-	 */
-	if (stksize == 0) {
-		stkstr = getenv("ZFS_STACK_SIZE");
-
-		if (stkstr == NULL)
-			stksize = TS_STACK_MAX;
-		else
-			stksize = MAX(atoi(stkstr), TS_STACK_MIN);
-	}
-
-	VERIFY3S(stksize, >, 0);
-	stksize = P2ROUNDUP(MAX(stksize, TS_STACK_MIN), PAGESIZE);
-
-	/*
-	 * If this ever fails, it may be because the stack size is not a
-	 * multiple of system page size.
-	 */
-#ifndef _WIN32
-	VERIFY0(pthread_attr_setstacksize(&attr, stksize));
-	VERIFY0(pthread_attr_setguardsize(&attr, PAGESIZE));
-#endif
-
-	VERIFY0(pthread_create(&tid, &attr, (void *(*)(void *))func, arg));
-	VERIFY0(pthread_attr_destroy(&attr));
-
-	return ((void *)(uintptr_t)tid);
-}
-
-/*
- * =========================================================================
- * kstats
- * =========================================================================
- */
-/*ARGSUSED*/
-kstat_t *
-kstat_create(const char *module, int instance, const char *name,
-    const char *class, uchar_t type, ulong_t ndata, uchar_t ks_flag)
-{
-	return (NULL);
-}
-
-/*ARGSUSED*/
-void
-kstat_install(kstat_t *ksp)
-{}
-
-/*ARGSUSED*/
-void
-kstat_delete(kstat_t *ksp)
-{}
-
-void
-kstat_set_raw_ops(kstat_t *ksp,
-    int (*headers)(char *buf, size_t size),
-    int (*data)(char *buf, size_t size, void *data),
-    void *(*addr)(kstat_t *ksp, loff_t index))
-{}
-
-/*
- * =========================================================================
- * mutexes
- * =========================================================================
- */
-
-void
-mutex_init(kmutex_t *mp, char *name, int type, void *cookie)
-{
-	VERIFY0(pthread_mutex_init(&mp->m_lock, NULL));
-	memset(&mp->m_owner, 0, sizeof (pthread_t));
-}
-
-void
-mutex_destroy(kmutex_t *mp)
-{
-	VERIFY0(pthread_mutex_destroy(&mp->m_lock));
-}
-
-void
-mutex_enter(kmutex_t *mp)
-{
-	VERIFY0(pthread_mutex_lock(&mp->m_lock));
-	mp->m_owner = pthread_self();
-}
-
-int
-mutex_tryenter(kmutex_t *mp)
-{
-	int error;
-
-	error = pthread_mutex_trylock(&mp->m_lock);
-	if (error == 0) {
-		mp->m_owner = pthread_self();
-		return (1);
-	} else {
-		VERIFY3S(error, ==, EBUSY);
-		return (0);
-	}
-}
-
-void
-mutex_exit(kmutex_t *mp)
-{
-	memset(&mp->m_owner, 0, sizeof (pthread_t));
-	VERIFY0(pthread_mutex_unlock(&mp->m_lock));
-}
-
-/*
- * =========================================================================
- * rwlocks
- * =========================================================================
- */
-
-void
-rw_init(krwlock_t *rwlp, char *name, int type, void *arg)
-{
-	VERIFY0(pthread_rwlock_init(&rwlp->rw_lock, NULL));
-	rwlp->rw_readers = 0;
-	rwlp->rw_owner = 0;
-}
-
-void
-rw_destroy(krwlock_t *rwlp)
-{
-	VERIFY0(pthread_rwlock_destroy(&rwlp->rw_lock));
-}
-
-void
-rw_enter(krwlock_t *rwlp, krw_t rw)
-{
-	if (rw == RW_READER) {
-		VERIFY0(pthread_rwlock_rdlock(&rwlp->rw_lock));
-		atomic_inc_uint(&rwlp->rw_readers);
-	} else {
-		VERIFY0(pthread_rwlock_wrlock(&rwlp->rw_lock));
-		rwlp->rw_owner = pthread_self();
-	}
-}
-
-void
-rw_exit(krwlock_t *rwlp)
-{
-	if (RW_READ_HELD(rwlp))
-		atomic_dec_uint(&rwlp->rw_readers);
-	else
-		rwlp->rw_owner = 0;
-
-	VERIFY0(pthread_rwlock_unlock(&rwlp->rw_lock));
-}
-
-int
-rw_tryenter(krwlock_t *rwlp, krw_t rw)
-{
-	int error;
-
-	if (rw == RW_READER)
-		error = pthread_rwlock_tryrdlock(&rwlp->rw_lock);
-	else
-		error = pthread_rwlock_trywrlock(&rwlp->rw_lock);
-
-	if (error == 0) {
-		if (rw == RW_READER)
-			atomic_inc_uint(&rwlp->rw_readers);
-		else
-			rwlp->rw_owner = pthread_self();
-
-		return (1);
-	}
-
-	VERIFY3S(error, ==, EBUSY);
-
-	return (0);
-}
-
-/* ARGSUSED */
 uint32_t
 zone_get_hostid(void *zonep)
 {
 	/*
 	 * We're emulating the system's hostid in userland.
 	 */
-	return (strtoul(hw_serial, NULL, 10));
-}
-
-int
-rw_tryupgrade(krwlock_t *rwlp)
-{
-	return (0);
-}
-
-/*
- * =========================================================================
- * condition variables
- * =========================================================================
- */
-
-void
-cv_init(kcondvar_t *cv, char *name, int type, void *arg)
-{
-	VERIFY0(pthread_cond_init(cv, NULL));
-}
-
-void
-cv_destroy(kcondvar_t *cv)
-{
-	VERIFY0(pthread_cond_destroy(cv));
-}
-
-void
-cv_wait(kcondvar_t *cv, kmutex_t *mp)
-{
-	memset(&mp->m_owner, 0, sizeof (pthread_t));
-	VERIFY0(pthread_cond_wait(cv, &mp->m_lock));
-	mp->m_owner = pthread_self();
-}
-
-int
-cv_wait_sig(kcondvar_t *cv, kmutex_t *mp)
-{
-	cv_wait(cv, mp);
-	return (1);
-}
-
-int
-cv_timedwait(kcondvar_t *cv, kmutex_t *mp, clock_t abstime)
-{
-	int error;
-	struct timeval tv;
-	struct timespec ts;
-	clock_t delta;
-
-	delta = abstime - ddi_get_lbolt();
-	if (delta <= 0)
-		return (-1);
-
-	VERIFY(gettimeofday(&tv, NULL) == 0);
-
-	ts.tv_sec = tv.tv_sec + delta / hz;
-	ts.tv_nsec = tv.tv_usec * NSEC_PER_USEC + (delta % hz) * (NANOSEC / hz);
-	if (ts.tv_nsec >= NANOSEC) {
-		ts.tv_sec++;
-		ts.tv_nsec -= NANOSEC;
-	}
-
-	memset(&mp->m_owner, 0, sizeof (pthread_t));
-	error = pthread_cond_timedwait(cv, &mp->m_lock, &ts);
-	mp->m_owner = pthread_self();
-
-	if (error == ETIMEDOUT)
-		return (-1);
-
-	VERIFY0(error);
-
-	return (1);
-}
-
-/*ARGSUSED*/
-int
-cv_timedwait_hires(kcondvar_t *cv, kmutex_t *mp, hrtime_t tim, hrtime_t res,
-    int flag)
-{
-	int error;
-	struct timeval tv;
-	struct timespec ts;
-	hrtime_t delta;
-
-	ASSERT(flag == 0 || flag == CALLOUT_FLAG_ABSOLUTE);
-
-	delta = tim;
-	if (flag & CALLOUT_FLAG_ABSOLUTE)
-		delta -= gethrtime();
-
-	if (delta <= 0)
-		return (-1);
-
-	VERIFY0(gettimeofday(&tv, NULL));
-
-	ts.tv_sec = tv.tv_sec + delta / NANOSEC;
-	ts.tv_nsec = tv.tv_usec * NSEC_PER_USEC + (delta % NANOSEC);
-	if (ts.tv_nsec >= NANOSEC) {
-		ts.tv_sec++;
-		ts.tv_nsec -= NANOSEC;
-	}
-
-	memset(&mp->m_owner, 0, sizeof (pthread_t));
-	error = pthread_cond_timedwait(cv, &mp->m_lock, &ts);
-	mp->m_owner = pthread_self();
-
-	if (error == ETIMEDOUT)
-		return (-1);
-
-	VERIFY0(error);
-
-	return (1);
-}
-
-void
-cv_signal(kcondvar_t *cv)
-{
-	VERIFY0(pthread_cond_signal(cv));
-}
-
-void
-cv_broadcast(kcondvar_t *cv)
-{
-	VERIFY0(pthread_cond_broadcast(cv));
-}
-
-/*
- * =========================================================================
- * procfs list
- * =========================================================================
- */
-
-void
-seq_printf(struct seq_file *m, const char *fmt, ...)
-{}
-
-void
-procfs_list_install(const char *module,
-    const char *submodule,
-    const char *name,
-    mode_t mode,
-    procfs_list_t *procfs_list,
-    int (*show)(struct seq_file *f, void *p),
-    int (*show_header)(struct seq_file *f),
-    int (*clear)(procfs_list_t *procfs_list),
-    size_t procfs_list_node_off)
-{
-	mutex_init(&procfs_list->pl_lock, NULL, MUTEX_DEFAULT, NULL);
-	list_create(&procfs_list->pl_list,
-	    procfs_list_node_off + sizeof (procfs_list_node_t),
-	    procfs_list_node_off + offsetof(procfs_list_node_t, pln_link));
-	procfs_list->pl_next_id = 1;
-	procfs_list->pl_node_offset = procfs_list_node_off;
-}
-
-void
-procfs_list_uninstall(procfs_list_t *procfs_list)
-{}
-
-void
-procfs_list_destroy(procfs_list_t *procfs_list)
-{
-	ASSERT(list_is_empty(&procfs_list->pl_list));
-	list_destroy(&procfs_list->pl_list);
-	mutex_destroy(&procfs_list->pl_lock);
-}
-
-#define	NODE_ID(procfs_list, obj) \
-		(((procfs_list_node_t *)(((char *)obj) + \
-		(procfs_list)->pl_node_offset))->pln_id)
-
-void
-procfs_list_add(procfs_list_t *procfs_list, void *p)
-{
-	ASSERT(MUTEX_HELD(&procfs_list->pl_lock));
-	NODE_ID(procfs_list, p) = procfs_list->pl_next_id++;
-	list_insert_tail(&procfs_list->pl_list, p);
+	(void) zonep;
+	return (hostid);
 }
 
 /*
@@ -604,42 +221,62 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
  * cmn_err() and panic()
  * =========================================================================
  */
-static char ce_prefix[CE_IGNORE][10] = { "", "NOTICE: ", "WARNING: ", "" };
-static char ce_suffix[CE_IGNORE][2] = { "", "\n", "\n", "" };
 
-void
-vpanic(const char *fmt, va_list adx)
+static __attribute__((noreturn)) void
+panic_stop_or_abort(void)
 {
-	(void) fprintf(stderr, "error: ");
-	(void) vfprintf(stderr, fmt, adx);
-	(void) fprintf(stderr, "\n");
+	const char *stopenv = getenv("LIBZPOOL_PANIC_STOP");
+	if (stopenv != NULL && atoi(stopenv)) {
+		fputs("libzpool: LIBZPOOL_PANIC_STOP is set, sending "
+		    "SIGSTOP to process group\n", stderr);
+		fflush(stderr);
+
+		kill(0, SIGSTOP);
+
+		fputs("libzpool: continued after panic stop, "
+		    "aborting\n", stderr);
+	}
 
 	abort();	/* think of it as a "user-level crash dump" */
 }
 
-void
-panic(const char *fmt, ...)
+static void
+vcmn_msg(int ce, const char *fmt, va_list adx)
 {
-	va_list adx;
+	switch (ce) {
+	case CE_IGNORE:
+		return;
+	case CE_CONT:
+		break;
+	case CE_NOTE:
+		fputs("libzpool: NOTICE: ", stderr);
+		break;
+	case CE_WARN:
+		fputs("libzpool: WARNING: ", stderr);
+		break;
+	case CE_PANIC:
+		fputs("libzpool: PANIC: ", stderr);
+		break;
+	default:
+		fputs("libzpool: [unknown severity %d]: ", stderr);
+		break;
+	}
 
-	va_start(adx, fmt);
-	vpanic(fmt, adx);
-	va_end(adx);
+	vfprintf(stderr, fmt, adx);
+	if (ce != CE_CONT)
+		fputc('\n', stderr);
+	fflush(stderr);
 }
 
 void
 vcmn_err(int ce, const char *fmt, va_list adx)
 {
+	vcmn_msg(ce, fmt, adx);
+
 	if (ce == CE_PANIC)
-		vpanic(fmt, adx);
-	if (ce != CE_NOTE) {	/* suppress noise in userland stress testing */
-		(void) fprintf(stderr, "%s", ce_prefix[ce]);
-		(void) vfprintf(stderr, fmt, adx);
-		(void) fprintf(stderr, "%s", ce_suffix[ce]);
-	}
+		panic_stop_or_abort();
 }
 
-/*PRINTFLIKE2*/
 void
 cmn_err(int ce, const char *fmt, ...)
 {
@@ -648,6 +285,25 @@ cmn_err(int ce, const char *fmt, ...)
 	va_start(adx, fmt);
 	vcmn_err(ce, fmt, adx);
 	va_end(adx);
+}
+
+__attribute__((noreturn)) void
+panic(const char *fmt, ...)
+{
+	va_list adx;
+
+	va_start(adx, fmt);
+	vcmn_msg(CE_PANIC, fmt, adx);
+	va_end(adx);
+
+	panic_stop_or_abort();
+}
+
+__attribute__((noreturn)) void
+vpanic(const char *fmt, va_list adx)
+{
+	vcmn_msg(CE_PANIC, fmt, adx);
+	panic_stop_or_abort();
 }
 
 /*
@@ -694,122 +350,14 @@ lowbit64(uint64_t i)
 	return (__builtin_ffsll(i));
 }
 
-const char *random_path = "/dev/random";
-const char *urandom_path = "/dev/urandom";
-static int random_fd = -1, urandom_fd = -1;
-
-
-#ifdef _WIN32
-
-void
-random_init(void)
-{
-}
-
-void
-random_fini(void)
-{
-}
-
-static int
-random_get_bytes_common(uint8_t *ptr, size_t len, int fd)
-{
-	size_t resid = len;
-	ssize_t bytes;
-	unsigned int number;
-
-	while (resid != 0) {
-		rand_s(&number);
-		bytes = MIN(resid, sizeof (number));
-		memcpy(ptr, &number, bytes);
-		ASSERT3S(bytes, >=, 0);
-		ptr += bytes;
-		resid -= bytes;
-	}
-
-	return (0);
-}
-
-#else /* Windows */
-
-void
-random_init(void)
-{
-	VERIFY((random_fd = open(random_path, O_RDONLY | O_CLOEXEC)) != -1);
-	VERIFY((urandom_fd = open(urandom_path, O_RDONLY | O_CLOEXEC)) != -1);
-}
-
-void
-random_fini(void)
-{
-	close(random_fd);
-	close(urandom_fd);
-
-	random_fd = -1;
-	urandom_fd = -1;
-}
-
-static int
-random_get_bytes_common(uint8_t *ptr, size_t len, int fd)
-{
-	size_t resid = len;
-	ssize_t bytes;
-
-	ASSERT(fd != -1);
-
-	while (resid != 0) {
-		bytes = read(fd, ptr, resid);
-		ASSERT3S(bytes, >=, 0);
-		ptr += bytes;
-		resid -= bytes;
-	}
-
-	return (0);
-}
-#endif
-
-int
-random_get_bytes(uint8_t *ptr, size_t len)
-{
-	return (random_get_bytes_common(ptr, len, random_fd));
-}
-
-int
-random_get_pseudo_bytes(uint8_t *ptr, size_t len)
-{
-	return (random_get_bytes_common(ptr, len, urandom_fd));
-}
-
-int
-ddi_strtoul(const char *hw_serial, char **nptr, int base, unsigned long *result)
-{
-	char *end;
-
-	*result = strtoul(hw_serial, &end, base);
-	if (*result == 0)
-		return (errno);
-	if (nptr != NULL)
-	    *nptr = end;
-	return (0);
-}
-
 int
 ddi_strtoull(const char *str, char **nptr, int base, u_longlong_t *result)
 {
-	char *end;
-
-	*result = strtoull(str, &end, base);
+	errno = 0;
+	*result = strtoull(str, nptr, base);
 	if (*result == 0)
 		return (errno);
-	if (nptr != NULL)
-	    *nptr = end;
 	return (0);
-}
-
-utsname_t *
-utsname(void)
-{
-	return (&hw_utsname);
 }
 
 /*
@@ -827,24 +375,92 @@ umem_out_of_memory(void)
 	return (0);
 }
 
+static void
+spa_config_load(void)
+{
+	void *buf = NULL;
+	nvlist_t *nvlist, *child;
+	nvpair_t *nvpair;
+	char *pathname;
+	zfs_file_t *fp;
+	zfs_file_attr_t zfa;
+	uint64_t fsize;
+	int err;
+
+	/*
+	 * Open the configuration file.
+	 */
+	pathname = kmem_alloc(MAXPATHLEN, KM_SLEEP);
+
+	(void) snprintf(pathname, MAXPATHLEN, "%s", spa_config_path);
+
+	err = zfs_file_open(pathname, O_RDONLY, 0, &fp);
+	if (err)
+		err = zfs_file_open(ZPOOL_CACHE_BOOT, O_RDONLY, 0, &fp);
+
+	kmem_free(pathname, MAXPATHLEN);
+
+	if (err)
+		return;
+
+	if (zfs_file_getattr(fp, &zfa))
+		goto out;
+
+	fsize = zfa.zfa_size;
+	buf = kmem_alloc(fsize, KM_SLEEP);
+
+	/*
+	 * Read the nvlist from the file.
+	 */
+	if (zfs_file_read(fp, buf, fsize, NULL) < 0)
+		goto out;
+
+	/*
+	 * Unpack the nvlist.
+	 */
+	if (nvlist_unpack(buf, fsize, &nvlist, KM_SLEEP) != 0)
+		goto out;
+
+	/*
+	 * Iterate over all elements in the nvlist, creating a new spa_t for
+	 * each one with the specified configuration.
+	 */
+	spa_namespace_enter(FTAG);
+	nvpair = NULL;
+	while ((nvpair = nvlist_next_nvpair(nvlist, nvpair)) != NULL) {
+		if (nvpair_type(nvpair) != DATA_TYPE_NVLIST)
+			continue;
+
+		child = fnvpair_value_nvlist(nvpair);
+
+		if (spa_lookup(nvpair_name(nvpair)) != NULL)
+			continue;
+		(void) spa_add(nvpair_name(nvpair), child, NULL);
+	}
+	spa_namespace_exit(FTAG);
+
+	nvlist_free(nvlist);
+
+out:
+	if (buf != NULL)
+		kmem_free(buf, fsize);
+
+	zfs_file_close(fp);
+}
+
 void
 kernel_init(int mode)
 {
 	extern uint_t rrw_tsd_key;
 
-	umem_nofail_callback(umem_out_of_memory);
+	libspl_init();
 
-	physmem = sysconf(_SC_PHYS_PAGES);
+	umem_nofail_callback(umem_out_of_memory);
 
 	dprintf("physmem = %llu pages (%.2f GB)\n", (u_longlong_t)physmem,
 	    (double)physmem * sysconf(_SC_PAGE_SIZE) / (1ULL << 30));
 
-	(void) snprintf(hw_serial, sizeof (hw_serial), "%ld",
-	    (mode & SPA_MODE_WRITE) ? get_system_hostid() : 0);
-
-	random_init();
-
-	VERIFY0(uname(&hw_utsname));
+	hostid = (mode & SPA_MODE_WRITE) ? get_system_hostid() : 0;
 
 	system_taskq_init();
 	icp_init();
@@ -852,6 +468,7 @@ kernel_init(int mode)
 	zstd_init();
 
 	spa_init((spa_mode_t)mode);
+	spa_config_load();
 
 	fletcher_4_init();
 
@@ -869,178 +486,48 @@ kernel_fini(void)
 	icp_fini();
 	system_taskq_fini();
 
-	random_fini();
+	libspl_fini();
 }
 
-uid_t
-crgetuid(cred_t *cr)
+zfs_file_t *
+zfs_onexit_fd_hold(int fd, minor_t *minorp)
 {
-	return (0);
-}
-
-uid_t
-crgetruid(cred_t *cr)
-{
-	return (0);
-}
-
-gid_t
-crgetgid(cred_t *cr)
-{
-	return (0);
-}
-
-int
-crgetngroups(cred_t *cr)
-{
-	return (0);
-}
-
-gid_t *
-crgetgroups(cred_t *cr)
-{
+	(void) fd;
+	*minorp = 0;
 	return (NULL);
 }
 
-int
-zfs_secpolicy_snapshot_perms(const char *name, cred_t *cr)
-{
-	return (0);
-}
-
-int
-zfs_secpolicy_rename_perms(const char *from, const char *to, cred_t *cr)
-{
-	return (0);
-}
-
-int
-zfs_secpolicy_destroy_perms(const char *name, cred_t *cr)
-{
-	return (0);
-}
-
-int
-secpolicy_zfs(const cred_t *cr)
-{
-	return (0);
-}
-
-int
-secpolicy_zfs_proc(const cred_t *cr, proc_t *proc)
-{
-	return (0);
-}
-
-ksiddomain_t *
-ksid_lookupdomain(const char *dom)
-{
-	ksiddomain_t *kd;
-
-	kd = umem_zalloc(sizeof (ksiddomain_t), UMEM_NOFAIL);
-	kd->kd_name = spa_strdup(dom);
-	return (kd);
-}
-
 void
-ksiddomain_rele(ksiddomain_t *ksid)
+zfs_onexit_fd_rele(zfs_file_t *fp)
 {
-	spa_strfree(ksid->kd_name);
-	umem_free(ksid, sizeof (ksiddomain_t));
+	(void) fp;
 }
 
-char *
-kmem_vasprintf(const char *fmt, va_list adx)
-{
-	char *buf = NULL;
-	va_list adx_copy;
-
-	va_copy(adx_copy, adx);
-	VERIFY(vasprintf(&buf, fmt, adx_copy) != -1);
-	va_end(adx_copy);
-
-	return (buf);
-}
-
-char *
-kmem_asprintf(const char *fmt, ...)
-{
-	char *buf = NULL;
-	va_list adx;
-
-	va_start(adx, fmt);
-	VERIFY(vasprintf(&buf, fmt, adx) != -1);
-	va_end(adx);
-
-	return (buf);
-}
-
-/* ARGSUSED */
-int
-zfs_onexit_fd_hold(int fd, minor_t *minorp)
-{
-	*minorp = 0;
-	return (0);
-}
-
-/* ARGSUSED */
-void
-zfs_onexit_fd_rele(int fd)
-{
-}
-
-/* ARGSUSED */
 int
 zfs_onexit_add_cb(minor_t minor, void (*func)(void *), void *data,
-    uint64_t *action_handle)
+    uintptr_t *action_handle)
 {
+	(void) minor, (void) func, (void) data, (void) action_handle;
 	return (0);
 }
 
-fstrans_cookie_t
-spl_fstrans_mark(void)
-{
-	return ((fstrans_cookie_t)0);
-}
-
 void
-spl_fstrans_unmark(fstrans_cookie_t cookie)
+zvol_create_minors(const char *name)
 {
-}
-
-int
-__spl_pf_fstrans_check(void)
-{
-	return (0);
-}
-
-int
-kmem_cache_reap_active(void)
-{
-	return (0);
-}
-
-void *zvol_tag = "zvol_tag";
-
-void
-zvol_create_minor(const char *name)
-{
-}
-
-void
-zvol_create_minors_recursive(const char *name)
-{
+	(void) name;
 }
 
 void
 zvol_remove_minors(spa_t *spa, const char *name, boolean_t async)
 {
+	(void) spa, (void) name, (void) async;
 }
 
 void
 zvol_rename_minors(spa_t *spa, const char *oldname, const char *newname,
     boolean_t async)
 {
+	(void) spa, (void) oldname, (void) newname, (void) async;
 }
 
 /*
@@ -1055,8 +542,8 @@ zvol_rename_minors(spa_t *spa, const char *oldname, const char *newname,
 int
 zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 {
-	int fd = -1;
-	int dump_fd = -1;
+	int fd;
+	int dump_fd;
 	int err;
 	int old_umask = 0;
 	zfs_file_t *fp;
@@ -1101,6 +588,12 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 	fp->f_fd = fd;
 	fp->f_dump_fd = dump_fd;
 	*fpp = fp;
+
+#ifdef _WIN32
+	/* If filename contained offset, read it in now. */
+	fp->f_win_offset = 0;
+	zfs_file_seek(fp, &fp->f_win_offset, SEEK_CUR);
+#endif
 
 	return (0);
 }
@@ -1157,18 +650,21 @@ zfs_file_write(zfs_file_t *fp, const void *buf, size_t count, ssize_t *resid)
  */
 int
 zfs_file_pwrite(zfs_file_t *fp, const void *buf,
-    size_t count, loff_t pos, ssize_t *resid)
+    size_t count, loff_t pos, uint8_t ashift, ssize_t *resid)
 {
 	ssize_t rc, split, done;
 	int sectors;
 
+#ifdef _WIN32
+	pos += fp->f_win_offset;
+#endif
 	/*
 	 * To simulate partial disk writes, we split writes into two
 	 * system calls so that the process can be killed in between.
 	 * This is used by ztest to simulate realistic failure modes.
 	 */
-	sectors = count >> SPA_MINBLOCKSHIFT;
-	split = (sectors > 0 ? rand() % sectors : 0) << SPA_MINBLOCKSHIFT;
+	sectors = count >> ashift;
+	split = (sectors > 0 ? rand() % sectors : 0) << ashift;
 	rc = pwrite64(fp->f_fd, buf, split, pos);
 	if (rc != -1) {
 		done = rc;
@@ -1245,6 +741,10 @@ zfs_file_pread(zfs_file_t *fp, void *buf, size_t count, loff_t off,
     ssize_t *resid)
 {
 	ssize_t rc;
+
+#ifdef _WIN32
+	off += fp->f_win_offset;
+#endif
 
 	rc = pread64(fp->f_fd, buf, count, off);
 	if (rc < 0) {
@@ -1334,33 +834,41 @@ zfs_file_getattr(zfs_file_t *fp, zfs_file_attr_t *zfattr)
 int
 zfs_file_fsync(zfs_file_t *fp, int flags)
 {
-	int rc;
+	(void) flags;
 
-	rc = fsync(fp->f_fd);
-	if (rc < 0)
+	if (fsync(fp->f_fd) < 0)
 		return (errno);
 
 	return (0);
 }
 
 /*
- * fallocate - allocate or free space on disk
+ * deallocate - zero and/or deallocate file storage
  *
  * fp - file pointer
- * mode (non-standard options for hole punching etc)
- * offset - offset to start allocating or freeing from
- * len - length to free / allocate
- *
- * OPTIONAL
+ * offset - offset to start zeroing or deallocating
+ * len - length to zero or deallocate
  */
 int
-zfs_file_fallocate(zfs_file_t *fp, int mode, loff_t offset, loff_t len)
+zfs_file_deallocate(zfs_file_t *fp, loff_t offset, loff_t len)
 {
-#ifdef __linux__
-	return (fallocate(fp->f_fd, mode, offset, len));
+	int rc;
+#if defined(__linux__)
+	rc = fallocate(fp->f_fd,
+	    FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, len);
+#elif defined(__FreeBSD__) && (__FreeBSD_version >= 1400029)
+	struct spacectl_range rqsr = {
+		.r_offset = offset,
+		.r_len = len,
+	};
+	rc = fspacectl(fp->f_fd, SPACECTL_DEALLOC, &rqsr, 0, &rqsr);
 #else
-	return (EOPNOTSUPP);
+	(void) fp, (void) offset, (void) len;
+	rc = EOPNOTSUPP;
 #endif
+	if (rc)
+		return (SET_ERROR(rc));
+	return (0);
 }
 
 /*
@@ -1395,33 +903,57 @@ zfs_file_unlink(const char *path)
  * Get reference to file pointer
  *
  * fd - input file descriptor
- * fpp - pointer to file pointer
  *
- * Returns 0 on success EBADF on failure.
+ * Returns pointer to file struct or NULL.
  * Unsupported in user space.
  */
-int
-zfs_file_get(int fd, zfs_file_t **fpp)
+zfs_file_t *
+zfs_file_get(int fd)
 {
+	(void) fd;
 	abort();
-
-	return (EOPNOTSUPP);
+	return (NULL);
 }
-
 /*
  * Drop reference to file pointer
  *
- * fd - input file descriptor
+ * fp - pointer to file struct
  *
  * Unsupported in user space.
  */
 void
-zfs_file_put(int fd)
+zfs_file_put(zfs_file_t *fp)
 {
 	abort();
+	(void) fp;
 }
 
 void
 zfsvfs_update_fromname(const char *oldname, const char *newname)
 {
+	(void) oldname, (void) newname;
+}
+
+void
+spa_import_os(spa_t *spa)
+{
+	(void) spa;
+}
+
+void
+spa_export_os(spa_t *spa)
+{
+	(void) spa;
+}
+
+void
+spa_activate_os(spa_t *spa)
+{
+	(void) spa;
+}
+
+void
+spa_deactivate_os(spa_t *spa)
+{
+	(void) spa;
 }

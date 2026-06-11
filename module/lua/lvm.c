@@ -1,4 +1,4 @@
-/* BEGIN CSTYLED */
+// SPDX-License-Identifier: MIT
 /*
 ** $Id: lvm.c,v 2.155.1.1 2013/04/12 18:48:47 roberto Exp $
 ** Lua virtual machine
@@ -569,7 +569,7 @@ void luaV_finishOp (lua_State *L) {
 #define donextjump(ci)	{ i = *ci->u.l.savedpc; dojump(ci, i, 1); }
 
 
-#define Protect(x)	{ {x;}; base = ci->u.l.base; }
+#define Protect(x)	{ {x;} base = ci->u.l.base; }
 
 #define checkGC(L,c)  \
   Protect( luaC_condGC(L,{L->top = (c);  /* limit of live values */ \
@@ -928,5 +928,3 @@ void luaV_execute (lua_State *L) {
     }
   }
 }
-
-/* END CSTYLED */

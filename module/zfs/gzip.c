@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -28,7 +29,6 @@
 
 #include <sys/debug.h>
 #include <sys/types.h>
-#include <sys/strings.h>
 #include <sys/qat.h>
 #include <sys/zio_compress.h>
 
@@ -48,8 +48,9 @@ typedef uLongf zlen_t;
 
 #endif
 
-size_t
-gzip_compress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
+static size_t
+zfs_gzip_compress_buf(void *s_start, void *d_start, size_t s_len,
+    size_t d_len, int n)
 {
 	int ret;
 	zlen_t dstlen = d_len;
@@ -66,7 +67,7 @@ gzip_compress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
 			if (d_len != s_len)
 				return (s_len);
 
-			bcopy(s_start, d_start, s_len);
+			memcpy(d_start, s_start, s_len);
 			return (s_len);
 		}
 		/* if hardware compression fails, do it again with software */
@@ -76,17 +77,18 @@ gzip_compress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
 		if (d_len != s_len)
 			return (s_len);
 
-		bcopy(s_start, d_start, s_len);
+		memcpy(d_start, s_start, s_len);
 		return (s_len);
 	}
 
 	return ((size_t)dstlen);
 }
 
-/*ARGSUSED*/
-int
-gzip_decompress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
+static int
+zfs_gzip_decompress_buf(void *s_start, void *d_start, size_t s_len,
+    size_t d_len, int n)
 {
+	(void) n;
 	zlen_t dstlen = d_len;
 
 	ASSERT(d_len >= s_len);
@@ -104,3 +106,6 @@ gzip_decompress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
 
 	return (0);
 }
+
+ZFS_COMPRESS_WRAP_DECL(zfs_gzip_compress)
+ZFS_DECOMPRESS_WRAP_DECL(zfs_gzip_decompress)

@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -78,6 +79,14 @@ log_must dd if=/dev/zero of=/$TESTPOOL/$TESTFS/sync \
     conv=fdatasync,fsync bs=1 count=1
 
 #
+# Create a small file for the O_DIRECT test before freezing the pool. This
+# allows us to overwrite it after the pool is frozen and avoid the case
+# where O_DIRECT is disabled because the first block must be grown.
+#
+log_must dd if=/dev/urandom of=/$TESTPOOL/$TESTFS/direct \
+    oflag=sync,direct bs=4k count=1
+
+#
 # 2. Freeze TESTFS
 #
 log_must zpool freeze $TESTPOOL
@@ -110,7 +119,7 @@ log_must rmdir /$TESTPOOL/$TESTFS/dir_to_delete
 log_must mkdir -p $TESTDIR
 log_must dd if=/dev/urandom of=/$TESTPOOL/$TESTFS/payload \
     oflag=sync bs=1k count=8
-typeset checksum=$(sha256digest /$TESTPOOL/$TESTFS/payload)
+typeset checksum=$(xxh128digest /$TESTPOOL/$TESTFS/payload)
 
 # TX_WRITE (small file with ordering)
 log_must dd if=/dev/urandom of=/$TESTPOOL/$TESTFS/small_file \
@@ -139,6 +148,10 @@ log_must truncate -s 0 /$TESTPOOL/$TESTFS/truncated_file
 # TX_WRITE (large file)
 log_must dd if=/dev/urandom of=/$TESTPOOL/$TESTFS/large \
     oflag=sync bs=128k count=64
+
+# TX_WRITE (O_DIRECT)
+log_must dd if=/dev/urandom of=/$TESTPOOL/$TESTFS/direct \
+    oflag=sync,direct bs=4k count=1
 
 # Write zeros, which compress to holes, in the middle of a file
 log_must dd if=/dev/urandom of=/$TESTPOOL/$TESTFS/holes.1 \
@@ -175,11 +188,34 @@ log_must ln /$TESTPOOL/$TESTFS/link_and_unlink \
    /$TESTPOOL/$TESTFS/link_and_unlink.link
 log_must rm /$TESTPOOL/$TESTFS/link_and_unlink.link
 
+# We can't test RENAME_* flags without renameat2(2) support.
+if ! is_linux ; then
+	log_note "renameat2 is linux-only"
+elif ! renameat2 -C ; then
+	log_note "renameat2 not supported on this (pre-3.15) linux kernel"
+else
+	# TX_RENAME_EXCHANGE
+	log_must dd if=/dev/urandom of=/$TESTPOOL/$TESTFS/xchg-a bs=1k count=1
+	log_must dd if=/dev/urandom of=/$TESTPOOL/$TESTFS/xchg-b bs=1k count=1
+	log_must dd if=/dev/urandom of=/$TESTPOOL/$TESTFS/xchg-c bs=1k count=1
+	log_must dd if=/dev/urandom of=/$TESTPOOL/$TESTFS/xchg-d bs=1k count=1
+	# rotate the files around
+	log_must renameat2 -x /$TESTPOOL/$TESTFS/xchg-{a,b}
+	log_must renameat2 -x /$TESTPOOL/$TESTFS/xchg-{b,c}
+	log_must renameat2 -x /$TESTPOOL/$TESTFS/xchg-{c,a}
+	# exchange same path
+	log_must renameat2 -x /$TESTPOOL/$TESTFS/xchg-{d,d}
+
+	# TX_RENAME_WHITEOUT
+	log_must mkfile 1k /$TESTPOOL/$TESTFS/whiteout
+	log_must renameat2 -w /$TESTPOOL/$TESTFS/whiteout{,-moved}
+fi
+
 #
 # 4. Copy TESTFS to temporary location (TESTDIR/copy)
 #
-log_must mkdir -p $TESTDIR/copy
-log_must cp -a /$TESTPOOL/$TESTFS/* $TESTDIR/copy/
+log_must mkdir -p $TESTDIR
+log_must rsync -aHAX /$TESTPOOL/$TESTFS/ $TESTDIR/copy
 
 #
 # 5. Unmount filesystem and export the pool
@@ -213,10 +249,10 @@ log_must ls_xattr /$TESTPOOL/$TESTFS/xattr.dir
 log_must ls_xattr /$TESTPOOL/$TESTFS/xattr.file
 
 log_note "Verify working set diff:"
-log_must diff -r /$TESTPOOL/$TESTFS $TESTDIR/copy
+log_must replay_directory_diff $TESTDIR/copy /$TESTPOOL/$TESTFS
 
 log_note "Verify file checksum:"
-typeset checksum1=$(sha256digest /$TESTPOOL/$TESTFS/payload)
+typeset checksum1=$(xxh128digest /$TESTPOOL/$TESTFS/payload)
 [[ "$checksum1" == "$checksum" ]] || \
     log_fail "checksum mismatch ($checksum1 != $checksum)"
 

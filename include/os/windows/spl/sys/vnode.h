@@ -80,18 +80,26 @@ struct vnode {
 	// mmap file access struct
 	SECTION_OBJECT_POINTERS SectionObjectPointers;
 
+	OPLOCK oplock;
+	uint64_t OplockRefCount;
+
 	// Our implementation data fields
 	// KSPIN_LOCK v_spinlock;
 	kmutex_t v_mutex;
 
 	mount_t *v_mount;
+	struct vnode *v_parent;
+	void *v_data;
+	REPARSE_DATA_BUFFER *v_reparse;
+	SECURITY_DESCRIPTOR *security_descriptor;
+
 	uint32_t v_flags;
 	uint32_t v_iocount; // Short term holds
 	uint32_t v_usecount; // Long term holds
 	uint32_t v_type;
 	uint32_t v_unlink;
 	uint32_t v_unused;
-	void *v_data;
+	size_t v_reparse_size;
 	uint64_t v_id;
 	uint64_t v_easize;
 	hrtime_t v_age;	// How long since entered DEAD
@@ -101,7 +109,6 @@ struct vnode {
 	ERESOURCE resource; // Holder for FileHeader.Resource
 	ERESOURCE pageio_resource; // Holder for FileHeader.PageIoResource
 	FILE_LOCK lock;
-	SECURITY_DESCRIPTOR *security_descriptor;
 	SHARE_ACCESS share_access;
 
 	list_node_t v_list; // vnode_all_list member node.
@@ -149,14 +156,6 @@ extern int			vttoif_tab[];
 #define	ATTR_NOACLCHECK 0x20
 
 #define	F_SEEK_HOLE 0
-
-/*
- * Windows uses separate vnop getfileinformation to deal with XATTRs, so
- * we never get vop&XVATTR set from VFS. All internal checks for it in
- * ZFS is not required.
- */
-#define	ATTR_XVATTR	0
-#define	AT_XVATTR	ATTR_XVATTR
 
 #define	B_INVAL		0x01
 #define	B_TRUNC		0x02
@@ -224,6 +223,9 @@ enum create	{ CRCREAT, CRMKNOD, CRMKDIR };	/* reason for create */
 #define	ATTR_CRTIME	VNODE_ATTR_va_create_time
 #define	ATTR_SIZE	VNODE_ATTR_va_data_size
 #define	ATTR_NOSET	0
+
+#define	ATTR_XVATTR	(1ULL << 63)
+#define	AT_XVATTR	ATTR_XVATTR
 
 #define	va_size		va_data_size
 #define	va_atime	va_access_time
@@ -428,14 +430,6 @@ win_has_cached_data(struct vnode *vp)
 	return (ret);
 }
 
-#define	vnode_pager_setsize(vp, sz)  do { \
-		vp->FileHeader.AllocationSize.QuadPart = \
-			P2ROUNDUP((sz), PAGE_SIZE);	\
-		vp->FileHeader.FileSize.QuadPart = (sz); \
-		vp->FileHeader.ValidDataLength.QuadPart = (sz); \
-		vnode_setsizechange(vp, 1); \
-	} while (0)
-
 #define	vn_ismntpt(vp)   (vnode_mountedhere(vp) != NULL)
 
 void spl_vnode_fini(void);
@@ -489,12 +483,15 @@ int vnode_recycle(vnode_t *vp);
 int vnode_isvroot(vnode_t *vp);
 mount_t *vnode_mount(vnode_t *vp);
 void vnode_clearfsnode(vnode_t *vp);
-void vnode_create(mount_t *, void *v_data, int type, int flags,
+void vnode_create(mount_t *, struct vnode *,
+    void *v_data, int type, int flags,
     struct vnode **vpp);
 int vnode_ref(vnode_t *vp);
 void vnode_rele(vnode_t *vp);
 void *vnode_sectionpointer(vnode_t *vp);
 void *vnode_security(vnode_t *vp);
+vnode_t *vnode_parent(vnode_t *vp);
+void vnode_setparent(vnode_t *vp, vnode_t *dvp);
 void vnode_setsecurity(vnode_t *vp, void *sd);
 void vnode_couplefileobject(vnode_t *vp, FILE_OBJECT *fileobject,
     uint64_t size);
@@ -507,6 +504,12 @@ void cache_purge(vnode_t *vp);
 void cache_purge_negatives(vnode_t *vp);
 int vnode_removefsref(vnode_t *vp);
 int vnode_iocount(vnode_t *vp);
+void vnode_pager_setsize(void *fo, vnode_t *vp, uint64_t size, boolean_t delay);
+void vnode_set_reparse(struct vnode *vp, REPARSE_DATA_BUFFER *rpp, size_t size);
+ULONG vnode_get_reparse_tag(struct vnode *vp);
+int vnode_get_reparse_point(struct vnode *vp, REPARSE_DATA_BUFFER **rpp,
+    size_t *size);
+
 
 #define	VNODE_READDIR_EXTENDED 1
 
@@ -518,10 +521,14 @@ int vnode_iocount(vnode_t *vp);
 #define	VNODELOCKED	0x0100 /* vflush: vnode already called to recycle */
 #define	NULLVP 		NULL
 
+#define	LOOKUP_XATTR 0x2
+
 int vflush(struct mount *mp, struct vnode *skipvp, int flags);
 int vnode_fileobject_add(vnode_t *vp, void *fo);
 int vnode_fileobject_remove(vnode_t *vp, void *fo);
 int vnode_fileobject_empty(vnode_t *vp, int locked);
+int vnode_fileobject_member(vnode_t *vp, void *fo);
+int vnode_umount_preflight(struct mount *, struct vnode *, int);
 
 void vnode_lock(vnode_t *vp);
 void vnode_unlock(vnode_t *vp);
@@ -540,5 +547,28 @@ int blk_queue_discard_secure(PDEVICE_OBJECT dev);
 int blk_queue_nonrot(PDEVICE_OBJECT dev);
 int blkdev_issue_discard_bytes(PDEVICE_OBJECT dev, uint64_t offset,
     uint64_t size, uint32_t flags);
+
+POPLOCK vp_oplock(struct vnode *vp);
+void vfs_changeowner(mount_t *from, mount_t *to);
+
+static inline FAST_IO_POSSIBLE
+fast_io_possible(struct vnode *vp)
+{
+	if (!FsRtlOplockIsFastIoPossible(vp_oplock(vp)))
+		return (FastIoIsNotPossible);
+
+	if (!FsRtlAreThereCurrentFileLocks(&vp->lock)
+	    /* && !fcb->Vcb->readonly */)
+		return (FastIoIsPossible);
+
+	return (FastIoIsQuestionable);
+}
+
+#define	DELETE_CLEAR	(0)
+#define	DELETE_PENDING	(1 << 0)
+#define	DELETE_HIDDEN	(1 << 1)
+
+uint32_t vnode_unlink(struct vnode *);
+void vnode_setunlink(struct vnode *, uint32_t set);
 
 #endif /* SPL_VNODE_H */

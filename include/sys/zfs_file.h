@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -22,10 +23,26 @@
 #ifndef	_SYS_ZFS_FILE_H
 #define	_SYS_ZFS_FILE_H
 
+#include <sys/zfs_context.h>
+
+/*
+ * loff_t is a Linux kernel/VFS type. glibc and musl expose it to user
+ * space via <fcntl.h>, but FreeBSD libc does not. For FreeBSD user
+ * space we map loff_t to off_t so the shared interfaces that use the
+ * loff_t name still compile. The FreeBSD kernel gets loff_t from its
+ * own linux-compat headers.
+ */
+#if !defined(_KERNEL) && defined(__FreeBSD__)
+typedef off_t loff_t;
+#endif
+
 #ifndef _KERNEL
 typedef struct zfs_file {
 	int f_fd;
 	int f_dump_fd;
+#ifdef _WIN32
+	loff_t f_win_offset;
+#endif
 } zfs_file_t;
 #elif defined(__linux__) || defined(__FreeBSD__)
 typedef struct file zfs_file_t;
@@ -45,7 +62,7 @@ void zfs_file_close(zfs_file_t *fp);
 
 int zfs_file_write(zfs_file_t *fp, const void *buf, size_t len, ssize_t *resid);
 int zfs_file_pwrite(zfs_file_t *fp, const void *buf, size_t len, loff_t off,
-    ssize_t *resid);
+    uint8_t ashift, ssize_t *resid);
 int zfs_file_read(zfs_file_t *fp, void *buf, size_t len, ssize_t *resid);
 int zfs_file_pread(zfs_file_t *fp, void *buf, size_t len, loff_t off,
     ssize_t *resid);
@@ -53,12 +70,12 @@ int zfs_file_pread(zfs_file_t *fp, void *buf, size_t len, loff_t off,
 int zfs_file_seek(zfs_file_t *fp, loff_t *offp, int whence);
 int zfs_file_getattr(zfs_file_t *fp, zfs_file_attr_t *zfattr);
 int zfs_file_fsync(zfs_file_t *fp, int flags);
-int zfs_file_fallocate(zfs_file_t *fp, int mode, loff_t offset, loff_t len);
+int zfs_file_deallocate(zfs_file_t *fp, loff_t offset, loff_t len);
 loff_t zfs_file_off(zfs_file_t *fp);
 int zfs_file_unlink(const char *);
 
-int zfs_file_get(int fd, zfs_file_t **fp);
-void zfs_file_put(int fd);
+zfs_file_t *zfs_file_get(int fd);
+void zfs_file_put(zfs_file_t *fp);
 void *zfs_file_private(zfs_file_t *fp);
 
 #endif /* _SYS_ZFS_FILE_H */

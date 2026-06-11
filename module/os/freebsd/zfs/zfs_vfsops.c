@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -62,8 +63,8 @@
 #include <sys/sunddi.h>
 #include <sys/dmu_objset.h>
 #include <sys/dsl_dir.h>
-#include <sys/spa_boot.h>
 #include <sys/jail.h>
+#include <sys/osd.h>
 #include <ufs/ufs/quota.h>
 #include <sys/zfs_quota.h>
 
@@ -76,7 +77,6 @@
 #define	MNTK_NOMSYNC	8
 #endif
 
-/* BEGIN CSTYLED */
 struct mtx zfs_debug_mtx;
 MTX_SYSINIT(zfs_debug_mtx, &zfs_debug_mtx, "zfs_debug", MTX_DEF);
 
@@ -84,23 +84,36 @@ SYSCTL_NODE(_vfs, OID_AUTO, zfs, CTLFLAG_RW, 0, "ZFS file system");
 
 int zfs_super_owner;
 SYSCTL_INT(_vfs_zfs, OID_AUTO, super_owner, CTLFLAG_RW, &zfs_super_owner, 0,
-    "File system owner can perform privileged operation on his file systems");
+	"File system owners can perform privileged operation on file systems");
 
 int zfs_debug_level;
 SYSCTL_INT(_vfs_zfs, OID_AUTO, debug, CTLFLAG_RWTUN, &zfs_debug_level, 0,
 	"Debug level");
 
+struct zfs_jailparam {
+	int mount_snapshot;
+};
+
+static struct zfs_jailparam zfs_jailparam0 = {
+	.mount_snapshot = 0,
+};
+
+static int zfs_jailparam_slot;
+
+SYSCTL_JAIL_PARAM_SYS_NODE(zfs, CTLFLAG_RW, "Jail ZFS parameters");
+SYSCTL_JAIL_PARAM(_zfs, mount_snapshot, CTLTYPE_INT | CTLFLAG_RW, "I",
+	"Allow mounting snapshots in the .zfs directory for unjailed datasets");
+
 SYSCTL_NODE(_vfs_zfs, OID_AUTO, version, CTLFLAG_RD, 0, "ZFS versions");
 static int zfs_version_acl = ZFS_ACL_VERSION;
 SYSCTL_INT(_vfs_zfs_version, OID_AUTO, acl, CTLFLAG_RD, &zfs_version_acl, 0,
-    "ZFS_ACL_VERSION");
+	"ZFS_ACL_VERSION");
 static int zfs_version_spa = SPA_VERSION;
 SYSCTL_INT(_vfs_zfs_version, OID_AUTO, spa, CTLFLAG_RD, &zfs_version_spa, 0,
-    "SPA_VERSION");
+	"SPA_VERSION");
 static int zfs_version_zpl = ZPL_VERSION;
 SYSCTL_INT(_vfs_zfs_version, OID_AUTO, zpl, CTLFLAG_RD, &zfs_version_zpl, 0,
-    "ZPL_VERSION");
-/* END CSTYLED */
+	"ZPL_VERSION");
 
 #if __FreeBSD_version >= 1400018
 static int zfs_quotactl(vfs_t *vfsp, int cmds, uid_t id, void *arg,
@@ -114,25 +127,16 @@ static int zfs_root(vfs_t *vfsp, int flags, vnode_t **vpp);
 static int zfs_statfs(vfs_t *vfsp, struct statfs *statp);
 static int zfs_vget(vfs_t *vfsp, ino_t ino, int flags, vnode_t **vpp);
 static int zfs_sync(vfs_t *vfsp, int waitfor);
-#if __FreeBSD_version >= 1300098
 static int zfs_checkexp(vfs_t *vfsp, struct sockaddr *nam, uint64_t *extflagsp,
     struct ucred **credanonp, int *numsecflavors, int *secflavors);
-#else
-static int zfs_checkexp(vfs_t *vfsp, struct sockaddr *nam, int *extflagsp,
-    struct ucred **credanonp, int *numsecflavors, int **secflavors);
-#endif
 static int zfs_fhtovp(vfs_t *vfsp, fid_t *fidp, int flags, vnode_t **vpp);
 static void zfs_freevfs(vfs_t *vfsp);
 
 struct vfsops zfs_vfsops = {
 	.vfs_mount =		zfs_mount,
 	.vfs_unmount =		zfs_umount,
-#if __FreeBSD_version >= 1300049
 	.vfs_root =		vfs_cache_root,
-	.vfs_cachedroot = zfs_root,
-#else
-	.vfs_root =		zfs_root,
-#endif
+	.vfs_cachedroot =	zfs_root,
 	.vfs_statfs =		zfs_statfs,
 	.vfs_vget =		zfs_vget,
 	.vfs_sync =		zfs_sync,
@@ -141,7 +145,14 @@ struct vfsops zfs_vfsops = {
 	.vfs_quotactl =		zfs_quotactl,
 };
 
-VFS_SET(zfs_vfsops, zfs, VFCF_JAIL | VFCF_DELEGADMIN);
+VFS_SET(zfs_vfsops, zfs, VFCF_DELEGADMIN | VFCF_JAIL
+#ifdef VFCF_CROSS_COPY_FILE_RANGE
+	| VFCF_CROSS_COPY_FILE_RANGE
+#endif
+#ifdef VFCF_FILEREVINC
+	| VFCF_FILEREVINC
+#endif
+);
 
 /*
  * We need to keep a count of active fs's.
@@ -230,35 +241,40 @@ zfs_getquota(zfsvfs_t *zfsvfs, uid_t id, int isgroup, struct dqblk64 *dqp)
 {
 	int error = 0;
 	char buf[32];
-	uint64_t usedobj, quotaobj;
+	uint64_t usedobj, quotaobj, defaultquota;
 	uint64_t quota, used = 0;
 	timespec_t now;
 
 	usedobj = isgroup ? DMU_GROUPUSED_OBJECT : DMU_USERUSED_OBJECT;
 	quotaobj = isgroup ? zfsvfs->z_groupquota_obj : zfsvfs->z_userquota_obj;
+	defaultquota = isgroup ? zfsvfs->z_defaultgroupquota :
+	    zfsvfs->z_defaultuserquota;
 
-	if (quotaobj == 0 || zfsvfs->z_replay) {
-		error = ENOENT;
-		goto done;
-	}
+	if (zfsvfs->z_replay)
+		return (ENOENT);
+
 	(void) sprintf(buf, "%llx", (longlong_t)id);
-	if ((error = zap_lookup(zfsvfs->z_os, quotaobj,
-	    buf, sizeof (quota), 1, &quota)) != 0) {
-		dprintf("%s(%d): quotaobj lookup failed\n",
-		    __FUNCTION__, __LINE__);
-		goto done;
+	if (quotaobj == 0) {
+		if (defaultquota == 0)
+			return (ENOENT);
+		quota = defaultquota;
+	} else {
+		error = zap_lookup(zfsvfs->z_os, quotaobj, buf, sizeof (quota),
+		    1, &quota);
+		if (error && (quota = defaultquota) == 0)
+			return (error);
 	}
+
 	/*
 	 * quota(8) uses bsoftlimit as "quoota", and hardlimit as "limit".
 	 * So we set them to be the same.
 	 */
 	dqp->dqb_bsoftlimit = dqp->dqb_bhardlimit = btodb(quota);
 	error = zap_lookup(zfsvfs->z_os, usedobj, buf, sizeof (used), 1, &used);
-	if (error && error != ENOENT) {
-		dprintf("%s(%d):  usedobj failed; %d\n",
-		    __FUNCTION__, __LINE__, error);
-		goto done;
-	}
+	if (error == ENOENT)
+		error = 0;
+	if (error)
+		return (error);
 	dqp->dqb_curblocks = btodb(used);
 	dqp->dqb_ihardlimit = dqp->dqb_isoftlimit = 0;
 	vfs_timestamp(&now);
@@ -268,7 +284,6 @@ zfs_getquota(zfsvfs_t *zfsvfs, uid_t id, int isgroup, struct dqblk64 *dqp)
 	 * particularly useful.
 	 */
 	dqp->dqb_btime = dqp->dqb_itime = now.tv_sec;
-done:
 	return (error);
 }
 
@@ -290,7 +305,8 @@ zfs_quotactl(vfs_t *vfsp, int cmds, uid_t id, void *arg)
 	cmd = cmds >> SUBCMDSHIFT;
 	type = cmds & SUBCMDMASK;
 
-	ZFS_ENTER(zfsvfs);
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);
 	if (id == -1) {
 		switch (type) {
 		case USRQUOTA:
@@ -389,7 +405,7 @@ zfs_quotactl(vfs_t *vfsp, int cmds, uid_t id, void *arg)
 		break;
 	}
 done:
-	ZFS_EXIT(zfsvfs);
+	zfs_exit(zfsvfs, FTAG);
 	return (error);
 }
 
@@ -400,7 +416,6 @@ zfs_is_readonly(zfsvfs_t *zfsvfs)
 	return (!!(zfsvfs->z_vfs->vfs_flag & VFS_RDONLY));
 }
 
-/*ARGSUSED*/
 static int
 zfs_sync(vfs_t *vfsp, int waitfor)
 {
@@ -427,11 +442,8 @@ zfs_sync(vfs_t *vfsp, int waitfor)
 		dsl_pool_t *dp;
 		int error;
 
-		error = vfs_stdsync(vfsp, waitfor);
-		if (error != 0)
+		if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
 			return (error);
-
-		ZFS_ENTER(zfsvfs);
 		dp = dmu_objset_pool(zfsvfs->z_os);
 
 		/*
@@ -439,14 +451,19 @@ zfs_sync(vfs_t *vfsp, int waitfor)
 		 * filesystems which may exist on a suspended pool.
 		 */
 		if (rebooting && spa_suspended(dp->dp_spa)) {
-			ZFS_EXIT(zfsvfs);
+			zfs_exit(zfsvfs, FTAG);
 			return (0);
 		}
 
-		if (zfsvfs->z_log != NULL)
-			zil_commit(zfsvfs->z_log, 0);
+		if (zfsvfs->z_log != NULL) {
+			error = zil_commit(zfsvfs->z_log, 0);
+			if (error != 0) {
+				zfs_exit(zfsvfs, FTAG);
+				return (error);
+			}
+		}
 
-		ZFS_EXIT(zfsvfs);
+		zfs_exit(zfsvfs, FTAG);
 	} else {
 		/*
 		 * Sync all ZFS filesystems.  This is what happens when you
@@ -609,6 +626,14 @@ acl_type_changed_cb(void *arg, uint64_t newval)
 	zfsvfs->z_acl_type = newval;
 }
 
+static void
+longname_changed_cb(void *arg, uint64_t newval)
+{
+	zfsvfs_t *zfsvfs = arg;
+
+	zfsvfs->z_longname = newval;
+}
+
 static int
 zfs_register_callbacks(vfs_t *vfsp)
 {
@@ -713,7 +738,7 @@ zfs_register_callbacks(vfs_t *vfsp)
 		nbmand = B_FALSE;
 	} else if (vfs_optionisset(vfsp, MNTOPT_NBMAND, NULL)) {
 		nbmand = B_TRUE;
-	} else if ((error = dsl_prop_get_int_ds(ds, "nbmand", &nbmand) != 0)) {
+	} else if ((error = dsl_prop_get_int_ds(ds, "nbmand", &nbmand)) != 0) {
 		dsl_pool_config_exit(dmu_objset_pool(os), FTAG);
 		return (error);
 	}
@@ -746,6 +771,8 @@ zfs_register_callbacks(vfs_t *vfsp)
 	error = error ? error : dsl_prop_register(ds,
 	    zfs_prop_to_name(ZFS_PROP_ACLINHERIT), acl_inherit_changed_cb,
 	    zfsvfs);
+	error = error ? error : dsl_prop_register(ds,
+	    zfs_prop_to_name(ZFS_PROP_LONGNAME), longname_changed_cb, zfsvfs);
 	dsl_pool_config_exit(dmu_objset_pool(os), FTAG);
 	if (error)
 		goto unregister;
@@ -842,6 +869,36 @@ zfsvfs_init(zfsvfs_t *zfsvfs, objset_t *os)
 		if (error == 0 && val == ZFS_XATTR_SA)
 			zfsvfs->z_xattr_sa = B_TRUE;
 	}
+
+	error = zfs_get_zplprop(os, ZFS_PROP_DEFAULTUSERQUOTA,
+	    &zfsvfs->z_defaultuserquota);
+	if (error != 0)
+		return (error);
+
+	error = zfs_get_zplprop(os, ZFS_PROP_DEFAULTGROUPQUOTA,
+	    &zfsvfs->z_defaultgroupquota);
+	if (error != 0)
+		return (error);
+
+	error = zfs_get_zplprop(os, ZFS_PROP_DEFAULTPROJECTQUOTA,
+	    &zfsvfs->z_defaultprojectquota);
+	if (error != 0)
+		return (error);
+
+	error = zfs_get_zplprop(os, ZFS_PROP_DEFAULTUSEROBJQUOTA,
+	    &zfsvfs->z_defaultuserobjquota);
+	if (error != 0)
+		return (error);
+
+	error = zfs_get_zplprop(os, ZFS_PROP_DEFAULTGROUPOBJQUOTA,
+	    &zfsvfs->z_defaultgroupobjquota);
+	if (error != 0)
+		return (error);
+
+	error = zfs_get_zplprop(os, ZFS_PROP_DEFAULTPROJECTOBJQUOTA,
+	    &zfsvfs->z_defaultprojectobjquota);
+	if (error != 0)
+		return (error);
 
 	error = sa_setup(os, sa_obj, zfs_attr_table, ZPL_END,
 	    &zfsvfs->z_attr_table);
@@ -1031,8 +1088,6 @@ zfsvfs_setup(zfsvfs_t *zfsvfs, boolean_t mounting)
 	if (error)
 		return (error);
 
-	zfsvfs->z_log = zil_open(zfsvfs->z_os, zfs_get_data);
-
 	/*
 	 * If we are not mounting (ie: online recv), then we don't
 	 * have to worry about replaying the log as we blocked all
@@ -1041,8 +1096,12 @@ zfsvfs_setup(zfsvfs_t *zfsvfs, boolean_t mounting)
 	if (mounting) {
 		boolean_t readonly;
 
-		ASSERT3P(zfsvfs->z_kstat.dk_kstats, ==, NULL);
-		dataset_kstats_create(&zfsvfs->z_kstat, zfsvfs->z_os);
+		ASSERT0P(zfsvfs->z_kstat.dk_kstats);
+		error = dataset_kstats_create(&zfsvfs->z_kstat, zfsvfs->z_os);
+		if (error)
+			return (error);
+		zfsvfs->z_log = zil_open(zfsvfs->z_os, zfs_get_data,
+		    &zfsvfs->z_kstat.dk_zil_sums);
 
 		/*
 		 * During replay we remove the read only flag to
@@ -1113,6 +1172,10 @@ zfsvfs_setup(zfsvfs_t *zfsvfs, boolean_t mounting)
 		/* restore readonly bit */
 		if (readonly != 0)
 			zfsvfs->z_vfs->vfs_flag |= VFS_RDONLY;
+	} else {
+		ASSERT3P(zfsvfs->z_kstat.dk_kstats, !=, NULL);
+		zfsvfs->z_log = zil_open(zfsvfs->z_os, zfs_get_data,
+		    &zfsvfs->z_kstat.dk_zil_sums);
 	}
 
 	/*
@@ -1134,7 +1197,6 @@ zfsvfs_free(zfsvfs_t *zfsvfs)
 
 	mutex_destroy(&zfsvfs->z_znodes_lock);
 	mutex_destroy(&zfsvfs->z_lock);
-	ASSERT3U(zfsvfs->z_nr_znodes, ==, 0);
 	list_destroy(&zfsvfs->z_all_znodes);
 	ZFS_TEARDOWN_DESTROY(zfsvfs);
 	ZFS_TEARDOWN_INACTIVE_DESTROY(zfsvfs);
@@ -1149,25 +1211,10 @@ static void
 zfs_set_fuid_feature(zfsvfs_t *zfsvfs)
 {
 	zfsvfs->z_use_fuids = USE_FUIDS(zfsvfs->z_version, zfsvfs->z_os);
-	if (zfsvfs->z_vfs) {
-		if (zfsvfs->z_use_fuids) {
-			vfs_set_feature(zfsvfs->z_vfs, VFSFT_XVATTR);
-			vfs_set_feature(zfsvfs->z_vfs, VFSFT_SYSATTR_VIEWS);
-			vfs_set_feature(zfsvfs->z_vfs, VFSFT_ACEMASKONACCESS);
-			vfs_set_feature(zfsvfs->z_vfs, VFSFT_ACLONCREATE);
-			vfs_set_feature(zfsvfs->z_vfs, VFSFT_ACCESS_FILTER);
-			vfs_set_feature(zfsvfs->z_vfs, VFSFT_REPARSE);
-		} else {
-			vfs_clear_feature(zfsvfs->z_vfs, VFSFT_XVATTR);
-			vfs_clear_feature(zfsvfs->z_vfs, VFSFT_SYSATTR_VIEWS);
-			vfs_clear_feature(zfsvfs->z_vfs, VFSFT_ACEMASKONACCESS);
-			vfs_clear_feature(zfsvfs->z_vfs, VFSFT_ACLONCREATE);
-			vfs_clear_feature(zfsvfs->z_vfs, VFSFT_ACCESS_FILTER);
-			vfs_clear_feature(zfsvfs->z_vfs, VFSFT_REPARSE);
-		}
-	}
 	zfsvfs->z_use_sa = USE_SA(zfsvfs->z_version, zfsvfs->z_os);
 }
+
+extern int zfs_xattr_compat;
 
 static int
 zfs_domount(vfs_t *vfsp, char *osname)
@@ -1224,15 +1271,6 @@ zfs_domount(vfs_t *vfsp, char *osname)
 	 * Set features for file system.
 	 */
 	zfs_set_fuid_feature(zfsvfs);
-	if (zfsvfs->z_case == ZFS_CASE_INSENSITIVE) {
-		vfs_set_feature(vfsp, VFSFT_DIRENTFLAGS);
-		vfs_set_feature(vfsp, VFSFT_CASEINSENSITIVE);
-		vfs_set_feature(vfsp, VFSFT_NOCASESENSITIVE);
-	} else if (zfsvfs->z_case == ZFS_CASE_MIXED) {
-		vfs_set_feature(vfsp, VFSFT_DIRENTFLAGS);
-		vfs_set_feature(vfsp, VFSFT_CASEINSENSITIVE);
-	}
-	vfs_set_feature(vfsp, VFSFT_ZEROCOPY_SUPPORTED);
 
 	if (dmu_objset_is_snapshot(zfsvfs->z_os)) {
 		uint64_t pval;
@@ -1257,6 +1295,16 @@ zfs_domount(vfs_t *vfsp, char *osname)
 		if ((error = zfsvfs_setup(zfsvfs, B_TRUE)))
 			goto out;
 	}
+
+#if __FreeBSD_version >= 1500040
+	/*
+	 * Named attributes can only work if the xattr property is set to
+	 * on/dir and not sa.  Also, zfs_xattr_compat must be set.
+	 */
+	if ((zfsvfs->z_flags & ZSB_XATTR) != 0 && !zfsvfs->z_xattr_sa &&
+	    zfs_xattr_compat)
+		vfsp->mnt_flag |= MNT_NAMEDATTR;
+#endif
 
 	vfs_mountedfrom(vfsp, osname);
 
@@ -1295,8 +1343,7 @@ getpoolname(const char *osname, char *poolname)
 	} else {
 		if (p - osname >= MAXNAMELEN)
 			return (ENAMETOOLONG);
-		(void) strncpy(poolname, osname, p - osname);
-		poolname[p - osname] = '\0';
+		(void) strlcpy(poolname, osname, p - osname + 1);
 	}
 	return (0);
 }
@@ -1313,7 +1360,6 @@ fetch_osname_options(char *name, bool *checkpointrewind)
 	}
 }
 
-/*ARGSUSED*/
 static int
 zfs_mount(vfs_t *vfsp)
 {
@@ -1323,7 +1369,7 @@ zfs_mount(vfs_t *vfsp)
 	char		*osname;
 	int		error = 0;
 	int		canwrite;
-	bool		checkpointrewind;
+	bool		checkpointrewind, isctlsnap = false;
 
 	if (vfs_getopt(vfsp->mnt_optnew, "from", (void **)&osname, NULL))
 		return (SET_ERROR(EINVAL));
@@ -1338,6 +1384,8 @@ zfs_mount(vfs_t *vfsp)
 	}
 
 	fetch_osname_options(osname, &checkpointrewind);
+	isctlsnap = (mvp != NULL && zfsctl_is_node(mvp) &&
+	    strchr(osname, '@') != NULL);
 
 	/*
 	 * Check for mount privilege?
@@ -1346,7 +1394,9 @@ zfs_mount(vfs_t *vfsp)
 	 * we have local permission to allow it
 	 */
 	error = secpolicy_fs_mount(cr, mvp, vfsp);
-	if (error) {
+	if (error && isctlsnap) {
+		secpolicy_fs_mount_clearopts(cr, vfsp);
+	} else if (error) {
 		if (dsl_deleg_access(osname, ZFS_DELEG_PERM_MOUNT, cr) != 0)
 			goto out;
 
@@ -1362,16 +1412,16 @@ zfs_mount(vfs_t *vfsp)
 
 			vn_lock(mvp, LK_SHARED | LK_RETRY);
 			if (VOP_GETATTR(mvp, &vattr, cr)) {
-				VOP_UNLOCK1(mvp);
+				VOP_UNLOCK(mvp);
 				goto out;
 			}
 
 			if (secpolicy_vnode_owner(mvp, cr, vattr.va_uid) != 0 &&
 			    VOP_ACCESS(mvp, VWRITE, cr, td) != 0) {
-				VOP_UNLOCK1(mvp);
+				VOP_UNLOCK(mvp);
 				goto out;
 			}
-			VOP_UNLOCK1(mvp);
+			VOP_UNLOCK(mvp);
 		}
 
 		secpolicy_fs_mount_clearopts(cr, vfsp);
@@ -1383,8 +1433,27 @@ zfs_mount(vfs_t *vfsp)
 	 */
 	if (!INGLOBALZONE(curproc) &&
 	    (!zone_dataset_visible(osname, &canwrite) || !canwrite)) {
-		error = SET_ERROR(EPERM);
-		goto out;
+		boolean_t mount_snapshot = B_FALSE;
+
+		/*
+		 * Snapshots may be mounted in .zfs for unjailed datasets
+		 * if allowed by the jail param zfs.mount_snapshot.
+		 */
+		if (isctlsnap) {
+			struct prison *pr;
+			struct zfs_jailparam *zjp;
+
+			pr = curthread->td_ucred->cr_prison;
+			mtx_lock(&pr->pr_mtx);
+			zjp = osd_jail_get(pr, zfs_jailparam_slot);
+			mtx_unlock(&pr->pr_mtx);
+			if (zjp && zjp->mount_snapshot)
+				mount_snapshot = B_TRUE;
+		}
+		if (!mount_snapshot) {
+			error = SET_ERROR(EPERM);
+			goto out;
+		}
 	}
 
 	vfsp->vfs_flag |= MNT_NFS4ACLS;
@@ -1434,10 +1503,12 @@ zfs_statfs(vfs_t *vfsp, struct statfs *statp)
 {
 	zfsvfs_t *zfsvfs = vfsp->vfs_data;
 	uint64_t refdbytes, availbytes, usedobjs, availobjs;
+	int error;
 
 	statp->f_version = STATFS_VERSION;
 
-	ZFS_ENTER(zfsvfs);
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);
 
 	dmu_objset_space(zfsvfs->z_os,
 	    &refdbytes, &availbytes, &usedobjs, &availobjs);
@@ -1482,9 +1553,10 @@ zfs_statfs(vfs_t *vfsp, struct statfs *statp)
 	strlcpy(statp->f_mntonname, vfsp->mnt_stat.f_mntonname,
 	    sizeof (statp->f_mntonname));
 
-	statp->f_namemax = MAXNAMELEN - 1;
+	statp->f_namemax =
+	    zfsvfs->z_longname ? (ZAP_MAXNAMELEN_NEW - 1) : (MAXNAMELEN - 1);
 
-	ZFS_EXIT(zfsvfs);
+	zfs_exit(zfsvfs, FTAG);
 	return (0);
 }
 
@@ -1495,13 +1567,14 @@ zfs_root(vfs_t *vfsp, int flags, vnode_t **vpp)
 	znode_t *rootzp;
 	int error;
 
-	ZFS_ENTER(zfsvfs);
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);
 
 	error = zfs_zget(zfsvfs, zfsvfs->z_root, &rootzp);
 	if (error == 0)
 		*vpp = ZTOV(rootzp);
 
-	ZFS_EXIT(zfsvfs);
+	zfs_exit(zfsvfs, FTAG);
 
 	if (error == 0) {
 		error = vn_lock(*vpp, flags);
@@ -1540,12 +1613,11 @@ zfsvfs_teardown(zfsvfs_t *zfsvfs, boolean_t unmounting)
 		 * may add the parents of dir-based xattrs to the taskq
 		 * so we want to wait for these.
 		 *
-		 * We can safely read z_nr_znodes without locking because the
-		 * VFS has already blocked operations which add to the
-		 * z_all_znodes list and thus increment z_nr_znodes.
+		 * We can safely check z_all_znodes for being empty because the
+		 * VFS has already blocked operations which add to it.
 		 */
 		int round = 0;
-		while (zfsvfs->z_nr_znodes > 0) {
+		while (!list_is_empty(&zfsvfs->z_all_znodes)) {
 			taskq_wait_outstanding(dsl_pool_zrele_taskq(
 			    dmu_objset_pool(zfsvfs->z_os)), 0);
 			if (++round > 1 && !unmounting)
@@ -1562,11 +1634,7 @@ zfsvfs_teardown(zfsvfs_t *zfsvfs, boolean_t unmounting)
 		 * 'z_parent' is self referential for non-snapshots.
 		 */
 #ifdef FREEBSD_NAMECACHE
-#if __FreeBSD_version >= 1300117
 		cache_purgevfs(zfsvfs->z_parent->z_vfs);
-#else
-		cache_purgevfs(zfsvfs->z_parent->z_vfs, true);
-#endif
 #endif
 	}
 
@@ -1633,9 +1701,18 @@ zfsvfs_teardown(zfsvfs_t *zfsvfs, boolean_t unmounting)
 	zfs_unregister_callbacks(zfsvfs);
 
 	/*
-	 * Evict cached data
+	 * Evict cached data. We must write out any dirty data before
+	 * disowning the dataset.
 	 */
-	if (!zfs_is_readonly(zfsvfs))
+	objset_t *os = zfsvfs->z_os;
+	boolean_t os_dirty = B_FALSE;
+	for (int t = 0; t < TXG_SIZE; t++) {
+		if (dmu_objset_is_dirty(os, t)) {
+			os_dirty = B_TRUE;
+			break;
+		}
+	}
+	if (!zfs_is_readonly(zfsvfs) && os_dirty)
 		txg_wait_synced(dmu_objset_pool(zfsvfs->z_os), 0);
 	dmu_objset_evict_dbufs(zfsvfs->z_os);
 	dd = zfsvfs->z_os->os_dsl_dataset->ds_dir;
@@ -1644,7 +1721,6 @@ zfsvfs_teardown(zfsvfs_t *zfsvfs, boolean_t unmounting)
 	return (0);
 }
 
-/*ARGSUSED*/
 static int
 zfs_umount(vfs_t *vfsp, int fflag)
 {
@@ -1739,7 +1815,8 @@ zfs_vget(vfs_t *vfsp, ino_t ino, int flags, vnode_t **vpp)
 	    (zfsvfs->z_shares_dir != 0 && ino == zfsvfs->z_shares_dir))
 		return (EOPNOTSUPP);
 
-	ZFS_ENTER(zfsvfs);
+	if ((err = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (err);
 	err = zfs_zget(zfsvfs, ino, &zp);
 	if (err == 0 && zp->z_unlinked) {
 		vrele(ZTOV(zp));
@@ -1747,11 +1824,19 @@ zfs_vget(vfs_t *vfsp, ino_t ino, int flags, vnode_t **vpp)
 	}
 	if (err == 0)
 		*vpp = ZTOV(zp);
-	ZFS_EXIT(zfsvfs);
+	zfs_exit(zfsvfs, FTAG);
 	if (err == 0) {
 		err = vn_lock(*vpp, flags);
 		if (err != 0)
 			vrele(*vpp);
+#if __FreeBSD_version >= 1500040
+		else if ((zp->z_pflags & ZFS_XATTR) != 0) {
+			if ((*vpp)->v_type == VDIR)
+				vn_irflag_set_cond(*vpp, VIRF_NAMEDDIR);
+			else
+				vn_irflag_set_cond(*vpp, VIRF_NAMEDATTR);
+		}
+#endif
 	}
 	if (err != 0)
 		*vpp = NULL;
@@ -1759,13 +1844,8 @@ zfs_vget(vfs_t *vfsp, ino_t ino, int flags, vnode_t **vpp)
 }
 
 static int
-#if __FreeBSD_version >= 1300098
 zfs_checkexp(vfs_t *vfsp, struct sockaddr *nam, uint64_t *extflagsp,
     struct ucred **credanonp, int *numsecflavors, int *secflavors)
-#else
-zfs_checkexp(vfs_t *vfsp, struct sockaddr *nam, int *extflagsp,
-    struct ucred **credanonp, int *numsecflavors, int **secflavors)
-#endif
 {
 	zfsvfs_t *zfsvfs = vfsp->vfs_data;
 
@@ -1780,8 +1860,10 @@ zfs_checkexp(vfs_t *vfsp, struct sockaddr *nam, int *extflagsp,
 	    credanonp, numsecflavors, secflavors));
 }
 
-CTASSERT(SHORT_FID_LEN <= sizeof (struct fid));
-CTASSERT(LONG_FID_LEN <= sizeof (struct fid));
+_Static_assert(sizeof (struct fid) >= SHORT_FID_LEN,
+	"struct fid bigger than SHORT_FID_LEN");
+_Static_assert(sizeof (struct fid) >= LONG_FID_LEN,
+	"struct fid bigger than LONG_FID_LEN");
 
 static int
 zfs_fhtovp(vfs_t *vfsp, fid_t *fidp, int flags, vnode_t **vpp)
@@ -1792,13 +1874,15 @@ zfs_fhtovp(vfs_t *vfsp, fid_t *fidp, int flags, vnode_t **vpp)
 	vnode_t		*dvp;
 	uint64_t	object = 0;
 	uint64_t	fid_gen = 0;
+	uint64_t	setgen = 0;
 	uint64_t	gen_mask;
 	uint64_t	zp_gen;
 	int 		i, err;
 
 	*vpp = NULL;
 
-	ZFS_ENTER(zfsvfs);
+	if ((err = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (err);
 
 	/*
 	 * On FreeBSD we can get snapshot's mount point or its parent file
@@ -1807,7 +1891,6 @@ zfs_fhtovp(vfs_t *vfsp, fid_t *fidp, int flags, vnode_t **vpp)
 	if (zfsvfs->z_parent == zfsvfs && fidp->fid_len == LONG_FID_LEN) {
 		zfid_long_t	*zlfid = (zfid_long_t *)fidp;
 		uint64_t	objsetid = 0;
-		uint64_t	setgen = 0;
 
 		for (i = 0; i < sizeof (zlfid->zf_setid); i++)
 			objsetid |= ((uint64_t)zlfid->zf_setid[i]) << (8 * i);
@@ -1815,12 +1898,13 @@ zfs_fhtovp(vfs_t *vfsp, fid_t *fidp, int flags, vnode_t **vpp)
 		for (i = 0; i < sizeof (zlfid->zf_setgen); i++)
 			setgen |= ((uint64_t)zlfid->zf_setgen[i]) << (8 * i);
 
-		ZFS_EXIT(zfsvfs);
+		zfs_exit(zfsvfs, FTAG);
 
 		err = zfsctl_lookup_objset(vfsp, objsetid, &zfsvfs);
 		if (err)
 			return (SET_ERROR(EINVAL));
-		ZFS_ENTER(zfsvfs);
+		if ((err = zfs_enter(zfsvfs, FTAG)) != 0)
+			return (err);
 	}
 
 	if (fidp->fid_len == SHORT_FID_LEN || fidp->fid_len == LONG_FID_LEN) {
@@ -1832,7 +1916,14 @@ zfs_fhtovp(vfs_t *vfsp, fid_t *fidp, int flags, vnode_t **vpp)
 		for (i = 0; i < sizeof (zfid->zf_gen); i++)
 			fid_gen |= ((uint64_t)zfid->zf_gen[i]) << (8 * i);
 	} else {
-		ZFS_EXIT(zfsvfs);
+		zfs_exit(zfsvfs, FTAG);
+		return (SET_ERROR(EINVAL));
+	}
+
+	if (fidp->fid_len == LONG_FID_LEN && setgen != 0) {
+		zfs_exit(zfsvfs, FTAG);
+		dprintf("snapdir fid: fid_gen (%llu) and setgen (%llu)\n",
+		    (u_longlong_t)fid_gen, (u_longlong_t)setgen);
 		return (SET_ERROR(EINVAL));
 	}
 
@@ -1844,7 +1935,7 @@ zfs_fhtovp(vfs_t *vfsp, fid_t *fidp, int flags, vnode_t **vpp)
 	if ((fid_gen == 0 &&
 	    (object == ZFSCTL_INO_ROOT || object == ZFSCTL_INO_SNAPDIR)) ||
 	    (zfsvfs->z_shares_dir != 0 && object == zfsvfs->z_shares_dir)) {
-		ZFS_EXIT(zfsvfs);
+		zfs_exit(zfsvfs, FTAG);
 		VERIFY0(zfsctl_root(zfsvfs, LK_SHARED, &dvp));
 		if (object == ZFSCTL_INO_SNAPDIR) {
 			cn.cn_nameptr = "snapshot";
@@ -1879,7 +1970,7 @@ zfs_fhtovp(vfs_t *vfsp, fid_t *fidp, int flags, vnode_t **vpp)
 	    (u_longlong_t)fid_gen,
 	    (u_longlong_t)gen_mask);
 	if ((err = zfs_zget(zfsvfs, object, &zp))) {
-		ZFS_EXIT(zfsvfs);
+		zfs_exit(zfsvfs, FTAG);
 		return (err);
 	}
 	(void) sa_lookup(zp->z_sa_hdl, SA_ZPL_GEN(zfsvfs), &zp_gen,
@@ -1891,16 +1982,24 @@ zfs_fhtovp(vfs_t *vfsp, fid_t *fidp, int flags, vnode_t **vpp)
 		dprintf("znode gen (%llu) != fid gen (%llu)\n",
 		    (u_longlong_t)zp_gen, (u_longlong_t)fid_gen);
 		vrele(ZTOV(zp));
-		ZFS_EXIT(zfsvfs);
+		zfs_exit(zfsvfs, FTAG);
 		return (SET_ERROR(EINVAL));
 	}
 
 	*vpp = ZTOV(zp);
-	ZFS_EXIT(zfsvfs);
+	zfs_exit(zfsvfs, FTAG);
 	err = vn_lock(*vpp, flags);
-	if (err == 0)
+	if (err == 0) {
 		vnode_create_vobject(*vpp, zp->z_size, curthread);
-	else
+#if __FreeBSD_version >= 1500040
+		if ((zp->z_pflags & ZFS_XATTR) != 0) {
+			if ((*vpp)->v_type == VDIR)
+				vn_irflag_set_cond(*vpp, VIRF_NAMEDDIR);
+			else
+				vn_irflag_set_cond(*vpp, VIRF_NAMEDATTR);
+		}
+#endif
+	} else
 		*vpp = NULL;
 	return (err);
 }
@@ -1964,7 +2063,7 @@ zfs_resume_fs(zfsvfs_t *zfsvfs, dsl_dataset_t *ds)
 	/*
 	 * Attempt to re-establish all the active znodes with
 	 * their dbufs.  If a zfs_rezget() fails, then we'll let
-	 * any potential callers discover that via ZFS_ENTER_VERIFY_VP
+	 * any potential callers discover that via zfs_enter_verify_zp
 	 * when they try to use their znode.
 	 */
 	mutex_enter(&zfsvfs->z_znodes_lock);
@@ -2043,6 +2142,20 @@ zfs_vnodes_adjust_back(void)
 #endif
 }
 
+static struct sx zfs_vnlru_lock;
+static struct vnode *zfs_vnlru_marker;
+static arc_prune_t *zfs_prune;
+
+static void
+zfs_prune_task(uint64_t nr_to_scan, void *arg __unused)
+{
+	if (nr_to_scan > INT_MAX)
+		nr_to_scan = INT_MAX;
+	sx_xlock(&zfs_vnlru_lock);
+	vnlru_free_vfsops(nr_to_scan, &zfs_vfsops, zfs_vnlru_marker);
+	sx_xunlock(&zfs_vnlru_lock);
+}
+
 void
 zfs_init(void)
 {
@@ -2069,11 +2182,19 @@ zfs_init(void)
 	dmu_objset_register_type(DMU_OST_ZFS, zpl_get_file_info);
 
 	zfsvfs_taskq = taskq_create("zfsvfs", 1, minclsyspri, 0, 0, 0);
+
+	zfs_vnlru_marker = vnlru_alloc_marker();
+	sx_init(&zfs_vnlru_lock, "zfs vnlru lock");
+	zfs_prune = arc_add_prune_callback(zfs_prune_task, NULL);
 }
 
 void
 zfs_fini(void)
 {
+	arc_remove_prune_callback(zfs_prune);
+	vnlru_free_marker(zfs_vnlru_marker);
+	sx_destroy(&zfs_vnlru_lock);
+
 	taskq_destroy(zfsvfs_taskq);
 	zfsctl_fini();
 	zfs_znode_fini();
@@ -2144,7 +2265,7 @@ zfs_set_version(zfsvfs_t *zfsvfs, uint64_t newvers)
 		    ZFS_SA_ATTRS);
 		dmu_tx_hold_zap(tx, DMU_NEW_OBJECT, FALSE, NULL);
 	}
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
 		return (error);
@@ -2187,89 +2308,59 @@ zfs_set_version(zfsvfs_t *zfsvfs, uint64_t newvers)
 	return (0);
 }
 
-/*
- * Read a property stored within the master node.
- */
 int
-zfs_get_zplprop(objset_t *os, zfs_prop_t prop, uint64_t *value)
+zfs_set_default_quota(zfsvfs_t *zfsvfs, zfs_prop_t prop, uint64_t quota)
 {
-	uint64_t *cached_copy = NULL;
+	int error;
+	objset_t *os = zfsvfs->z_os;
+	const char *propstr = zfs_prop_to_name(prop);
+	dmu_tx_t *tx;
 
-	/*
-	 * Figure out where in the objset_t the cached copy would live, if it
-	 * is available for the requested property.
-	 */
-	if (os != NULL) {
-		switch (prop) {
-		case ZFS_PROP_VERSION:
-			cached_copy = &os->os_version;
-			break;
-		case ZFS_PROP_NORMALIZE:
-			cached_copy = &os->os_normalization;
-			break;
-		case ZFS_PROP_UTF8ONLY:
-			cached_copy = &os->os_utf8only;
-			break;
-		case ZFS_PROP_CASE:
-			cached_copy = &os->os_casesensitivity;
-			break;
-		default:
-			break;
-		}
-	}
-	if (cached_copy != NULL && *cached_copy != OBJSET_PROP_UNINITIALIZED) {
-		*value = *cached_copy;
-		return (0);
+	tx = dmu_tx_create(os);
+	dmu_tx_hold_zap(tx, MASTER_NODE_OBJ, B_FALSE, propstr);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
+	if (error) {
+		dmu_tx_abort(tx);
+		return (error);
 	}
 
-	/*
-	 * If the property wasn't cached, look up the file system's value for
-	 * the property. For the version property, we look up a slightly
-	 * different string.
-	 */
-	const char *pname;
-	int error = ENOENT;
-	if (prop == ZFS_PROP_VERSION) {
-		pname = ZPL_VERSION_STR;
+	if (quota == 0) {
+		error = zap_remove(os, MASTER_NODE_OBJ, propstr, tx);
+		if (error == ENOENT)
+			error = 0;
 	} else {
-		pname = zfs_prop_to_name(prop);
+		error = zap_update(os, MASTER_NODE_OBJ, propstr, 8, 1,
+		    &quota, tx);
 	}
 
-	if (os != NULL) {
-		ASSERT3U(os->os_phys->os_type, ==, DMU_OST_ZFS);
-		error = zap_lookup(os, MASTER_NODE_OBJ, pname, 8, 1, value);
+	if (error)
+		goto out;
+
+	switch (prop) {
+	case ZFS_PROP_DEFAULTUSERQUOTA:
+		zfsvfs->z_defaultuserquota = quota;
+		break;
+	case ZFS_PROP_DEFAULTGROUPQUOTA:
+		zfsvfs->z_defaultgroupquota = quota;
+		break;
+	case ZFS_PROP_DEFAULTPROJECTQUOTA:
+		zfsvfs->z_defaultprojectquota = quota;
+		break;
+	case ZFS_PROP_DEFAULTUSEROBJQUOTA:
+		zfsvfs->z_defaultuserobjquota = quota;
+		break;
+	case ZFS_PROP_DEFAULTGROUPOBJQUOTA:
+		zfsvfs->z_defaultgroupobjquota = quota;
+		break;
+	case ZFS_PROP_DEFAULTPROJECTOBJQUOTA:
+		zfsvfs->z_defaultprojectobjquota = quota;
+		break;
+	default:
+		break;
 	}
 
-	if (error == ENOENT) {
-		/* No value set, use the default value */
-		switch (prop) {
-		case ZFS_PROP_VERSION:
-			*value = ZPL_VERSION;
-			break;
-		case ZFS_PROP_NORMALIZE:
-		case ZFS_PROP_UTF8ONLY:
-			*value = 0;
-			break;
-		case ZFS_PROP_CASE:
-			*value = ZFS_CASE_SENSITIVE;
-			break;
-		case ZFS_PROP_ACLTYPE:
-			*value = ZFS_ACLTYPE_NFSV4;
-			break;
-		default:
-			return (error);
-		}
-		error = 0;
-	}
-
-	/*
-	 * If one of the methods for getting the property value above worked,
-	 * copy it into the objset_t's cache.
-	 */
-	if (error == 0 && cached_copy != NULL) {
-		*cached_copy = *value;
-	}
-
+out:
+	dmu_tx_commit(tx);
 	return (error);
 }
 
@@ -2327,3 +2418,248 @@ zfsvfs_update_fromname(const char *oldname, const char *newname)
 	mtx_unlock(&mountlist_mtx);
 }
 #endif
+
+/*
+ * Find a prison with ZFS info.
+ * Return the ZFS info and the (locked) prison.
+ */
+static struct zfs_jailparam *
+zfs_jailparam_find(struct prison *spr, struct prison **prp)
+{
+	struct prison *pr;
+	struct zfs_jailparam *zjp;
+
+	for (pr = spr; ; pr = pr->pr_parent) {
+		mtx_lock(&pr->pr_mtx);
+		if (pr == &prison0) {
+			zjp = &zfs_jailparam0;
+			break;
+		}
+		zjp = osd_jail_get(pr, zfs_jailparam_slot);
+		if (zjp != NULL)
+			break;
+		mtx_unlock(&pr->pr_mtx);
+	}
+	*prp = pr;
+
+	return (zjp);
+}
+
+/*
+ * Ensure a prison has its own ZFS info.  If zjpp is non-null, point it to the
+ * ZFS info and lock the prison.
+ */
+static void
+zfs_jailparam_alloc(struct prison *pr, struct zfs_jailparam **zjpp)
+{
+	struct prison *ppr;
+	struct zfs_jailparam *zjp, *nzjp;
+	void **rsv;
+
+	/* If this prison already has ZFS info, return that. */
+	zjp = zfs_jailparam_find(pr, &ppr);
+	if (ppr == pr)
+		goto done;
+
+	/*
+	 * Allocate a new info record.  Then check again, in case something
+	 * changed during the allocation.
+	 */
+	mtx_unlock(&ppr->pr_mtx);
+	nzjp = malloc(sizeof (struct zfs_jailparam), M_PRISON, M_WAITOK);
+	rsv = osd_reserve(zfs_jailparam_slot);
+	zjp = zfs_jailparam_find(pr, &ppr);
+	if (ppr == pr) {
+		free(nzjp, M_PRISON);
+		osd_free_reserved(rsv);
+		goto done;
+	}
+	/* Inherit the initial values from the ancestor. */
+	mtx_lock(&pr->pr_mtx);
+	(void) osd_jail_set_reserved(pr, zfs_jailparam_slot, rsv, nzjp);
+	(void) memcpy(nzjp, zjp, sizeof (*zjp));
+	zjp = nzjp;
+	mtx_unlock(&ppr->pr_mtx);
+done:
+	if (zjpp != NULL)
+		*zjpp = zjp;
+	else
+		mtx_unlock(&pr->pr_mtx);
+}
+
+/*
+ * Jail OSD methods for ZFS VFS info.
+ */
+static int
+zfs_jailparam_create(void *obj, void *data)
+{
+	struct prison *pr = obj;
+	struct vfsoptlist *opts = data;
+	int jsys;
+
+	if (vfs_copyopt(opts, "zfs", &jsys, sizeof (jsys)) == 0 &&
+	    jsys == JAIL_SYS_INHERIT)
+		return (0);
+	/*
+	 * Inherit a prison's initial values from its parent
+	 * (different from JAIL_SYS_INHERIT which also inherits changes).
+	 */
+	zfs_jailparam_alloc(pr, NULL);
+	return (0);
+}
+
+static int
+zfs_jailparam_get(void *obj, void *data)
+{
+	struct prison *ppr, *pr = obj;
+	struct vfsoptlist *opts = data;
+	struct zfs_jailparam *zjp;
+	int jsys, error;
+
+	zjp = zfs_jailparam_find(pr, &ppr);
+	jsys = (ppr == pr) ? JAIL_SYS_NEW : JAIL_SYS_INHERIT;
+	error = vfs_setopt(opts, "zfs", &jsys, sizeof (jsys));
+	if (error != 0 && error != ENOENT)
+		goto done;
+	if (jsys == JAIL_SYS_NEW) {
+		error = vfs_setopt(opts, "zfs.mount_snapshot",
+		    &zjp->mount_snapshot, sizeof (zjp->mount_snapshot));
+		if (error != 0 && error != ENOENT)
+			goto done;
+	} else {
+		/*
+		 * If this prison is inheriting its ZFS info, report
+		 * empty/zero parameters.
+		 */
+		static int mount_snapshot = 0;
+
+		error = vfs_setopt(opts, "zfs.mount_snapshot",
+		    &mount_snapshot, sizeof (mount_snapshot));
+		if (error != 0 && error != ENOENT)
+			goto done;
+	}
+	error = 0;
+done:
+	mtx_unlock(&ppr->pr_mtx);
+	return (error);
+}
+
+static int
+zfs_jailparam_set(void *obj, void *data)
+{
+	struct prison *pr = obj;
+	struct prison *ppr;
+	struct vfsoptlist *opts = data;
+	int error, jsys, mount_snapshot;
+
+	/* Set the parameters, which should be correct. */
+	error = vfs_copyopt(opts, "zfs", &jsys, sizeof (jsys));
+	if (error == ENOENT)
+		jsys = -1;
+	error = vfs_copyopt(opts, "zfs.mount_snapshot", &mount_snapshot,
+	    sizeof (mount_snapshot));
+	if (error == ENOENT)
+		mount_snapshot = -1;
+	else
+		jsys = JAIL_SYS_NEW;
+	switch (jsys) {
+	case JAIL_SYS_NEW:
+	{
+		/* "zfs=new" or "zfs.*": the prison gets its own ZFS info. */
+		struct zfs_jailparam *zjp;
+
+		/*
+		 * A child jail cannot have more permissions than its parent
+		 */
+		if (pr->pr_parent != &prison0) {
+			zjp = zfs_jailparam_find(pr->pr_parent, &ppr);
+			mtx_unlock(&ppr->pr_mtx);
+			if (zjp->mount_snapshot < mount_snapshot) {
+				return (EPERM);
+			}
+		}
+		zfs_jailparam_alloc(pr, &zjp);
+		if (mount_snapshot != -1)
+			zjp->mount_snapshot = mount_snapshot;
+		mtx_unlock(&pr->pr_mtx);
+		break;
+	}
+	case JAIL_SYS_INHERIT:
+		/* "zfs=inherit": inherit the parent's ZFS info. */
+		mtx_lock(&pr->pr_mtx);
+		osd_jail_del(pr, zfs_jailparam_slot);
+		mtx_unlock(&pr->pr_mtx);
+		break;
+	case -1:
+		/*
+		 * If the setting being changed is not ZFS related
+		 * then do nothing.
+		 */
+		break;
+	}
+
+	return (0);
+}
+
+static int
+zfs_jailparam_check(void *obj __unused, void *data)
+{
+	struct vfsoptlist *opts = data;
+	int error, jsys, mount_snapshot;
+
+	/* Check that the parameters are correct. */
+	error = vfs_copyopt(opts, "zfs", &jsys, sizeof (jsys));
+	if (error != ENOENT) {
+		if (error != 0)
+			return (error);
+		if (jsys != JAIL_SYS_NEW && jsys != JAIL_SYS_INHERIT)
+			return (EINVAL);
+	}
+	error = vfs_copyopt(opts, "zfs.mount_snapshot", &mount_snapshot,
+	    sizeof (mount_snapshot));
+	if (error != ENOENT) {
+		if (error != 0)
+			return (error);
+		if (mount_snapshot != 0 && mount_snapshot != 1)
+			return (EINVAL);
+	}
+	return (0);
+}
+
+static void
+zfs_jailparam_destroy(void *data)
+{
+
+	free(data, M_PRISON);
+}
+
+static void
+zfs_jailparam_sysinit(void *arg __unused)
+{
+	struct prison *pr;
+	osd_method_t  methods[PR_MAXMETHOD] = {
+		[PR_METHOD_CREATE] = zfs_jailparam_create,
+		[PR_METHOD_GET] = zfs_jailparam_get,
+		[PR_METHOD_SET] = zfs_jailparam_set,
+		[PR_METHOD_CHECK] = zfs_jailparam_check,
+	};
+
+	zfs_jailparam_slot = osd_jail_register(zfs_jailparam_destroy, methods);
+	/* Copy the defaults to any existing prisons. */
+	sx_slock(&allprison_lock);
+	TAILQ_FOREACH(pr, &allprison, pr_list)
+		zfs_jailparam_alloc(pr, NULL);
+	sx_sunlock(&allprison_lock);
+}
+
+static void
+zfs_jailparam_sysuninit(void *arg __unused)
+{
+
+	osd_jail_deregister(zfs_jailparam_slot);
+}
+
+SYSINIT(zfs_jailparam_sysinit, SI_SUB_DRIVERS, SI_ORDER_ANY,
+	zfs_jailparam_sysinit, NULL);
+SYSUNINIT(zfs_jailparam_sysuninit, SI_SUB_DRIVERS, SI_ORDER_ANY,
+	zfs_jailparam_sysuninit, NULL);

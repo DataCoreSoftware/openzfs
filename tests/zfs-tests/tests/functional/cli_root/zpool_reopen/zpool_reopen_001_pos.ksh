@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 
 #
 # This file and its contents are supplied under the terms of the
@@ -55,6 +56,7 @@ log_must zpool reopen
 log_must check_state $TESTPOOL "$REMOVED_DISK_ID" "unavail"
 # Write some data to the pool
 log_must generate_random_file /$TESTPOOL/data $SMALL_FILE_SIZE
+sync_pool $TESTPOOL
 # 4. "Plug back" disk.
 insert_disk $REMOVED_DISK $scsi_host
 # 5. Reopen a pool and verify if removed disk is marked online again.

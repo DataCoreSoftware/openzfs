@@ -42,6 +42,7 @@
     <Configuration>Debug</Configuration>
     <Platform Condition="'$(Platform)' == ''">Win32</Platform>
     <RootNamespace>OpenZFS</RootNamespace>
+    <WindowsTargetPlatformVersion>$(LatestTargetPlatformVersion)</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -61,7 +62,7 @@
     <DriverTargetPlatform>Desktop</DriverTargetPlatform>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
-    <TargetVersion>Windows7</TargetVersion>
+    <TargetVersion>Windows10</TargetVersion>
     <UseDebugLibraries>true</UseDebugLibraries>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
     <ConfigurationType>Driver</ConfigurationType>
@@ -69,7 +70,7 @@
     <DriverTargetPlatform>Desktop</DriverTargetPlatform>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
-    <TargetVersion>Windows7</TargetVersion>
+    <TargetVersion>Windows10</TargetVersion>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
     <ConfigurationType>Driver</ConfigurationType>
@@ -98,7 +99,7 @@
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
     <ConfigurationType>Driver</ConfigurationType>
     <DriverType>KMDF</DriverType>
-    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'" Label="Configuration">
     <TargetVersion>Windows10</TargetVersion>
@@ -129,10 +130,14 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
-    <DisableProductionSignDebugWarnings>false</DisableProductionSignDebugWarnings>
-    <TimeStampServer>
-    </TimeStampServer>
+    <DisableProductionSignDebugWarnings>true</DisableProductionSignDebugWarnings>
+    <TimeStampServer>http://timestamp.digicert.com</TimeStampServer>
     <IncludePath>$(IncludePath);$(KMDF_INC_PATH)$(KMDF_VER_PATH);../../../../include</IncludePath>
+    <PreLinkEventUseInBuild>false</PreLinkEventUseInBuild>
+    <OutDir>$(SolutionDir)$(Platform)\$(ConfigurationName)\</OutDir>
+    <EnableInf2cat>false</EnableInf2cat>
+    <PreBuildEventUseInBuild>false</PreBuildEventUseInBuild>
+    <PostBuildEventUseInBuild>true</PostBuildEventUseInBuild>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
@@ -150,6 +155,8 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <EnableInf2cat>false</EnableInf2cat>
+    <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
@@ -163,7 +170,7 @@
     </ClCompile>
     <Link>
       <AdditionalDependencies>wdmsec.lib;Storport.lib;scsiwmi.lib;splkern.lib;icpkern.lib;luakern.lib;nvpairkern.lib;unicodekern.lib;zcommonkern.lib;zlibkern.lib;zstdkern.lib;zfskern.lib;zfskern_os.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)ntoskrnl.lib;$(DDK_LIB_PATH)hal.lib;$(DDK_LIB_PATH)wmilib.lib;$(KMDF_LIB_PATH)$(KMDF_VER_PATH)\WdfLdr.lib;$(KMDF_LIB_PATH)$(KMDF_VER_PATH)\WdfDriverEntry.lib</AdditionalDependencies>
-      <AdditionalLibraryDirectories>$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\spl;$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\icp;$(SolutionDir)..\..\..\out\build\x64-Debug\module\lua;$(SolutionDir)..\..\..\out\build\x64-Debug\module\nvpair;$(SolutionDir)..\..\..\out\build\x64-Debug\module\unicode;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zcommon;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zstd;$(SolutionDir)..\..\..\out\build\x64-Debug\lib\os\windows\zlib-1.2.3;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\spl;$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\icp;$(SolutionDir)..\..\..\out\build\x64-Debug\module\lua;$(SolutionDir)..\..\..\out\build\x64-Debug\module\nvpair;$(SolutionDir)..\..\..\out\build\x64-Debug\module\unicode;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zcommon;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zstd;$(SolutionDir)..\..\..\out\build\x64-Debug\lib\os\windows\zlib-1.2.13;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <DriverSign>
       <AdditionalOptions>/tr http://timestamp.digicert.com /td sha256 /fd sha256 %(AdditionalOptions)</AdditionalOptions>
@@ -178,7 +185,7 @@
     </ClCompile>
     <Link>
       <AdditionalDependencies>wdmsec.lib;Storport.lib;scsiwmi.lib;splkern.lib;icpkern.lib;luakern.lib;nvpairkern.lib;unicodekern.lib;zcommonkern.lib;zlibkern.lib;zstdkern.lib;zfskern.lib;zfskern_os.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)ntoskrnl.lib;$(DDK_LIB_PATH)hal.lib;$(DDK_LIB_PATH)wmilib.lib;$(KMDF_LIB_PATH)$(KMDF_VER_PATH)\WdfLdr.lib;$(KMDF_LIB_PATH)$(KMDF_VER_PATH)\WdfDriverEntry.lib</AdditionalDependencies>
-      <AdditionalLibraryDirectories>$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\spl;$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\icp;$(SolutionDir)..\..\..\out\build\x64-Debug\module\lua;$(SolutionDir)..\..\..\out\build\x64-Debug\module\nvpair;$(SolutionDir)..\..\..\out\build\x64-Debug\module\unicode;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zcommon;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zstd;$(SolutionDir)..\..\..\out\build\x64-Debug\lib\os\windows\zlib-1.2.3;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\spl;$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\icp;$(SolutionDir)..\..\..\out\build\x64-Debug\module\lua;$(SolutionDir)..\..\..\out\build\x64-Debug\module\nvpair;$(SolutionDir)..\..\..\out\build\x64-Debug\module\unicode;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zcommon;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zstd;$(SolutionDir)..\..\..\out\build\x64-Debug\lib\os\windows\zlib-1.2.13;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <DriverSign>
       <AdditionalOptions>/tr http://timestamp.digicert.com /td sha256 /fd sha256 %(AdditionalOptions)</AdditionalOptions>
@@ -192,12 +199,34 @@
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <Link>
-      <AdditionalLibraryDirectories>$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\spl;$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\icp;$(SolutionDir)..\..\..\out\build\x64-Debug\module\lua;$(SolutionDir)..\..\..\out\build\x64-Debug\module\nvpair;$(SolutionDir)..\..\..\out\build\x64-Debug\module\unicode;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zcommon;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zstd;$(SolutionDir)..\..\..\out\build\x64-Debug\lib\os\windows\zlib-1.2.3;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\spl;$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\icp;$(SolutionDir)..\..\..\out\build\x64-Debug\module\lua;$(SolutionDir)..\..\..\out\build\x64-Debug\module\nvpair;$(SolutionDir)..\..\..\out\build\x64-Debug\module\unicode;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zcommon;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zstd;$(SolutionDir)..\..\..\out\build\x64-Debug\lib\os\windows\zlib-1.2.13;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>wdmsec.lib;Storport.lib;scsiwmi.lib;splkern.lib;icpkern.lib;luakern.lib;nvpairkern.lib;unicodekern.lib;zcommonkern.lib;zlibkern.lib;zstdkern.lib;zfskern.lib;zfskern_os.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)ntoskrnl.lib;$(DDK_LIB_PATH)hal.lib;$(DDK_LIB_PATH)wmilib.lib;$(KMDF_LIB_PATH)$(KMDF_VER_PATH)\WdfLdr.lib;$(KMDF_LIB_PATH)$(KMDF_VER_PATH)\WdfDriverEntry.lib</AdditionalDependencies>
+      <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
     </Link>
     <DriverSign>
       <AdditionalOptions>/tr http://timestamp.digicert.com /td sha256 /fd sha256 %(AdditionalOptions)</AdditionalOptions>
     </DriverSign>
+    <PostBuildEvent>
+      <Command>copy /Y "$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\driver\OpenZFS.sys" "$(OutDir)$(TargetName)$(TargetExt)"
+copy /Y "$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\driver\OpenZFS.inf" "$(OutDir)$(TargetName).inf"
+copy /Y "$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\driver\OpenZFS.cat" "$(OutDir)$(TargetName).cat"
+copy /Y "$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\driver\OpenZFS.man" "$(OutDir)$(TargetName).man"
+copy /Y "$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\driver\OpenZFS.pdb" "$(OutDir)$(TargetName).pdb"</Command>
+    </PostBuildEvent>
+    <PreLinkEvent>
+      <Command>copy /Y "$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\driver\OpenZFS.man" "$(TargetDir)\OpenZFS\OpenZFS.man"
+copy /Y "$(SolutionDir)..\..\..\out\build\x64-Debug\cmd\zed\zed.exe" "$(TargetDir)\OpenZFS\zed.exe"</Command>
+      <Message>Copy OpenZFS.man to deploy dir - no better way?</Message>
+    </PreLinkEvent>
+    <PreBuildEvent>
+      <Command>IF NOT EXIST "$(TargetDir)OpenZFS" MKDIR "$(TargetDir)OpenZFS"</Command>
+    </PreBuildEvent>
+    <PreBuildEvent>
+      <Message>Make sure output exists</Message>
+    </PreBuildEvent>
+    <Inf>
+      <SpecifyArchitecture>false</SpecifyArchitecture>
+    </Inf>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -207,15 +236,69 @@
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <Link>
-      <AdditionalLibraryDirectories>$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\spl;$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\icp;$(SolutionDir)..\..\..\out\build\x64-Debug\module\lua;$(SolutionDir)..\..\..\out\build\x64-Debug\module\nvpair;$(SolutionDir)..\..\..\out\build\x64-Debug\module\unicode;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zcommon;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zstd;$(SolutionDir)..\..\..\out\build\x64-Debug\lib\os\windows\zlib-1.2.3;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\spl;$(SolutionDir)..\..\..\out\build\x64-Debug\module\os\windows\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\icp;$(SolutionDir)..\..\..\out\build\x64-Debug\module\lua;$(SolutionDir)..\..\..\out\build\x64-Debug\module\nvpair;$(SolutionDir)..\..\..\out\build\x64-Debug\module\unicode;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zcommon;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zfs;$(SolutionDir)..\..\..\out\build\x64-Debug\module\zstd;$(SolutionDir)..\..\..\out\build\x64-Debug\lib\os\windows\zlib-1.2.13;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>wdmsec.lib;Storport.lib;scsiwmi.lib;splkern.lib;icpkern.lib;luakern.lib;nvpairkern.lib;unicodekern.lib;zcommonkern.lib;zlibkern.lib;zstdkern.lib;zfskern.lib;zfskern_os.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)ntoskrnl.lib;$(DDK_LIB_PATH)hal.lib;$(DDK_LIB_PATH)wmilib.lib;$(KMDF_LIB_PATH)$(KMDF_VER_PATH)\WdfLdr.lib;$(KMDF_LIB_PATH)$(KMDF_VER_PATH)\WdfDriverEntry.lib</AdditionalDependencies>
+      <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
     </Link>
     <DriverSign>
       <AdditionalOptions>/tr http://timestamp.digicert.com /td sha256 /fd sha256 %(AdditionalOptions)</AdditionalOptions>
     </DriverSign>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\..\..\include\os\windows\spl;$(SolutionDir)..\..\..\include\os\windows\zfs;$(SolutionDir)..\..\..\include\os\windows;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>_KERNEL;_KERNEL_;__aarch64__;_WIN64;%(PreprocessorDefinitions);_ARM64_;ARM64;_USE_DECLSPECS_FOR_SAL=1;STD_CALL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <DebugInformationFormat>OldStyle</DebugInformationFormat>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(SolutionDir)..\..\..\out\build\arm64-Debug\module\os\windows\spl;$(SolutionDir)..\..\..\out\build\arm64-Debug\module\os\windows\zfs;$(SolutionDir)..\..\..\out\build\arm64-Debug\module\icp;$(SolutionDir)..\..\..\out\build\arm64-Debug\module\lua;$(SolutionDir)..\..\..\out\build\arm64-Debug\module\nvpair;$(SolutionDir)..\..\..\out\build\arm64-Debug\module\unicode;$(SolutionDir)..\..\..\out\build\arm64-Debug\module\zcommon;$(SolutionDir)..\..\..\out\build\arm64-Debug\module\zfs;$(SolutionDir)..\..\..\out\build\arm64-Debug\module\zstd;$(SolutionDir)..\..\..\out\build\arm64-Debug\lib\os\windows\zlib-1.2.13;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>wdmsec.lib;Storport.lib;scsiwmi.lib;splkern.lib;icpkern.lib;luakern.lib;nvpairkern.lib;unicodekern.lib;zcommonkern.lib;zlibkern.lib;zstdkern.lib;zfskern.lib;zfskern_os.lib;%(AdditionalDependencies);$(KernelBufferOverflowLib);$(DDK_LIB_PATH)ntoskrnl.lib;$(DDK_LIB_PATH)hal.lib;$(DDK_LIB_PATH)wmilib.lib;$(KMDF_LIB_PATH)$(KMDF_VER_PATH)\WdfLdr.lib;$(KMDF_LIB_PATH)$(KMDF_VER_PATH)\WdfDriverEntry.lib</AdditionalDependencies>
+      <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
+    </Link>
+  </ItemDefinitionGroup>
   <ItemGroup>
-    <FilesToPackage Include="$(TargetPath)" />
+    <FilesToPackage Include="..\..\..\..\out\build\x64-Debug\cmd\os\windows\zfsinstaller\zfsinstaller.exe" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+      <PackageRelativeDirectory>
+      </PackageRelativeDirectory>
+    </FilesToPackage>
+    <FilesToPackage Include="..\..\..\..\out\build\x64-Debug\cmd\zfs\zfs.exe" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+      <PackageRelativeDirectory>
+      </PackageRelativeDirectory>
+    </FilesToPackage>
+    <FilesToPackage Include="..\..\..\..\out\build\x64-Debug\cmd\zpool\zpool.exe" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+      <PackageRelativeDirectory>
+      </PackageRelativeDirectory>
+    </FilesToPackage>
+    <FilesToPackage Include="..\..\..\..\out\build\x64-Debug\module\os\windows\driver\OpenZFS.cat" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+      <PackageRelativeDirectory>
+      </PackageRelativeDirectory>
+    </FilesToPackage>
+    <FilesToPackage Include="..\..\..\..\out\build\x64-Debug\module\os\windows\driver\OpenZFS.inf" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+      <PackageRelativeDirectory>
+      </PackageRelativeDirectory>
+    </FilesToPackage>
+    <FilesToPackage Include="..\..\..\..\out\build\x64-Debug\module\os\windows\driver\OpenZFS.man" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+      <PackageRelativeDirectory>
+      </PackageRelativeDirectory>
+    </FilesToPackage>
+    <FilesToPackage Include="..\..\..\..\out\build\x64-Debug\module\os\windows\driver\OpenZFS.sys" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+      <PackageRelativeDirectory>
+      </PackageRelativeDirectory>
+    </FilesToPackage>
+    <FilesToPackage Include="..\..\..\..\out\build\x64-Debug\module\os\windows\zvol\driver\OpenZVOL.cat" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+      <PackageRelativeDirectory>
+      </PackageRelativeDirectory>
+    </FilesToPackage>
+    <FilesToPackage Include="..\..\..\..\out\build\x64-Debug\module\os\windows\zvol\driver\OpenZVOL.inf" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+      <PackageRelativeDirectory>
+      </PackageRelativeDirectory>
+    </FilesToPackage>
+    <FilesToPackage Include="..\..\..\..\out\build\x64-Debug\module\os\windows\zvol\driver\OpenZVOL.sys" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+      <PackageRelativeDirectory>
+      </PackageRelativeDirectory>
+    </FilesToPackage>
   </ItemGroup>
   <ItemGroup>
     <Inf Include="..\..\..\..\module\os\windows\OpenZFS.inf" />
@@ -224,6 +307,9 @@
     <ClCompile Include="..\..\..\..\module\os\windows\debug.c" />
     <ClCompile Include="..\..\..\..\module\os\windows\driver.c" />
     <ClCompile Include="..\..\..\..\module\os\windows\Wpp.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\..\..\out\build\x64-Debug\module\os\windows\zvol\driver\OpenZVOL.sys" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

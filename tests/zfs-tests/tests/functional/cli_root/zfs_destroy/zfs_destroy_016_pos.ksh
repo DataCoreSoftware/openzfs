@@ -1,4 +1,5 @@
 #!/bin/ksh
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -30,18 +31,18 @@
 function cleanup
 {
 	datasetexists $TESTPOOL/$TESTFS1 && \
-	    log_must zfs destroy -R $TESTPOOL/$TESTFS1
+	    destroy_dataset $TESTPOOL/$TESTFS1 -R
 	datasetexists $TESTPOOL/$TESTVOL && \
-	    log_must zfs destroy -Rf $TESTPOOL/$TESTVOL
+	    destroy_dataset $TESTPOOL/$TESTVOL -Rf
 }
 
 function setup_snapshots
 {
 	for i in $snaps; do
 		datasetexists $TESTPOOL/$TESTFS1@snap$i && \
-		    log_must zfs destroy $TESTPOOL/$TESTFS1@snap$i
+		    destroy_dataset $TESTPOOL/$TESTFS1@snap$i
 		datasetexists $TESTPOOL/$TESTVOL@snap$i && \
-		    log_must zfs destroy $TESTPOOL/$TESTVOL@snap$i
+		    destroy_dataset $TESTPOOL/$TESTVOL@snap$i
 		log_must zfs snapshot $TESTPOOL/$TESTFS1@snap$i
 		log_must zfs snapshot $TESTPOOL/$TESTVOL@snap$i
 	done

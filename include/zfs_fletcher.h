@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -76,19 +77,19 @@ typedef struct zfs_fletcher_superscalar {
 } zfs_fletcher_superscalar_t;
 
 typedef struct zfs_fletcher_sse {
-	uint64_t v[2] __attribute__((aligned(16)));
+	uint64_t v[2];
 } zfs_fletcher_sse_t;
 
 typedef struct zfs_fletcher_avx {
-	uint64_t v[4] __attribute__((aligned(32)));
+	uint64_t v[4];
 } zfs_fletcher_avx_t;
 
 typedef struct zfs_fletcher_avx512 {
-	uint64_t v[8] __attribute__((aligned(64)));
+	uint64_t v[8];
 } zfs_fletcher_avx512_t;
 
 typedef struct zfs_fletcher_aarch64_neon {
-	uint64_t v[2] __attribute__((aligned(16)));
+	uint64_t v[2];
 } zfs_fletcher_aarch64_neon_t;
 
 
@@ -126,8 +127,9 @@ typedef struct fletcher_4_func {
 	fletcher_4_fini_f fini_byteswap;
 	fletcher_4_compute_f compute_byteswap;
 	boolean_t (*valid)(void);
+	boolean_t uses_fpu;
 	const char *name;
-} fletcher_4_ops_t;
+} __attribute__((aligned(64))) fletcher_4_ops_t;
 
 _ZFS_FLETCHER_H const fletcher_4_ops_t fletcher_4_superscalar_ops;
 _ZFS_FLETCHER_H const fletcher_4_ops_t fletcher_4_superscalar4_ops;

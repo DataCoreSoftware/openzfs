@@ -132,4 +132,10 @@ extern "C" {
 }
 #endif
 
+#define	ESC_ZFS_ERRORSCRUB_START	"errorscrub_start"
+#define	ESC_ZFS_ERRORSCRUB_FINISH	"errorscrub_finish"
+#define	ESC_ZFS_ERRORSCRUB_ABORT	"errorscrub_abort"
+#define	ESC_ZFS_ERRORSCRUB_RESUME	"errorscrub_resume"
+#define	ESC_ZFS_ERRORSCRUB_PAUSED	"errorscrub_paused"
+
 #endif /* _SYS_SYSEVENT_EVENTDEFS_H */

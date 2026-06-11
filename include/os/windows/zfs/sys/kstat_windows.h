@@ -77,10 +77,10 @@ typedef struct windows_kstat {
 	kstat_named_t zfs_delay_min_dirty_percent;
 	kstat_named_t zfs_delay_scale;
 	kstat_named_t spa_asize_inflation;
-	kstat_named_t zfs_prefetch_disable;
+	/* zfs_prefetch_disable removed in 2.4.1 (now static in dmu_zfetch.c) */
 	kstat_named_t zfetch_max_streams;
 	kstat_named_t zfetch_min_sec_reap;
-	kstat_named_t zfetch_array_rd_sz;
+	/* zfetch_array_rd_sz removed in 2.4.1 */
 	kstat_named_t zfs_default_bs;
 	kstat_named_t zfs_default_ibs;
 	kstat_named_t metaslab_aliquot;
@@ -90,7 +90,7 @@ typedef struct windows_kstat {
 	kstat_named_t zfs_txg_timeout;
 	kstat_named_t zfs_adc_enable;
 	kstat_named_t zfs_vdev_cache_max;
-	kstat_named_t zfs_vdev_cache_size;
+	/* zfs_vdev_cache_size removed in 2.4.1 (vdev cache removed) */
 	kstat_named_t zfs_vdev_cache_bshift;
 	kstat_named_t vdev_mirror_shift;
 	kstat_named_t zfs_scrub_limit;
@@ -172,7 +172,7 @@ extern uint64_t zfs_arc_meta_min;
 extern int zfs_arc_grow_retry;
 extern int zfs_arc_shrink_shift;
 extern int zfs_arc_p_min_shift;
-extern int zfs_arc_average_blocksize;
+extern uint_t zfs_arc_average_blocksize;
 
 extern uint64_t l2arc_write_max;
 extern uint64_t l2arc_write_boost;
@@ -192,8 +192,8 @@ extern uint32_t zfs_vdev_async_write_min_active;
 extern uint32_t zfs_vdev_async_write_max_active;
 extern uint32_t zfs_vdev_scrub_min_active;
 extern uint32_t zfs_vdev_scrub_max_active;
-extern int zfs_vdev_async_write_active_min_dirty_percent;
-extern int zfs_vdev_async_write_active_max_dirty_percent;
+extern uint_t zfs_vdev_async_write_active_min_dirty_percent;
+extern uint_t zfs_vdev_async_write_active_max_dirty_percent;
 extern int zfs_vdev_aggregation_limit;
 extern int zfs_vdev_read_gap_limit;
 extern int zfs_vdev_write_gap_limit;
@@ -210,7 +210,7 @@ extern int zfs_vdev_cache_max;
 extern int spa_max_replication_override;
 extern int zfs_no_scrub_io;
 extern int zfs_no_scrub_prefetch;
-extern ssize_t zfs_immediate_write_sz;
+extern uint_t zfs_immediate_write_sz;
 extern offset_t zfs_read_chunk_size;
 extern uint64_t metaslab_df_alloc_threshold;
 extern int metaslab_df_free_pct;

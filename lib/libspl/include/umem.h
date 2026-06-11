@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -7,7 +8,7 @@
  * with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -41,6 +42,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 #ifdef  __cplusplus
 extern "C" {
@@ -83,6 +85,7 @@ const char *_umem_debug_init(void);
 const char *_umem_options_init(void);
 const char *_umem_logging_init(void);
 
+__attribute__((malloc, alloc_size(1)))
 static inline void *
 umem_alloc(size_t size, int flags)
 {
@@ -95,11 +98,12 @@ umem_alloc(size_t size, int flags)
 	return (ptr);
 }
 
+__attribute__((malloc, alloc_size(1)))
 static inline void *
 umem_alloc_aligned(size_t size, size_t align, int flags)
 {
 	void *ptr = NULL;
-	int rc = EINVAL;
+	int rc;
 
 	do {
 		rc = posix_memalign(&ptr, align, size);
@@ -116,6 +120,7 @@ umem_alloc_aligned(size_t size, size_t align, int flags)
 	return (ptr);
 }
 
+__attribute__((malloc, alloc_size(1)))
 static inline void *
 umem_zalloc(size_t size, int flags)
 {
@@ -129,15 +134,24 @@ umem_zalloc(size_t size, int flags)
 }
 
 static inline void
-umem_free(void* ptr, size_t size __maybe_unused)
+umem_free(const void *ptr, size_t size __maybe_unused)
 {
-    free(ptr);
+	free((void *)ptr);
 }
 
+/*
+ * umem_free_aligned was added for supporting portability
+ * with non-POSIX platforms that require a different free
+ * to be used with aligned allocations.
+ */
 static inline void
-umem_free_aligned(void* ptr, size_t size __maybe_unused)
+umem_free_aligned(void *ptr, size_t size __maybe_unused)
 {
-    posix_memalign_free(ptr);
+#ifndef _WIN32
+	free((void *)ptr);
+#else
+	_aligned_free(ptr);
+#endif
 }
 
 static inline void
@@ -146,7 +160,7 @@ umem_nofail_callback(umem_nofail_callback_t *cb __maybe_unused)
 
 static inline umem_cache_t *
 umem_cache_create(
-    char *name, size_t bufsize, size_t align,
+    const char *name, size_t bufsize, size_t align,
     umem_constructor_t *constructor,
     umem_destructor_t *destructor,
     umem_reclaim_t *reclaim,
@@ -176,6 +190,7 @@ umem_cache_destroy(umem_cache_t *cp)
 	umem_free(cp, sizeof (umem_cache_t));
 }
 
+__attribute__((malloc))
 static inline void *
 umem_cache_alloc(umem_cache_t *cp, int flags)
 {

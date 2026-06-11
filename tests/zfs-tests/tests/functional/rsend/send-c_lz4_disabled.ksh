@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 
 #
 # This file and its contents are supplied under the terms of the
@@ -52,8 +53,8 @@ for compress in off gzip; do
 		poolexists $POOL3 && destroy_pool $POOL3
 		log_must zpool create $pool_opt $POOL3 $DISK3
 
-		datasetexists $send_ds && log_must_busy zfs destroy -r $send_ds
-		datasetexists $recv_ds && log_must_busy zfs destroy -r $recv_ds
+		datasetexists $send_ds && destroy_dataset $send_ds -r
+		datasetexists $recv_ds && destroy_dataset $recv_ds -r
 
 		log_must zfs create -o compress=$compress $send_ds
 		typeset dir=$(get_prop mountpoint $send_ds)

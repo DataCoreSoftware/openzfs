@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -36,8 +37,7 @@ function cleanup
 
 function log_must_unsupported
 {
-	log_must_retry "unsupported" 3 "$@"
-	(( $? != 0 )) && log_fail
+	log_must_retry "unsupported" 3 "$@" || log_fail
 }
 
 log_onexit cleanup

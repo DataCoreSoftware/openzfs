@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -25,16 +26,20 @@
 #include <sys/zfeature.h>
 #include <sys/dmu_objset.h>
 
+static int zfs_indirect_open_disable = B_FALSE;
+
 #ifdef ZFS_DEBUG
 static boolean_t
 vdev_indirect_mapping_verify(vdev_indirect_mapping_t *vim)
 {
 	ASSERT(vim != NULL);
 
-	ASSERT(vim->vim_object != 0);
-	ASSERT(vim->vim_objset != NULL);
-	ASSERT(vim->vim_phys != NULL);
-	ASSERT(vim->vim_dbuf != NULL);
+	if (!zfs_indirect_open_disable) {
+		ASSERT(vim->vim_object != 0);
+		ASSERT(vim->vim_objset != NULL);
+		ASSERT(vim->vim_phys != NULL);
+		ASSERT(vim->vim_dbuf != NULL);
+	}
 
 	EQUIV(vim->vim_phys->vimp_num_entries > 0,
 	    vim->vim_entries != NULL);
@@ -54,6 +59,8 @@ vdev_indirect_mapping_verify(vdev_indirect_mapping_t *vim)
 
 	return (B_TRUE);
 }
+#else
+#define	vdev_indirect_mapping_verify(vim) ((void) sizeof (vim), B_TRUE)
 #endif
 
 uint64_t
@@ -294,7 +301,8 @@ vdev_indirect_mapping_close(vdev_indirect_mapping_t *vim)
 		vim->vim_entries = NULL;
 	}
 
-	dmu_buf_rele(vim->vim_dbuf, vim);
+	if (vim->vim_dbuf != NULL)
+		dmu_buf_rele(vim->vim_dbuf, vim);
 
 	vim->vim_objset = NULL;
 	vim->vim_object = 0;
@@ -343,6 +351,19 @@ vdev_indirect_mapping_open(objset_t *os, uint64_t mapping_object)
 {
 	vdev_indirect_mapping_t *vim = kmem_zalloc(sizeof (*vim), KM_SLEEP);
 	dmu_object_info_t doi;
+
+	if (zfs_indirect_open_disable) {
+		zfs_dbgmsg("WIN32: Skipping indirect mapping for obj %llu",
+		    (u_longlong_t)mapping_object);
+
+		/* Allocate a dummy phys header so close/free don't crash */
+		vim->vim_phys = kmem_zalloc(
+		    sizeof (vdev_indirect_mapping_phys_t), KM_SLEEP);
+		vim->vim_phys->vimp_num_entries = 0;
+
+		return (vim);
+	}
+
 	VERIFY0(dmu_object_info(os, mapping_object, &doi));
 
 	vim->vim_objset = os;
@@ -456,13 +477,14 @@ vdev_indirect_mapping_add_entries(vdev_indirect_mapping_t *vim,
 		dmu_write(vim->vim_objset, vim->vim_object,
 		    vim->vim_phys->vimp_num_entries * sizeof (*mapbuf),
 		    i * sizeof (*mapbuf),
-		    mapbuf, tx);
+		    mapbuf, tx, DMU_READ_NO_PREFETCH);
 		if (vim->vim_havecounts) {
 			dmu_write(vim->vim_objset,
 			    vim->vim_phys->vimp_counts_object,
 			    vim->vim_phys->vimp_num_entries *
 			    sizeof (*countbuf),
-			    i * sizeof (*countbuf), countbuf, tx);
+			    i * sizeof (*countbuf), countbuf, tx,
+			    DMU_READ_NO_PREFETCH);
 		}
 		vim->vim_phys->vimp_num_entries += i;
 	}
@@ -480,7 +502,7 @@ vdev_indirect_mapping_add_entries(vdev_indirect_mapping_t *vim,
 	    entries_written * sizeof (vdev_indirect_mapping_entry_phys_t));
 	vim->vim_entries = vmem_alloc(new_size, KM_SLEEP);
 	if (old_size > 0) {
-		bcopy(old_entries, vim->vim_entries, old_size);
+		memcpy(vim->vim_entries, old_entries, old_size);
 		vmem_free(old_entries, old_size);
 	}
 	VERIFY0(dmu_read(vim->vim_objset, vim->vim_object, old_size,
@@ -582,7 +604,7 @@ vdev_indirect_mapping_load_obsolete_counts(vdev_indirect_mapping_t *vim)
 		    0, counts_size,
 		    counts, DMU_READ_PREFETCH));
 	} else {
-		bzero(counts, counts_size);
+		memset(counts, 0, counts_size);
 	}
 	return (counts);
 }
@@ -614,3 +636,6 @@ EXPORT_SYMBOL(vdev_indirect_mapping_object);
 EXPORT_SYMBOL(vdev_indirect_mapping_open);
 EXPORT_SYMBOL(vdev_indirect_mapping_size);
 #endif
+
+ZFS_MODULE_PARAM(zfs_vdev, zfs_, indirect_open_disable, INT, ZMOD_RW,
+	"Skip vdev_indirect_mapping_open() call");

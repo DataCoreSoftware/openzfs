@@ -42,25 +42,28 @@ extern "C" {
 extern uint64_t segkmem_total_allocated;
 
 extern vmem_t *abd_arena;
+extern vmem_t *abd_subpage_arena;
 
 /*
  * segkmem page vnodes
  */
 #define	kvp		(kvps[KV_KVP])
-#define	zvp		(kvps[KV_ZVP])
+// #define	zvp		(kvps[KV_ZVP])
 #if defined(__sparc)
 #define	mpvp		(kvps[KV_MPVP])
 #define	promvp		(kvps[KV_PROMVP])
 #endif	/* __sparc */
 
-void *segkmem_alloc(vmem_t *, uint32_t, int);
-extern void segkmem_free(vmem_t *, void *, uint32_t);
+void *segkmem_alloc(vmem_t *, size_t, int);
+extern void segkmem_free(vmem_t *, const void *, size_t);
 extern void kernelheap_init(void);
 extern void kernelheap_fini(void);
-extern void *segkmem_zio_alloc(vmem_t *, uint32_t, int);
-extern void segkmem_zio_free(vmem_t *, void *, uint32_t);
+extern void *segkmem_zio_alloc(vmem_t *, size_t, int);
+extern void segkmem_zio_free(vmem_t *, void *, size_t);
 extern void segkmem_zio_init(void);
 extern void segkmem_zio_fini(void);
+extern void segkmem_abd_init(void);
+extern void segkmem_abd_fini(void);
 
 /*
  * Flags for segkmem_xalloc().

@@ -114,6 +114,8 @@ typedef struct vmem_kstat {
 	kstat_named_t	vk_parent_free;	/* called the source free function */
 	kstat_named_t   vk_threads_waiting; /* threads in cv_wait in vmem */
 	kstat_named_t   vk_excess;	/* count of retained excess imports */
+	kstat_named_t	vk_lowest_stack; /* least remaining stack seen */
+	kstat_named_t	vk_async_stack_calls; /* times allocated off-thread */
 } vmem_kstat_t;
 
 struct vmem {
@@ -128,8 +130,8 @@ struct vmem {
 	uint32_t	vm_quantum;	/* vmem quantum */
 	uint32_t	vm_qcache_max;	/* maximum size to front by kmem */
 	uint32_t	vm_min_import;	/* smallest amount to import */
-	void		*(*vm_source_alloc)(vmem_t *, uint32_t, int);
-	void		(*vm_source_free)(vmem_t *, void *, uint32_t);
+	void		*(*vm_source_alloc)(vmem_t *, size_t, int);
+	void		(*vm_source_free)(vmem_t *, void *, size_t);
 	vmem_t		*vm_source;	/* vmem source for imported memory */
 	vmem_t		*vm_next;	/* next in vmem_list */
 	kstat_t		*vm_ksp;	/* kstat */

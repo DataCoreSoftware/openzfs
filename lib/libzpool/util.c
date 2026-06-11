@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -35,8 +36,9 @@
 #include <sys/fs/zfs.h>
 #include <sys/zfs_refcount.h>
 #include <sys/zfs_ioctl.h>
-#include <dlfcn.h>
+#include <sys/tunables.h>
 #include <libzutil.h>
+#include <libzpool.h>
 
 /*
  * Routines needed by more than one client of libzpool.
@@ -64,7 +66,8 @@ show_vdev_stats(const char *desc, const char *ctype, nvlist_t *nv, int indent)
 	}
 
 	if (desc != NULL) {
-		char *suffix = "", *bias = NULL;
+		const char *suffix = "";
+		const char *bias = NULL;
 		char bias_suffix[32];
 
 		(void) nvlist_lookup_uint64(nv, ZPOOL_CONFIG_IS_LOG, &is_log);
@@ -112,7 +115,8 @@ show_vdev_stats(const char *desc, const char *ctype, nvlist_t *nv, int indent)
 
 	for (c = 0; c < children; c++) {
 		nvlist_t *cnv = child[c];
-		char *cname = NULL, *tname;
+		const char *cname = NULL;
+		char *tname;
 		uint64_t np;
 		int len;
 		if (nvlist_lookup_string(cnv, ZPOOL_CONFIG_PATH, &cname) &&
@@ -132,14 +136,12 @@ void
 show_pool_stats(spa_t *spa)
 {
 	nvlist_t *config, *nvroot;
-	char *name;
+	const char *name;
 
-	VERIFY(spa_get_stats(spa_name(spa), &config, NULL, 0) == 0);
+	VERIFY0(spa_get_stats(spa_name(spa), &config, NULL, 0));
 
-	VERIFY(nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE,
-	    &nvroot) == 0);
-	VERIFY(nvlist_lookup_string(config, ZPOOL_CONFIG_POOL_NAME,
-	    &name) == 0);
+	VERIFY0(nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE, &nvroot));
+	VERIFY0(nvlist_lookup_string(config, ZPOOL_CONFIG_POOL_NAME, &name));
 
 	show_vdev_stats(name, ZPOOL_CONFIG_CHILDREN, nvroot, 0);
 	show_vdev_stats(NULL, ZPOOL_CONFIG_L2CACHE, nvroot, 0);
@@ -148,138 +150,225 @@ show_pool_stats(spa_t *spa)
 	nvlist_free(config);
 }
 
-/* *k_out must be freed by the caller */
-static int
-set_global_var_parse_kv(const char *arg, char **k_out, u_longlong_t *v_out)
-{
-	int err;
-	VERIFY(arg);
-	char *d = strdup(arg);
-
-	char *save = NULL;
-	char *k = strtok_r(d, "=", &save);
-	char *v_str = strtok_r(NULL, "=", &save);
-	char *follow = strtok_r(NULL, "=", &save);
-	if (k == NULL || v_str == NULL || follow != NULL) {
-		err = EINVAL;
-		goto err_free;
-	}
-
-	u_longlong_t val = strtoull(v_str, NULL, 0);
-	if (val > UINT32_MAX) {
-		fprintf(stderr, "Value for global variable '%s' must "
-		    "be a 32-bit unsigned integer, got '%s'\n", k, v_str);
-		err = EOVERFLOW;
-		goto err_free;
-	}
-
-	*k_out = k;
-	*v_out = val;
-	return (0);
-
-err_free:
-	free(k);
-
-	return (err);
-}
-
 /*
- * Sets given global variable in libzpool to given unsigned 32-bit value.
- * arg: "<variable>=<value>"
+ * Common helper for working with libzpool tunables from the command line.
+ *
+ * Valid inputs:
+ *
+ *   <name>		show named tunable and value
+ *   <name>=<value>	set tunable value
+ *
+ *   show		show all tunables and values
+ *   show=<name>	show named tunable and value
+ *   info		show info about all tunables
+ *   info=<name>	show info about named tunable
  */
-int
-set_global_var(char const *arg)
+
+typedef enum { SHOW, INFO, SET } tunable_mode_t;
+
+static int
+list_tunables_cb(const zfs_tunable_t *tunable, void *arg)
 {
 	int ret = 0;
-#ifndef _WIN32 // Windowsify me
-	void *zpoolhdl;
-	char *varname;
-	u_longlong_t val;
+	const tunable_mode_t *mode = arg;
 
-#ifndef _ZFS_LITTLE_ENDIAN
-	/*
-	 * On big endian systems changing a 64-bit variable would set the high
-	 * 32 bits instead of the low 32 bits, which could cause unexpected
-	 * results.
-	 */
-	fprintf(stderr, "Setting global variables is only supported on "
-	    "little-endian systems\n");
-	ret = ENOTSUP;
-	goto out_ret;
-#endif
+	static const char *type[] = {
+		"int", "uint", "ulong", "u64", "str",
+	};
+	static const char *perm[] = {
+		"rw", "rd",
+	};
 
-	if ((ret = set_global_var_parse_kv(arg, &varname, &val)) != 0) {
-		goto out_ret;
-	}
-
-	zpoolhdl = dlopen("libzpool.so", RTLD_LAZY);
-	if (zpoolhdl != NULL) {
-		uint32_t *var;
-		var = dlsym(zpoolhdl, varname);
-		if (var == NULL) {
-			fprintf(stderr, "Global variable '%s' does not exist "
-			    "in libzpool.so\n", varname);
-			ret = EINVAL;
-			goto out_dlclose;
-		}
-		*var = (uint32_t)val;
-
+	if (*mode == SHOW) {
+		char val[64];
+		int err = zfs_tunable_get(tunable, val, sizeof (val));
+		if (err == 0)
+			printf("%s: %s\n", tunable->zt_name, val);
+		else
+			printf("%s: [error getting tunable value: %s]\n",
+			    tunable->zt_name, strerror(err));
 	} else {
-		fprintf(stderr, "Failed to open libzpool.so to set global "
-		    "variable\n");
-		ret = EIO;
-		goto out_dlclose;
+		printf("%s [%s %s]: %s\n", tunable->zt_name,
+		    type[tunable->zt_type], perm[tunable->zt_perm],
+		    tunable->zt_desc);
 	}
 
-	ret = 0;
+	return (0);
+}
+int
+handle_tunable_option(const char *_arg, boolean_t quiet)
+{
+	int err = 0;
+	char *arg = strdup(_arg);
+	char *k, *v;
 
-out_dlclose:
-	dlclose(zpoolhdl);
-	free(varname);
-out_ret:
-#endif
-	return (ret);
+	v = arg;
+	k = strsep(&v, "=");
+
+	tunable_mode_t mode;
+
+	if (strcmp(k, "show") == 0) {
+		mode = SHOW;
+		k = v;
+	} else if (strcmp(k, "info") == 0) {
+		mode = INFO;
+		k = v;
+	} else if (v == NULL) {
+		mode = SHOW;
+	} else {
+		mode = SET;
+	}
+
+	if (quiet && mode != SET) {
+		err = EINVAL;
+		goto out;
+	}
+
+	if (mode == SET) {
+		const zfs_tunable_t *tunable = zfs_tunable_lookup(k);
+		if (tunable == NULL) {
+			err = ENOENT;
+			goto out;
+		}
+
+		char vold[256], vnew[256];
+		if (zfs_tunable_get(tunable, vold, sizeof (vold)) != 0)
+			strcpy(vold, "???");
+		err = zfs_tunable_set(tunable, v);
+		if (err != 0)
+			goto out;
+		if (zfs_tunable_get(tunable, vnew, sizeof (vnew)) != 0)
+			strcpy(vnew, "???");
+
+		if (!quiet)
+			printf("%s: %s -> %s\n", k, vold, vnew);
+	} else if (k != NULL) {
+		const zfs_tunable_t *tunable = zfs_tunable_lookup(k);
+		if (tunable == NULL) {
+			err = ENOENT;
+			goto out;
+		}
+		list_tunables_cb(tunable, &mode);
+	} else {
+		zfs_tunable_iter(list_tunables_cb, &mode);
+	}
+
+out:
+	if (!quiet) {
+		if (err == ENOENT)
+			fprintf(stderr, "no such tunable: %s\n", k);
+		else if (err != 0)
+			fprintf(stderr, "couldn't set tunable '%s': %s\n",
+			    k, strerror(err));
+	}
+
+	free(arg);
+	return (err);
 }
 
 static nvlist_t *
 refresh_config(void *unused, nvlist_t *tryconfig)
 {
+	(void) unused;
 	return (spa_tryimport(tryconfig));
 }
 
+#if defined(__FreeBSD__)
+
+#include <sys/param.h>
+#include <sys/sysctl.h>
+#include <os/freebsd/zfs/sys/zfs_ioctl_compat.h>
+
+static int
+pool_active(void *unused, const char *name, uint64_t guid, boolean_t *isactive)
+{
+	(void) unused, (void) guid;
+	zfs_iocparm_t zp;
+	zfs_cmd_t *zc = NULL;
+#ifdef ZFS_LEGACY_SUPPORT
+	zfs_cmd_legacy_t *zcl = NULL;
+#endif
+	unsigned long request;
+	int ret;
+
+	int fd = open(ZFS_DEV, O_RDWR | O_CLOEXEC);
+	if (fd < 0)
+		return (-1);
+
+	/*
+	 * Use ZFS_IOC_POOL_STATS to check if the pool is active.  We want to
+	 * avoid adding a dependency on libzfs_core solely for this ioctl(),
+	 * therefore we manually craft the stats command.  Note that the command
+	 * ID is identical between the openzfs and legacy ioctl() formats.
+	 */
+	int ver = ZFS_IOCVER_NONE;
+	size_t ver_size = sizeof (ver);
+
+	sysctlbyname("vfs.zfs.version.ioctl", &ver, &ver_size, NULL, 0);
+
+	switch (ver) {
+	case ZFS_IOCVER_OZFS:
+		zc = umem_zalloc(sizeof (zfs_cmd_t), UMEM_NOFAIL);
+
+		(void) strlcpy(zc->zc_name, name, sizeof (zc->zc_name));
+		zp.zfs_cmd = (uint64_t)(uintptr_t)zc;
+		zp.zfs_cmd_size = sizeof (zfs_cmd_t);
+		zp.zfs_ioctl_version = ZFS_IOCVER_OZFS;
+
+		request = _IOWR('Z', ZFS_IOC_POOL_STATS, zfs_iocparm_t);
+		ret = ioctl(fd, request, &zp);
+
+		free((void *)(uintptr_t)zc->zc_nvlist_dst);
+		umem_free(zc, sizeof (zfs_cmd_t));
+
+		break;
+#ifdef ZFS_LEGACY_SUPPORT
+	case ZFS_IOCVER_LEGACY:
+		zcl = umem_zalloc(sizeof (zfs_cmd_legacy_t), UMEM_NOFAIL);
+
+		(void) strlcpy(zcl->zc_name, name, sizeof (zcl->zc_name));
+		zp.zfs_cmd = (uint64_t)(uintptr_t)zcl;
+		zp.zfs_cmd_size = sizeof (zfs_cmd_legacy_t);
+		zp.zfs_ioctl_version = ZFS_IOCVER_LEGACY;
+
+		request = _IOWR('Z', ZFS_IOC_POOL_STATS, zfs_iocparm_t);
+		ret = ioctl(fd, request, &zp);
+
+		free((void *)(uintptr_t)zcl->zc_nvlist_dst);
+		umem_free(zcl, sizeof (zfs_cmd_legacy_t));
+
+		break;
+#endif
+	default:
+		fprintf(stderr, "unrecognized zfs ioctl version %d", ver);
+		exit(1);
+	}
+
+	(void) close(fd);
+
+	*isactive = (ret == 0);
+
+	return (0);
+}
+#else
 static int
 pool_active(void *unused, const char *name, uint64_t guid,
     boolean_t *isactive)
 {
-	zfs_cmd_t *zcp;
-	nvlist_t *innvl;
-	char *packed = NULL;
-	size_t size = 0;
-	int fd, ret;
-
-	/*
-	 * Use ZFS_IOC_POOL_SYNC to confirm if a pool is active
-	 */
-
-	fd = open(ZFS_DEV, O_RDWR | O_CLOEXEC);
+	(void) unused, (void) guid;
+	int fd = open(ZFS_DEV, O_RDWR | O_CLOEXEC);
 	if (fd < 0)
 		return (-1);
 
-	zcp = umem_zalloc(sizeof (zfs_cmd_t), UMEM_NOFAIL);
-
-	innvl = fnvlist_alloc();
-	fnvlist_add_boolean_value(innvl, "force", B_FALSE);
-
+	/*
+	 * Use ZFS_IOC_POOL_STATS to check if a pool is active.
+	 */
+	zfs_cmd_t *zcp = umem_zalloc(sizeof (zfs_cmd_t), UMEM_NOFAIL);
 	(void) strlcpy(zcp->zc_name, name, sizeof (zcp->zc_name));
-	packed = fnvlist_pack(innvl, &size);
-	zcp->zc_nvlist_src = (uint64_t)(uintptr_t)packed;
-	zcp->zc_nvlist_src_size = size;
 
-	ret = zfs_ioctl_fd(fd, ZFS_IOC_POOL_SYNC, zcp);
+	int ret = ioctl(fd, ZFS_IOC_POOL_STATS, zcp);
 
-	fnvlist_pack_free(packed, size);
 	free((void *)(uintptr_t)zcp->zc_nvlist_dst);
-	nvlist_free(innvl);
 	umem_free(zcp, sizeof (zfs_cmd_t));
 
 	(void) close(fd);
@@ -288,8 +377,9 @@ pool_active(void *unused, const char *name, uint64_t guid,
 
 	return (0);
 }
+#endif
 
-const pool_config_ops_t libzpool_config_ops = {
+pool_config_ops_t libzpool_config_ops = {
 	.pco_refresh_config = refresh_config,
 	.pco_pool_active = pool_active,
 };

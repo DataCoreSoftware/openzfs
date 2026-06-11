@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * This file is part of the ZFS Event Daemon (ZED).
  *
@@ -28,7 +29,11 @@
 /*
  * Absolute path for the default zed zedlet directory.
  */
+#ifdef _WIN32
+#define	ZED_ZEDLET_DIR		SYSCONFDIR "/zed.d"
+#else
 #define	ZED_ZEDLET_DIR		SYSCONFDIR "/zfs/zed.d"
+#endif
 
 /*
  * String prefix for ZED variables passed via environment variables.

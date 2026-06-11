@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -63,7 +64,7 @@ bench_fini_raidz_maps(void)
 {
 	/* tear down golden zio */
 	raidz_free(zio_bench.io_abd, max_data_size);
-	bzero(&zio_bench, sizeof (zio_t));
+	memset(&zio_bench, 0, sizeof (zio_t));
 }
 
 static inline void
@@ -84,10 +85,10 @@ run_gen_bench_impl(const char *impl)
 
 			if (rto_opts.rto_expand) {
 				rm_bench = vdev_raidz_map_alloc_expanded(
-				    zio_bench.io_abd,
-				    zio_bench.io_size, zio_bench.io_offset,
+				    &zio_bench,
 				    rto_opts.rto_ashift, ncols+1, ncols,
-				    fn+1, rto_opts.rto_expand_offset);
+				    fn+1, rto_opts.rto_expand_offset,
+				    0, B_FALSE);
 			} else {
 				rm_bench = vdev_raidz_map_alloc(&zio_bench,
 				    BENCH_ASHIFT, ncols, fn+1);
@@ -172,10 +173,10 @@ run_rec_bench_impl(const char *impl)
 
 			if (rto_opts.rto_expand) {
 				rm_bench = vdev_raidz_map_alloc_expanded(
-				    zio_bench.io_abd,
-				    zio_bench.io_size, zio_bench.io_offset,
+				    &zio_bench,
 				    BENCH_ASHIFT, ncols+1, ncols,
-				    PARITY_PQR, rto_opts.rto_expand_offset);
+				    PARITY_PQR,
+				    rto_opts.rto_expand_offset, 0, B_FALSE);
 			} else {
 				rm_bench = vdev_raidz_map_alloc(&zio_bench,
 				    BENCH_ASHIFT, ncols, PARITY_PQR);

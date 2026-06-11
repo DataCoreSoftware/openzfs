@@ -22,6 +22,8 @@
 #ifndef _SPL_MOUNT_H
 #define	_SPL_MOUNT_H
 
+#include <sys/list.h>
+
 #define	MNT_WAIT	1	/* synchronized I/O file integrity completion */
 #define	MNT_NOWAIT	2	/* start all I/O, but do not wait for it */
 
@@ -54,6 +56,8 @@
 #define	MNT_FORCE	0x00080000 /* force unmount or readonly change */
 #define	MNT_CMDFLAGS	(MNT_UPDATE|MNT_NOBLOCK|MNT_RELOAD|MNT_FORCE)
 
+#define	MNT_UNMOUNTING	0x80000000 /* process of unmounting */
+
 #define	MNT_UNKNOWNPERMISSIONS MNT_IGNORE_OWNERSHIP
 
 #define	MFSTYPENAMELEN	16
@@ -81,47 +85,83 @@ struct vfsstatfs {
 };
 
 typedef enum _FSD_IDENTIFIER_TYPE {
-	MOUNT_TYPE_DGL = ':DGL', // Dokan Global
+	MOUNT_TYPE_DGL = ':DGL', // Global
+	MOUNT_TYPE_BUS = ':BUS', // Bus Control
 	MOUNT_TYPE_DCB = ':DCB', // Disk Control Block
 	MOUNT_TYPE_VCB = ':VCB', // Volume Control Block
 	MOUNT_TYPE_FCB = ':FCB', // File Control Block
 	MOUNT_TYPE_CCB = ':CCB', // Context Control Block
+	MOUNT_TYPE_VSS = ':VSS', // VSS snapshot device
 } FSD_IDENTIFIER_TYPE;
 
-typedef enum mount_type mount_type_t;
+// typedef enum mount_type mount_type_t;
 
 struct mount
 {
 	FSD_IDENTIFIER_TYPE type;
 	ULONG size;
+	const unsigned char *ascii_name;
 	void *fsprivate;
 	void *parent_device; // Only set so vcd can find dcb
-	PDEVICE_OBJECT deviceObject;
-	PDEVICE_OBJECT diskDeviceObject;
+	uuid_t rawuuid;
+	PDEVICE_OBJECT PhysicalDeviceObject; // From AddDevices
+	PDEVICE_OBJECT LowerDeviceObject; // Attaching PDO in AddDevices
+	PDEVICE_OBJECT FunctionalDeviceObject; // Created in AddDevices
+	PDEVICE_OBJECT VolumeDeviceObject;
+	PDEVICE_OBJECT AttachedDevice;
 	UNICODE_STRING bus_name;
 	UNICODE_STRING device_name;
 	UNICODE_STRING symlink_name;
+	UNICODE_STRING arc_name;
 	UNICODE_STRING fs_name;
 	UNICODE_STRING name;
 	UNICODE_STRING uuid;
 	UNICODE_STRING mountpoint;
+	UNICODE_STRING dosdevices_mountpoint;
+	UNICODE_STRING deviceInterfaceName;
+	UNICODE_STRING fsInterfaceName;
+	UNICODE_STRING volumeInterfaceName;
+	UNICODE_STRING MountMgr_name;
+	UNICODE_STRING MountMgr_mountpoint;
+	const char *mounted_on;
+	PFILE_OBJECT root_file;
 	boolean_t justDriveLetter;
 	uint64_t volume_opens;
 	PVPB vpb;
 
 	uint64_t mountflags;
 
+	KEVENT volume_removed_event;
+	KEVENT volume_adddevice_event; // Until AddDevice is called
+	KEVENT volume_mounted_event; // Until full mount is done.
+
+	// Linked list of mounts
+	list_node_t mount_node;
+
 	// NotifySync is used by notify directory change
 	PNOTIFY_SYNC NotifySync;
 	LIST_ENTRY DirNotifyList;
+
+	/* VSS snapshot lazy-mount fields (type == MOUNT_TYPE_VSS only) */
+	uint64_t	vss_guid;
+	uint64_t	vss_creation;	/* Unix creation timestamp */
+	char		vss_snapname[256]; /* ZFS_MAX_DATASET_NAME_LEN */
+	KMUTEX		vss_mount_lock;    /* serialise first-access mount */
 };
 typedef struct mount mount_t;
 typedef struct mount vfsp_t;
-#define	LK_NOWAIT 1
+#define	LK_NOWAIT	(1<<0)
+#define	LK_UPGRADE	(1<<1)
+
+int spl_vfs_init(void);
+void spl_vfs_fini(void);
 
 int   vfs_busy(mount_t *mp, int flags);
 void  vfs_unbusy(mount_t *mp);
 int   vfs_isrdonly(mount_t *mp);
+void  vfs_setrdonly(mount_t *mp);
+void  vfs_clearrdonly(mount_t *mp);
+
 void *vfs_fsprivate(mount_t *mp);
 void  vfs_setfsprivate(mount_t *mp, void *mntdata);
 void  vfs_clearflags(mount_t *mp, uint64_t flags);
@@ -134,5 +174,16 @@ void  vfs_getnewfsid(struct mount *mp);
 int   vfs_isunmount(mount_t *mp);
 int	  vfs_iswriteupgrade(mount_t *mp);
 void  vfs_setextendedsecurity(mount_t *mp);
+
+void vfs_mount_add(mount_t *mp);
+void vfs_mount_remove(mount_t *mp);
+int vfs_mount_count(void);
+void vfs_mount_setarray(void **array, int max);
+void vfs_mount_iterate(int (*func)(void *, void *), void *);
+boolean_t vfs_mount_member(void *member);
+void vfs_set_mountedon(mount_t *mp, char *rootpath);
+const char *vfs_mountedon(mount_t *mp);
+mount_t *vfs_has_mount(const char *rpath);
+
 
 #endif /* SPL_MOUNT_H */

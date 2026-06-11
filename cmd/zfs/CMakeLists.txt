@@ -11,7 +11,6 @@ um_add_executable(zfs
 )
 target_link_libraries(zfs PRIVATE
 	libnvpair
-	libuutil
 	libzfs
 	libzfs_core
 	libzpool

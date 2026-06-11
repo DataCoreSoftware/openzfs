@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -58,7 +59,7 @@ log_assert "Reservation properties preserved across exports and imports"
 function cleanup
 {
 	for obj in $OBJ_LIST; do
-                datasetexists $obj && log_must zfs destroy -f $obj
+                datasetexists $obj && destroy_dataset $obj -f
         done
 
 	log_must zero_reservation $TESTPOOL/$TESTFS
@@ -72,8 +73,6 @@ log_must zfs create $TESTPOOL/$TESTFS1
 log_must zfs create $TESTPOOL/$TESTFS1/$TESTFS2
 
 space_avail=$(get_prop available $TESTPOOL)
-[[ $? -ne 0 ]] && \
-    log_fail "Unable to get space available property for $TESTPOOL"
 
 typeset -il resv_set=space_avail/5
 resv_set=$(floor_volsize $resv_set)
@@ -91,7 +90,7 @@ log_must zfs set reservation=$resv_set $TESTPOOL/$TESTFS1
 log_must zfs set reservation=$resv_set $TESTPOOL/$TESTFS1/$TESTFS2
 log_must zfs set reservation=$resv_set $TESTPOOL/$TESTVOL2
 
-log_must zpool export $TESTPOOL
+log_must_busy zpool export $TESTPOOL
 log_must zpool import $TESTPOOL
 
 for obj in $TESTPOOL/$TESTFS $OBJ_LIST; do

@@ -1,5 +1,6 @@
-# This is a script with common functions etc used by zfs-import, zfs-mount,
-# zfs-share and zfs-zed.
+# SPDX-License-Identifier: BSD-2-Clause
+# This is a script with common functions etc used by zfs-import, zfs-load-key,
+# zfs-mount, zfs-share and zfs-zed.
 #
 # It is _NOT_ to be called independently
 #
@@ -25,13 +26,13 @@ fi
 # Of course the functions we need are called differently
 # on different distributions - it would be way too easy
 # otherwise!!
-if type log_failure_msg > /dev/null 2>&1 ; then
+if command -v log_failure_msg > /dev/null 2>&1 ; then
 	# LSB functions - fall through
 	zfs_log_begin_msg() { log_begin_msg "$1"; }
 	zfs_log_end_msg() { log_end_msg "$1"; }
 	zfs_log_failure_msg() { log_failure_msg "$1"; }
 	zfs_log_progress_msg() { log_progress_msg "$1"; }
-elif type success > /dev/null 2>&1 ; then
+elif command -v success > /dev/null 2>&1 ; then
 	# Fedora/RedHat functions
 	zfs_set_ifs() {
 		# For some reason, the init function library have a problem
@@ -46,6 +47,7 @@ elif type success > /dev/null 2>&1 ; then
 
 	zfs_log_begin_msg() { printf "%s" "$1 "; }
 	zfs_log_end_msg() {
+		# shellcheck disable=SC2154
 		zfs_set_ifs "$OLD_IFS"
 		if [ "$1" -eq 0 ]; then
 			success
@@ -62,7 +64,7 @@ elif type success > /dev/null 2>&1 ; then
 		zfs_set_ifs "$TMP_IFS"
 	}
 	zfs_log_progress_msg() { printf "%s" "$""$1"; }
-elif type einfo > /dev/null 2>&1 ; then
+elif command -v einfo > /dev/null 2>&1 ; then
 	# Gentoo functions
 	zfs_log_begin_msg() { ebegin "$1"; }
 	zfs_log_end_msg() { eend "$1"; }
@@ -92,6 +94,8 @@ ZPOOL="@sbindir@/zpool"
 ZPOOL_CACHE="@sysconfdir@/zfs/zpool.cache"
 
 # Sensible defaults
+ZFS_LOAD_KEY='yes'
+ZFS_UNLOAD_KEY='no'
 ZFS_MOUNT='yes'
 ZFS_UNMOUNT='yes'
 ZFS_SHARE='yes'
@@ -104,7 +108,8 @@ fi
 
 # ----------------------------------------------------
 
-export ZFS ZED ZPOOL ZPOOL_CACHE ZFS_MOUNT ZFS_UNMOUNT ZFS_SHARE ZFS_UNSHARE
+export ZFS ZED ZPOOL ZPOOL_CACHE ZFS_LOAD_KEY ZFS_UNLOAD_KEY ZFS_MOUNT ZFS_UNMOUNT \
+    ZFS_SHARE ZFS_UNSHARE ZFS_POOL_EXCEPTIONS ZFS_INITRD_ADDITIONAL_DATASETS
 
 zfs_action()
 {
@@ -116,12 +121,12 @@ zfs_action()
 	$CMD
 	ret=$?
 	if [ "$ret" -eq 0 ]; then
-		zfs_log_end_msg $ret
+		zfs_log_end_msg "$ret"
 	else
-		zfs_log_failure_msg $ret
+		zfs_log_failure_msg "$ret"
 	fi
 
-	return $ret
+	return "$ret"
 }
 
 # Returns
@@ -135,7 +140,7 @@ zfs_daemon_start()
 	local PIDFILE="$1";	shift
 	local DAEMON_BIN="$1";	shift
 
-	if type start-stop-daemon > /dev/null 2>&1 ; then
+	if command -v start-stop-daemon > /dev/null 2>&1 ; then
 		# LSB functions
 		start-stop-daemon --start --quiet --pidfile "$PIDFILE" \
 		    --exec "$DAEMON_BIN" --test > /dev/null || return 1
@@ -152,7 +157,7 @@ zfs_daemon_start()
 		then
 			ln -sf "$PIDFILE" /run/sendsigs.omit.d/zed
 		fi
-	elif type daemon > /dev/null 2>&1 ; then
+	elif command -v daemon > /dev/null 2>&1 ; then
 		# Fedora/RedHat functions
 		# shellcheck disable=SC2086
 		daemon --pidfile "$PIDFILE" "$DAEMON_BIN" "$@"
@@ -177,7 +182,7 @@ zfs_daemon_stop()
 	local DAEMON_BIN="$2"
 	local DAEMON_NAME="$3"
 
-	if type start-stop-daemon > /dev/null 2>&1 ; then
+	if command -v start-stop-daemon > /dev/null 2>&1 ; then
 		# LSB functions
 		start-stop-daemon --stop --quiet --retry=TERM/30/KILL/5 \
 		    --pidfile "$PIDFILE" --name "$DAEMON_NAME"
@@ -185,7 +190,7 @@ zfs_daemon_stop()
 		[ "$ret" = 0 ] && rm -f "$PIDFILE"
 
 		return "$ret"
-	elif type killproc > /dev/null 2>&1 ; then
+	elif command -v killproc > /dev/null 2>&1 ; then
 		# Fedora/RedHat functions
 		killproc -p "$PIDFILE" "$DAEMON_NAME"
 		ret="$?"
@@ -207,11 +212,11 @@ zfs_daemon_status()
 	local DAEMON_BIN="$2"
 	local DAEMON_NAME="$3"
 
-	if type status_of_proc > /dev/null 2>&1 ; then
+	if command -v status_of_proc > /dev/null 2>&1 ; then
 		# LSB functions
 		status_of_proc "$DAEMON_NAME" "$DAEMON_BIN"
 		return $?
-	elif type status > /dev/null 2>&1 ; then
+	elif command -v status > /dev/null 2>&1 ; then
 		# Fedora/RedHat functions
 		status -p "$PIDFILE" "$DAEMON_NAME"
 		return $?
@@ -228,12 +233,12 @@ zfs_daemon_reload()
 	local PIDFILE="$1"
 	local DAEMON_NAME="$2"
 
-	if type start-stop-daemon > /dev/null 2>&1 ; then
+	if command -v start-stop-daemon > /dev/null 2>&1 ; then
 		# LSB functions
 		start-stop-daemon --stop --signal 1 --quiet \
 		    --pidfile "$PIDFILE" --name "$DAEMON_NAME"
 		return $?
-	elif type killproc > /dev/null 2>&1 ; then
+	elif command -v killproc > /dev/null 2>&1 ; then
 		# Fedora/RedHat functions
 		killproc -p "$PIDFILE" "$DAEMON_NAME" -HUP
 		return $?
@@ -345,7 +350,7 @@ read_mtab()
 
 	# Unset all MTAB_* variables
 	# shellcheck disable=SC2046
-	unset $(env | grep ^MTAB_ | sed 's,=.*,,')
+	unset $(env | sed -e '/^MTAB_/!d' -e 's,=.*,,')
 
 	while read -r fs mntpnt fstype opts rest; do
 		if echo "$fs $mntpnt $fstype $opts" | grep -qE "$match"; then
@@ -360,9 +365,8 @@ read_mtab()
 			fs=$(/bin/echo "$fs" | sed 's,\\0,\\00,')
 
 			# Remove 'unwanted' characters.
-			mntpnt=$(printf '%b\n' "$mntpnt" | sed -e 's,/,,g' \
-			    -e 's,-,,g' -e 's,\.,,g' -e 's, ,,g')
-			fs=$(printf '%b\n' "$fs")
+			mntpnt=$(printf '%b' "$mntpnt" | tr -d '/. -')
+			fs=$(printf '%b' "$fs")
 
 			# Set the variable.
 			eval export "MTAB_$mntpnt=\"$fs\""
@@ -374,8 +378,7 @@ in_mtab()
 {
 	local mntpnt="$1"
 	# Remove 'unwanted' characters.
-	mntpnt=$(printf '%b\n' "$mntpnt" | sed -e 's,/,,g' \
-	    -e 's,-,,g' -e 's,\.,,g' -e 's, ,,g')
+	mntpnt=$(printf '%b' "$mntpnt" | tr -d '/. -')
 	local var
 
 	var="$(eval echo "MTAB_$mntpnt")"
@@ -391,7 +394,7 @@ read_fstab()
 
 	# Unset all FSTAB_* variables
 	# shellcheck disable=SC2046
-	unset $(env | grep ^FSTAB_ | sed 's,=.*,,')
+	unset $(env | sed -e '/^FSTAB_/!d' -e 's,=.*,,')
 
 	i=0
 	while read -r fs mntpnt fstype opts; do
@@ -401,7 +404,7 @@ read_fstab()
 
 		if echo "$fs $mntpnt $fstype $opts" | grep -qE "$match"; then
 			eval export "FSTAB_dev_$i=$fs"
-			fs=$(printf '%b\n' "$fs" | sed 's,/,_,g')
+			fs=$(printf '%b' "$fs" | tr '/' '_')
 			eval export "FSTAB_$i=$mntpnt"
 
 			i=$((i + 1))

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -108,15 +109,15 @@ report_dnode(dmu_diffarg_t *da, uint64_t object, dnode_phys_t *dnp)
 	(((uint64_t)dnp->dn_datablkszsec) << (SPA_MINBLOCKSHIFT + \
 	(level) * (dnp->dn_indblkshift - SPA_BLKPTRSHIFT)))
 
-/* ARGSUSED */
 static int
 diff_cb(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
     const zbookmark_phys_t *zb, const dnode_phys_t *dnp, void *arg)
 {
+	(void) zilog;
 	dmu_diffarg_t *da = arg;
 	int err = 0;
 
-	if (issig(JUSTLOOKING) && issig(FORREAL))
+	if (issig())
 		return (SET_ERROR(EINTR));
 
 	if (zb->zb_level == ZB_DNODE_LEVEL ||
@@ -223,8 +224,8 @@ dmu_diff(const char *tosnap_name, const char *fromsnap_name,
 	 * call the ZFS_IOC_OBJ_TO_STATS ioctl.
 	 */
 	error = traverse_dataset(tosnap, fromtxg,
-	    TRAVERSE_PRE | TRAVERSE_PREFETCH_METADATA | TRAVERSE_NO_DECRYPT,
-	    diff_cb, &da);
+	    TRAVERSE_PRE | TRAVERSE_PREFETCH_METADATA | TRAVERSE_NO_DECRYPT |
+	    TRAVERSE_LOGICAL, diff_cb, &da);
 
 	if (error != 0) {
 		da.da_err = error;

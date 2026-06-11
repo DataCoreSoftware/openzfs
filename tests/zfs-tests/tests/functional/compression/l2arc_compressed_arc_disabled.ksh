@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -52,6 +53,8 @@ export DIRECT=1
 
 verify_runnable "global"
 
+command -v fio > /dev/null || log_unsupported "fio missing"
+
 log_assert "L2ARC with compressed_arc disabled succeeds."
 
 origin_carc_setting=$(get_tunable COMPRESSED_ARC_ENABLED)
@@ -81,12 +84,12 @@ log_must truncate -s ${cache_sz}M $VDEV_CACHE
 
 log_must zpool create -O compression=lz4 -f $TESTPOOL-l2arc $VDEV cache $VDEV_CACHE
 
-l2_cksum_bad_start=$(get_arcstat l2_cksum_bad)
+l2_cksum_bad_start=$(kstat arcstats.l2_cksum_bad)
 
 log_must fio $FIO_SCRIPTS/mkfiles.fio
 log_must fio $FIO_SCRIPTS/random_reads.fio
 
-l2_cksum_bad_end=$(get_arcstat l2_cksum_bad)
+l2_cksum_bad_end=$(kstat arcstats.l2_cksum_bad)
 
 log_note "L2ARC Failed Checksums before: $l2_cksum_bad_start After:"\
 	"$l2_cksum_bad_end"

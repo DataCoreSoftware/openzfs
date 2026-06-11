@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -34,8 +35,9 @@
 #include <sys/sysmacros.h>
 #include <sys/zio_compress.h>
 
-size_t
-zle_compress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
+static size_t
+zfs_zle_compress_buf(void *s_start, void *d_start, size_t s_len,
+    size_t d_len, int n)
 {
 	uchar_t *src = s_start;
 	uchar_t *dst = d_start;
@@ -64,8 +66,9 @@ zle_compress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
 	return (src == s_end ? dst - (uchar_t *)d_start : s_len);
 }
 
-int
-zle_decompress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
+static int
+zfs_zle_decompress_buf(void *s_start, void *d_start, size_t s_len,
+    size_t d_len, int n)
 {
 	uchar_t *src = s_start;
 	uchar_t *dst = d_start;
@@ -89,3 +92,6 @@ zle_decompress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
 	}
 	return (dst == d_end ? 0 : -1);
 }
+
+ZFS_COMPRESS_WRAP_DECL(zfs_zle_compress)
+ZFS_DECOMPRESS_WRAP_DECL(zfs_zle_decompress)

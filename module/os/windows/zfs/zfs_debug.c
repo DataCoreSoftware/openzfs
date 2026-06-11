@@ -29,15 +29,16 @@
 typedef struct zfs_dbgmsg {
 	list_node_t zdm_node;
 	time_t zdm_timestamp;
-	int zdm_size;
+	uint_t zdm_size;
 	char zdm_msg[1]; /* variable length allocation */
 } zfs_dbgmsg_t;
 
 list_t zfs_dbgmsgs;
-int zfs_dbgmsg_size;
+uint_t zfs_dbgmsg_size;
 kmutex_t zfs_dbgmsgs_lock;
-int zfs_dbgmsg_maxsize = 4<<20; /* 4MB */
+static uint_t zfs_dbgmsg_maxsize = 4<<20; /* 4MB */
 kstat_t *zfs_dbgmsg_kstat;
+static boolean_t zfs_dbgmsg_inited = FALSE;
 
 int zfs_dbgmsg_enable = 1;
 
@@ -76,10 +77,10 @@ zfs_dbgmsg_addr(kstat_t *ksp, loff_t n)
 }
 
 static void
-zfs_dbgmsg_purge(int max_size)
+zfs_dbgmsg_purge(uint_t max_size)
 {
 	zfs_dbgmsg_t *zdm;
-	int size;
+	uint_t size;
 
 	ASSERT(MUTEX_HELD(&zfs_dbgmsgs_lock));
 
@@ -127,6 +128,8 @@ zfs_dbgmsg_init(void)
 		    zfs_dbgmsg_data, zfs_dbgmsg_addr);
 		kstat_install(zfs_dbgmsg_kstat);
 	}
+
+	zfs_dbgmsg_inited = TRUE;
 }
 
 void
@@ -156,8 +159,9 @@ __set_error(const char *file, const char *func, int line, int err)
 	 */
 	if (zfs_flags & ZFS_DEBUG_SET_ERROR)
 		__dprintf(B_FALSE, file, func, line, "error %lu", err);
-
+#ifdef _KERNEL
 	TraceEvent(5, "%s:%s Line:%d Error:%d", file, func, line, err);
+#endif
 }
 
 /*
@@ -180,7 +184,11 @@ __set_error(const char *file, const char *func, int line, int err)
 noinline void
 __zfs_dbgmsg(char *buf)
 {
-	int size = sizeof (zfs_dbgmsg_t) + strlen(buf);
+
+	if (!zfs_dbgmsg_inited)
+		return;
+
+	uint_t size = sizeof (zfs_dbgmsg_t) + strlen(buf);
 	zfs_dbgmsg_t *zdm = kmem_zalloc(size, KM_SLEEP);
 	zdm->zdm_size = size;
 	zdm->zdm_timestamp = gethrestime_sec();
@@ -189,7 +197,7 @@ __zfs_dbgmsg(char *buf)
 	mutex_enter(&zfs_dbgmsgs_lock);
 	list_insert_tail(&zfs_dbgmsgs, zdm);
 	zfs_dbgmsg_size += size;
-	zfs_dbgmsg_purge(MAX(zfs_dbgmsg_maxsize, 0));
+	zfs_dbgmsg_purge(zfs_dbgmsg_maxsize);
 	mutex_exit(&zfs_dbgmsgs_lock);
 }
 
@@ -200,7 +208,7 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 {
 	int size, i;
 	va_list adx;
-	char *buf, *nl;
+	char buf[1024], *nl;
 	char *prefix = (dprint) ? "dprintf: " : "";
 	const char *newfile;
 
@@ -226,7 +234,7 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 	} else {
 		newfile = file;
 	}
-
+#if 0
 	va_start(adx, fmt);
 	size = vsnprintf(NULL, 0, fmt, adx);
 	va_end(adx);
@@ -235,18 +243,20 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 	    func);
 
 	size++; /* null byte in the "buf" string */
-
 	/*
 	 * There is one byte of string in sizeof (zfs_dbgmsg_t), used
 	 * for the terminating null.
 	 */
 	buf = kmem_alloc(size, KM_SLEEP);
+#endif
 	int roger = 0;
+	size = sizeof (buf) - 1;
 
 	va_start(adx, fmt);
 	i = snprintf(buf, size + 1, "%s%s:%d:%s(): ",
 	    prefix, newfile, line, func);
-	roger = vsnprintf(buf + i, size -i + 1, fmt, adx);
+	if (i > 0)
+		roger = vsnprintf(buf + i, size -i + 1, fmt, adx);
 	va_end(adx);
 
 	/*
@@ -260,12 +270,12 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 
 	DTRACE_PROBE1(zfs__dbgmsg, char *, zdm->zdm_msg);
 
-	__zfs_dbgmsg(buf);
+	// __zfs_dbgmsg(buf);
 
 	/* Also emit string to log/console */
 	printBuffer("%s\n", buf);
 
-	kmem_free(buf, size);
+	// kmem_free(buf, size);
 }
 
 #else
@@ -275,8 +285,9 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 #endif
 
 void
-zfs_dbgmsg_print(const char *tag)
+zfs_dbgmsg_print(int id, const char *tag)
 {
+	(void) id;
 	zfs_dbgmsg_t *zdm;
 
 	(void) printBuffer("ZFS_DBGMSG(%s):\n", tag);
@@ -286,3 +297,12 @@ zfs_dbgmsg_print(const char *tag)
 		(void) printBuffer("%s\n", zdm->zdm_msg);
 	mutex_exit(&zfs_dbgmsgs_lock);
 }
+
+// Sadly, the linker_set.h and mod_os.h work for
+// clang, but not MSVC, so can not be defined in
+// debug.c for now. One day we'll figure out the
+// use of __pragma(data_seg(push, ".")) to make it work.
+extern uchar_t *zfs_cbuf_save;
+extern int param_cbuf_save(ZFS_MODULE_PARAM_ARGS);
+ZFS_MODULE_PARAM_CALL(, zfs_, cbuf_save, param_cbuf_save,
+    param_get_charp, ZMOD_RW, "OpenZFS debug buffer");

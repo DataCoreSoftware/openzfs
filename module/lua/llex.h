@@ -1,4 +1,4 @@
-/* BEGIN CSTYLED */
+// SPDX-License-Identifier: MIT
 /*
 ** $Id: llex.h,v 1.72.1.1 2013/04/12 18:48:47 roberto Exp $
 ** Lexical Analyzer
@@ -80,4 +80,3 @@ LUAI_FUNC const char *luaX_token2str (LexState *ls, int token);
 
 
 #endif
-/* END CSTYLED */

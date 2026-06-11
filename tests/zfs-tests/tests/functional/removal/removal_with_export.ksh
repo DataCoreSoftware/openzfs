@@ -1,4 +1,5 @@
 #! /bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -22,6 +23,7 @@
 . $STF_SUITE/tests/functional/removal/removal.kshlib
 
 default_setup_noexit "$DISKS"
+log_must zfs set compression=off $TESTPOOL
 log_onexit default_cleanup_noexit
 
 function callback

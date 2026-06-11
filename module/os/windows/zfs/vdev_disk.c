@@ -32,6 +32,7 @@
 #include <sys/abd_impl.h>
 #include <sys/fs/zfs.h>
 #include <sys/zio.h>
+#include <sys/dkio.h>
 
 #include <ntdddisk.h>
 #include <Ntddstor.h>
@@ -42,11 +43,14 @@
  */
 
 
-wchar_t zfs_vdev_protection_filter[64] = { L"\0" };
+wchar_t zfs_vdev_protection_filter[ZFS_MODULE_STRMAX] = { L"\0" };
 
 static void vdev_disk_close(vdev_t *);
+static void vdev_disk_io_start_done(__in PVOID pDummy, __in PVOID pWkParms);
 
 extern void UnlockAndFreeMdl(PMDL);
+
+extern _Atomic uint64_t spl_lowest_vdev_disk_stack_remaining = 0;
 
 static void
 vdev_disk_alloc(vdev_t *vd)
@@ -96,6 +100,89 @@ static void disk_exclusive(DEVICE_OBJECT *device, boolean_t excl)
 
 }
 
+static NTSTATUS
+utf16_to_utf8(_In_reads_(cch) const WCHAR *w, SIZE_T cch, _Outptr_ char **out)
+{
+	ULONG bytes = 0;
+	NTSTATUS st = RtlUnicodeToUTF8N(NULL, 0, &bytes, w,
+	    (ULONG)(cch * sizeof (WCHAR)));
+	if (!NT_SUCCESS(st) || bytes == 0)
+		return (st ? st : STATUS_UNSUCCESSFUL);
+	char *buf = ExAllocatePoolWithTag(PagedPool, bytes + 1, 'pfZS');
+	if (!buf)
+		return (STATUS_INSUFFICIENT_RESOURCES);
+
+	st = RtlUnicodeToUTF8N(buf, bytes, &bytes, w,
+	    (ULONG)(cch * sizeof (WCHAR)));
+	if (!NT_SUCCESS(st)) {
+		ExFreePoolWithTag(buf, 'pfZS');
+		return (st);
+	}
+	buf[bytes] = '\0';
+	*out = buf;
+	return (STATUS_SUCCESS);
+}
+
+
+// devobj: the device object you already have for this PhysicalDrive
+// out_utf8: returns a UTF-8 \??\...#{GUID_DEVINTERFACE_DISK} link
+static NTSTATUS
+zfs_win_interface_link_from_devobj(_In_ PDEVICE_OBJECT devobj,
+    _Outptr_ char **out_utf8)
+{
+	*out_utf8 = NULL;
+
+	// Base of the stack you're holding
+	PDEVICE_OBJECT base = IoGetDeviceAttachmentBaseRef(devobj);
+	if (!base)
+		return (STATUS_NO_SUCH_DEVICE);
+
+	// Enumerate all disk interfaces
+	PWSTR links = NULL;
+	NTSTATUS st = IoGetDeviceInterfaces(&GUID_DEVINTERFACE_DISK, NULL, 0,
+	    &links);
+	if (!NT_SUCCESS(st) || !links) {
+		ObDereferenceObject(base);
+		return (st ? st : STATUS_NOT_FOUND);
+	}
+
+	// Walk MULTI_SZ
+	for (PWSTR p = links; p && *p; p += wcslen(p) + 1) {
+		UNICODE_STRING us;
+		RtlInitUnicodeString(&us, p);
+
+		PFILE_OBJECT ifo = NULL;
+		PDEVICE_OBJECT itop = NULL;
+		st = IoGetDeviceObjectPointer(&us, FILE_READ_ATTRIBUTES, &ifo,
+		    &itop);
+		if (NT_SUCCESS(st)) {
+			PDEVICE_OBJECT ibase =
+			    IoGetDeviceAttachmentBaseRef(itop);
+			if (ibase == base) {
+				// match > convert 'p' to UTF-8 and return
+				char *utf8 = NULL;
+				NTSTATUS st2 = utf16_to_utf8(p, wcslen(p),
+				    &utf8);
+				ObDereferenceObject(ibase);
+				ObDereferenceObject(ifo);
+				if (NT_SUCCESS(st2)) {
+					*out_utf8 = utf8;
+					ExFreePool(links);
+					ObDereferenceObject(base);
+					return (STATUS_SUCCESS);
+				}
+				// else, keep searching
+			} else {
+				ObDereferenceObject(ibase);
+				ObDereferenceObject(ifo);
+			}
+		}
+	}
+
+	ExFreePool(links);
+	ObDereferenceObject(base);
+	return (STATUS_NOT_FOUND);
+}
 
 /*
  * We want to be loud in DEBUG kernels when DKIOCGMEDIAINFOEXT fails, or when
@@ -117,6 +204,8 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	uint64_t capacity = 0, blksz = 0, pbsize = 0;
 	int isssd;
 	char *vdev_path = NULL;
+	uint8_t *FileName = NULL;
+	uint32_t FileLength;
 
 	PAGED_CODE();
 
@@ -162,8 +251,6 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	 * specified path.
 	 */
 	NTSTATUS ntstatus;
-	uint8_t *FileName = NULL;
-	uint32_t FileLength;
 
 	// Use vd->vdev_physpath first, if set, otherwise
 	// usual vd->vdev_path
@@ -204,6 +291,14 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 		FileName[1] = '?';
 	}
 
+	// Forward-slash form "//?/" stored for Unix compat; convert to "\??\"
+	if (strncmp("//?/", FileName, 4) == 0) {
+		FileName[0] = '\\';
+		FileName[1] = '?';
+		FileName[2] = '?';
+		FileName[3] = '\\';
+	}
+
 	dprintf("%s: opening '%s'\n", __func__, FileName);
 
 	ANSI_STRING AnsiFilespec;
@@ -240,15 +335,14 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	IO_STATUS_BLOCK iostatus;
 
 	ntstatus = ZwCreateFile(&dvd->vd_lh,
-	    spa_mode(spa) == SPA_MODE_READ ? GENERIC_READ | SYNCHRONIZE :
-	    GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
+	    spa_mode(spa) == SPA_MODE_READ ? GENERIC_READ :
+	    GENERIC_READ | GENERIC_WRITE,
 	    &ObjectAttributes,
 	    &iostatus,
 	    0,
 	    FILE_ATTRIBUTE_NORMAL,
 	    FILE_SHARE_WRITE | FILE_SHARE_READ,
 	    FILE_OPEN,
-	    FILE_SYNCHRONOUS_IO_NONALERT |
 	    (spa_mode(spa) == SPA_MODE_READ ? 0 :
 	    FILE_NO_INTERMEDIATE_BUFFERING),
 	    NULL,
@@ -408,8 +502,12 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	ObReferenceObject(dvd->vd_DeviceObject);
 
 	// Make disk readonly and offline, so that users can't
-	// partition/format it.
-	if (vd->vdev_wholedisk)
+	// partition/format it.  Only do this for whole-disk vdevs opened
+	// via the #offset#len# path (dvd->vdev_win_offset > 0); for
+	// HarddiskNPartitionM paths the open handle is sufficient
+	// protection and disk_exclusive would offline the disk via partmgr,
+	// surprise-removing partition volume devices.
+	if (vd->vdev_wholedisk && dvd->vdev_win_offset > 0)
 		disk_exclusive(dvd->vd_ExclusiveObject, TRUE);
 	spa_strfree(vdev_path);
 
@@ -477,6 +575,49 @@ skip_open:
 	dprintf("%s: nonrot %d, trim %d, securetrim %d\n", __func__,
 	    vd->vdev_nonrot, vd->vdev_has_trim, vd->vdev_has_securetrim);
 
+	// Now check if the FileName is PHYSICALDRIVEx, then fix it
+	if (FileName != NULL &&
+	    FileName[0] == '\\' &&
+	    FileName[1] == '?' &&
+	    FileName[2] == '?' &&
+	    FileName[3] == '\\' &&
+	    toupper(FileName[4]) == 'P' &&
+	    toupper(FileName[5]) == 'H' &&
+	    toupper(FileName[6]) == 'Y' &&
+	    toupper(FileName[7]) == 'S' &&
+	    toupper(FileName[8]) == 'I' &&
+	    toupper(FileName[9]) == 'C' &&
+	    toupper(FileName[10]) == 'A' &&
+	    toupper(FileName[11]) == 'L' &&
+	    toupper(FileName[12]) == 'D' &&
+	    toupper(FileName[13]) == 'R' &&
+	    toupper(FileName[14]) == 'I' &&
+	    toupper(FileName[15]) == 'V' &&
+	    toupper(FileName[16]) == 'E' &&
+	    spa_mode(spa) != SPA_MODE_READ) {
+		char *iface = NULL;
+		if (NT_SUCCESS(zfs_win_interface_link_from_devobj(DeviceObject,
+		    &iface))) {
+
+			spa_strfree(vd->vdev_physpath);
+
+			if (dvd->vdev_win_offset || dvd->vdev_win_length)
+				vd->vdev_physpath =
+				    kmem_asprintf("#%llu#%llu#%s",
+				    dvd->vdev_win_offset, dvd->vdev_win_length,
+				    iface);
+			else
+				vd->vdev_physpath = spa_strdup(iface);
+
+			dprintf("converted physicaldrive '%s' to '%s'\n",
+			    FileName, vd->vdev_physpath);
+			spa_async_request(vd->vdev_spa,
+			    SPA_ASYNC_CONFIG_UPDATE);
+			ExFreePoolWithTag(iface, 'pfZS');
+		}
+	}
+
+
 	return (0);
 }
 
@@ -502,7 +643,7 @@ vdev_disk_close(vdev_t *vd)
 		dprintf("%s: \n", __func__);
 
 		// Undo disk readonly and offline.
-		if (vd->vdev_wholedisk)
+		if (vd->vdev_wholedisk && dvd->vdev_win_offset > 0)
 			disk_exclusive(dvd->vd_ExclusiveObject, FALSE);
 
 		// Release our holds
@@ -562,12 +703,42 @@ vdev_disk_ioctl_done(void *zio_arg, int error)
 	zio_interrupt(zio);
 }
 
+
+/*
+ * IO completion routine: runs at DPC/arbitrary-thread level.
+ * Cannot call mutex_enter() or any blocking primitive here.
+ * Queue a HyperCriticalWorkQueue work item so that vdev_disk_io_start_done()
+ * runs at PASSIVE_LEVEL where blocking is allowed.
+ *
+ * HyperCriticalWorkQueue is used (not CriticalWorkQueue) to prevent a
+ * thread-pool deadlock: do_write_job items occupy CriticalWorkQueue threads
+ * while blocking in txg_wait_synced_flags; the TXG sync thread is inside
+ * zio_wait waiting for THIS completion to fire.  If both share the same
+ * pool, no thread is ever free to run vdev_disk_io_start_done and the
+ * system deadlocks.  HyperCritical has its own reserved threads that
+ * cannot be starved by regular CriticalWorkQueue items.
+ */
+IO_COMPLETION_ROUTINE vdev_disk_io_intr;
+
+static NTSTATUS
+vdev_disk_io_intr(PDEVICE_OBJECT DeviceObject, PIRP irp, PVOID Context)
+{
+	zio_t *zio = (zio_t *)Context;
+
+	VERIFY3P(zio->windows.work_item, !=, NULL);
+	atomic_swap_32(&zio->windows.completion_called, 1);
+	IoQueueWorkItem(zio->windows.work_item,
+	    (PIO_WORKITEM_ROUTINE)vdev_disk_io_start_done,
+	    HyperCriticalWorkQueue, zio);
+	return (STATUS_MORE_PROCESSING_REQUIRED);
+}
+
 static void
 vdev_disk_io_start_done(__in PVOID pDummy, __in PVOID pWkParms)
 {
 	zio_t *zio = (zio_t *)pWkParms;
-	UNREFERENCED_PARAMETER(pDummy);
 
+	UNREFERENCED_PARAMETER(pDummy);
 	ASSERT(zio != NULL);
 
 	IoFreeWorkItem(zio->windows.work_item);
@@ -578,55 +749,18 @@ vdev_disk_io_start_done(__in PVOID pDummy, __in PVOID pWkParms)
 
 	UnlockAndFreeMdl(zio->windows.irp->MdlAddress);
 	IoFreeIrp(zio->windows.irp);
+	zio->windows.irp = NULL;
 
-	// Return abd buf
 	if (zio->io_type == ZIO_TYPE_READ) {
 		VERIFY3S(zio->io_abd->abd_size, >=, zio->io_size);
 		abd_return_buf_copy(zio->io_abd, zio->windows.b_addr,
 		    zio->io_size);
 	} else {
 		VERIFY3S(zio->io_abd->abd_size, >=, zio->io_size);
-		abd_return_buf(zio->io_abd, zio->windows.b_addr,
-		    zio->io_size);
+		abd_return_buf(zio->io_abd, zio->windows.b_addr, zio->io_size);
 	}
 
 	zio_delay_interrupt(zio);
-}
-
-/*
- * IO has finished callback, in Windows this is called as a different
- * IRQ level, so we can practically do nothing here. (Can't call mutex
- * locking, like from kmem_free())
- */
-IO_COMPLETION_ROUTINE vdev_disk_io_intr;
-
-static NTSTATUS
-vdev_disk_io_intr(PDEVICE_OBJECT DeviceObject, PIRP irp, PVOID Context)
-{
-	zio_t *zio = (zio_t *)Context;
-
-	ASSERT(zio != NULL);
-
-/*
- * Unfortunately:
- * Whatever thread happened to be running is "borrowed" to handle
- * the completion.
- * As about DPCs - in Windows, they are not bound to a thread,
- * KeGetCurrentThread is just nonsense in them.
- *
- * So, the whole Windows kernel framework just does not support the notion of
- * "current thread" in DPCs and thus completion routines.
- *
- * This means our call to "mutex_enter()" will "panic: lock against myself"
- * if that thread it "borrowed" is the actual owner thread.
- *
- * So schedule IoQueueWorkItem() to call the done function in a real context.
- */
-
-	VERIFY3P(zio->windows.work_item, !=, NULL);
-	IoQueueWorkItem(zio->windows.work_item, vdev_disk_io_start_done,
-	    DelayedWorkQueue, zio);
-	return (STATUS_MORE_PROCESSING_REQUIRED);
 }
 
 static void
@@ -653,7 +787,7 @@ vdev_disk_io_start(zio_t *zio)
 	}
 
 	switch (zio->io_type) {
-	case ZIO_TYPE_IOCTL:
+	case ZIO_TYPE_FLUSH:
 
 		if (!vdev_readable(vd)) {
 			zio->io_error = SET_ERROR(ENXIO);
@@ -661,46 +795,35 @@ vdev_disk_io_start(zio_t *zio)
 			return;
 		}
 
-		switch (zio->io_cmd) {
-		case DKIOCFLUSHWRITECACHE:
-
-			if (zfs_nocacheflush)
-				break;
-
-			if (vd->vdev_nowritecache) {
-				zio->io_error = SET_ERROR(ENOTSUP);
-				break;
-			}
-
-			zio->io_vsd = dkc = kmem_alloc(sizeof (*dkc), KM_SLEEP);
-			zio->io_vsd_ops = &vdev_disk_vsd_ops;
-
-			dkc->dkc_callback = vdev_disk_ioctl_done;
-//			dkc->dkc_flag = FLUSH_VOLATILE;
-			dkc->dkc_cookie = zio;
-
-			// Windows: find me
-//			error = ldi_ioctl(dvd->vd_lh, zio->io_cmd,
-//			    (uintptr_t)dkc, FKIOCTL, kcred, NULL);
-
-			if (error == 0) {
-				/*
-				 * The ioctl will be done asychronously,
-				 * and will call vdev_disk_ioctl_done()
-				 * upon completion.
-				 */
-				zio_execute(zio);  // until we have ioctl
-				return;
-			}
-
-			zio->io_error = error;
-
+		if (zfs_nocacheflush)
 			break;
 
-		default:
+		if (vd->vdev_nowritecache) {
 			zio->io_error = SET_ERROR(ENOTSUP);
-		} /* io_cmd */
+			break;
+		}
 
+		zio->io_vsd = dkc = kmem_alloc(sizeof (*dkc), KM_SLEEP);
+		zio->io_vsd_ops = &vdev_disk_vsd_ops;
+
+		dkc->dkc_callback = vdev_disk_ioctl_done;
+		dkc->dkc_cookie = zio;
+
+		// Windows: find me
+		// error = ldi_ioctl(dvd->vd_lh, zio->io_cmd,
+		// (uintptr_t)dkc, FKIOCTL, kcred, NULL);
+
+		if (error == 0) {
+			/*
+			 * The ioctl will be done asychronously,
+			 * and will call vdev_disk_ioctl_done()
+			 * upon completion.
+			 */
+			zio_execute(zio);  // until we have ioctl
+			return;
+		}
+
+		zio->io_error = error;
 		zio_execute(zio);
 		return;
 
@@ -721,7 +844,8 @@ vdev_disk_io_start(zio_t *zio)
 #endif
 		zio->io_error = -blkdev_issue_discard_bytes(
 		    dvd->vd_DeviceObject,
-		    zio->io_offset, zio->io_size, trim_flags);
+		    zio->io_offset + dvd->vdev_win_offset, zio->io_size,
+		    trim_flags);
 		zio_interrupt(zio);
 		return;
 
@@ -735,6 +859,14 @@ vdev_disk_io_start(zio_t *zio)
 
 	zio->io_target_timestamp = zio_handle_io_delay(zio);
 
+	const ULONG_PTR r = IoGetRemainingStackSize();
+
+	if (spl_lowest_vdev_disk_stack_remaining == 0) {
+		spl_lowest_vdev_disk_stack_remaining = r;
+	} else if (spl_lowest_vdev_disk_stack_remaining > r) {
+		spl_lowest_vdev_disk_stack_remaining = r;
+	}
+
 	ASSERT(zio->io_size != 0);
 
 	PIRP irp = NULL;
@@ -744,8 +876,12 @@ vdev_disk_io_start(zio_t *zio)
 	offset.QuadPart = zio->io_offset + dvd->vdev_win_offset;
 
 	/*
-	 * Start IO -> IOCompletion callback 'vdev_disk_io_intr()'
-	 *  -> IoQueueWorkItem(DelayedWorkQueue) -> callback vdev_disk_io_done()
+	 * Async I/O path.
+	 *
+	 * Build the IRP, allocate a work item, and set a completion routine
+	 * that queues the work item on CriticalWorkQueue.
+	 * vdev_disk_io_start_done() runs at PASSIVE_LEVEL where blocking
+	 * primitives (abd_return_buf*, zio_delay_interrupt) are safe.
 	 */
 
 	zio->windows.work_item = IoAllocateWorkItem(dvd->vd_DeviceObject);
@@ -755,41 +891,32 @@ vdev_disk_io_start(zio_t *zio)
 		return;
 	}
 
-	if (zio->io_type == ZIO_TYPE_READ) {
+	void *b_addr;
+	if (zio->io_type == ZIO_TYPE_READ)
+		b_addr = abd_borrow_buf(zio->io_abd, zio->io_size);
+	else
+		b_addr = abd_borrow_buf_copy(zio->io_abd, zio->io_size);
 
-		zio->windows.b_addr =
-		    abd_borrow_buf(zio->io_abd, zio->io_size);
+	zio->windows.b_addr = b_addr;
+	zio->windows.completion_called = 0;
 
-		irp = IoBuildAsynchronousFsdRequest(IRP_MJ_READ,
-		    dvd->vd_DeviceObject,
-		    zio->windows.b_addr,
-		    (ULONG)zio->io_size,
-		    &offset,
-		    &zio->windows.IoStatus);
+	ULONG irp_major = (zio->io_type == ZIO_TYPE_READ) ?
+	    IRP_MJ_READ : IRP_MJ_WRITE;
 
-	} else {
-		zio->windows.b_addr =
-		    abd_borrow_buf_copy(zio->io_abd, zio->io_size);
-
-		irp = IoBuildAsynchronousFsdRequest(IRP_MJ_WRITE,
-		    dvd->vd_DeviceObject,
-		    zio->windows.b_addr,
-		    (ULONG)zio->io_size,
-		    &offset,
-		    &zio->windows.IoStatus);
-	}
+	irp = IoBuildAsynchronousFsdRequest(irp_major,
+	    dvd->vd_DeviceObject,
+	    b_addr,
+	    (ULONG)zio->io_size,
+	    &offset,
+	    &zio->windows.IoStatus);
 
 	if (!irp) {
-
-		if (zio->io_type == ZIO_TYPE_READ) {
-			abd_return_buf_copy(zio->io_abd, zio->windows.b_addr,
-			    zio->io_size);
-		} else {
-			abd_return_buf(zio->io_abd, zio->windows.b_addr,
-			    zio->io_size);
-		}
-
 		IoFreeWorkItem(zio->windows.work_item);
+		zio->windows.work_item = NULL;
+		if (zio->io_type == ZIO_TYPE_READ)
+			abd_return_buf_copy(zio->io_abd, b_addr, zio->io_size);
+		else
+			abd_return_buf(zio->io_abd, b_addr, zio->io_size);
 		zio->io_error = EIO;
 		zio_interrupt(zio);
 		return;
@@ -798,19 +925,15 @@ vdev_disk_io_start(zio_t *zio)
 	zio->windows.irp = irp;
 
 	irpStack = IoGetNextIrpStackLocation(irp);
-
 	irpStack->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
 	irpStack->FileObject = dvd->vd_FileObject;
 
 	IoSetCompletionRoutine(irp,
 	    vdev_disk_io_intr,
-	    zio,   // "Context" in vdev_disk_io_intr()
-	    TRUE,  // On Success
-	    TRUE,  // On Error
-	    TRUE); // On Cancel
+	    zio,
+	    TRUE, TRUE, TRUE);
 
-	IoCallDriver(dvd->vd_DeviceObject, irp);
-
+	(void) IoCallDriver(dvd->vd_DeviceObject, irp);
 }
 
 static void
@@ -863,7 +986,8 @@ vdev_ops_t vdev_disk_ops = {
 	.vdev_op_fini = NULL,
 	.vdev_op_open = vdev_disk_open,
 	.vdev_op_close = vdev_disk_close,
-	.vdev_op_asize = vdev_default_asize,
+	.vdev_op_psize_to_asize = vdev_default_asize,
+	.vdev_op_asize_to_psize = vdev_default_psize,
 	.vdev_op_min_asize = vdev_default_min_asize,
 	.vdev_op_min_alloc = NULL,
 	.vdev_op_io_start = vdev_disk_io_start,
@@ -879,8 +1003,8 @@ vdev_ops_t vdev_disk_ops = {
 	.vdev_op_config_generate = NULL,
 	.vdev_op_nparity = NULL,
 	.vdev_op_ndisks = NULL,
-	.vdev_op_type = VDEV_TYPE_DISK, /* name of this vdev type */
-	.vdev_op_leaf = B_TRUE          /* leaf vdev */
+	.vdev_op_type = VDEV_TYPE_DISK,	/* name of this vdev type */
+	.vdev_op_leaf = B_TRUE		/* leaf vdev */
 };
 
 /*

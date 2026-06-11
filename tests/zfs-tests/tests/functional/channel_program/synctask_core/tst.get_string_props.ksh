@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -30,8 +31,8 @@ clone=$TESTPOOL/$TESTCLONE
 
 function cleanup
 {
-	datasetexists $clone && log_must zfs destroy $clone
-	datasetexists $fs && log_must zfs destroy -R $fs
+	datasetexists $clone && destroy_dataset $clone
+	datasetexists $fs && destroy_dataset $fs -R
 }
 
 log_onexit cleanup

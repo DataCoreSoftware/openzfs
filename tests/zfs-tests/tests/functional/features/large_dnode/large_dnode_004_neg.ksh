@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -44,9 +45,7 @@ TEST_STREAM=$TESTDIR/ldnsnap
 
 function cleanup
 {
-	if datasetexists $TEST_FS ; then
-		log_must zfs destroy -r $TEST_FS
-	fi
+	datasetexists $TEST_FS && destroy_dataset $TEST_FS -r
 
 	if datasetexists $LGCYPOOL ; then
 		log_must zpool destroy -f $LGCYPOOL

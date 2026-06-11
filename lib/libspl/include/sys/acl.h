@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -140,8 +141,6 @@ typedef struct acl_info acl_t;
 
 #define	ACE_ALL_TYPES	0x001F
 
-#if defined(_KERNEL)
-
 typedef struct ace_object {
 	uid_t		a_who;		/* uid or gid */
 	uint32_t	a_access_mask;	/* read,write,... */
@@ -150,8 +149,6 @@ typedef struct ace_object {
 	uint8_t		a_obj_type[16];	/* obj type */
 	uint8_t		a_inherit_obj_type[16];  /* inherit obj */
 } ace_object_t;
-
-#endif
 
 #define	ACE_ALL_PERMS	(ACE_READ_DATA|ACE_LIST_DIRECTORY|ACE_WRITE_DATA| \
     ACE_ADD_FILE|ACE_APPEND_DATA|ACE_ADD_SUBDIRECTORY|ACE_READ_NAMED_ATTRS| \

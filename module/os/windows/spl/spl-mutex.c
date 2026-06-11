@@ -73,9 +73,10 @@ spl_mutex_init(kmutex_t *mp, char *name, kmutex_type_t type, void *ibc)
 	if (mp->m_initialised == MUTEX_INITIALISED)
 		panic("%s: mutex already m_initialised\n", __func__);
 	mp->m_initialised = MUTEX_INITIALISED;
-	mp->m_set_event_guard = 0;
+	KeInitializeSpinLock(&mp->m_destroy_lock);
 
 	mp->m_owner = NULL;
+	mp->m_waiters = 0;
 
 	// Initialise it to 'Signaled' as mutex is 'free'.
 	KeInitializeEvent((PRKEVENT)&mp->m_lock, SynchronizationEvent, TRUE);
@@ -85,21 +86,21 @@ spl_mutex_init(kmutex_t *mp, char *name, kmutex_type_t type, void *ibc)
 void
 spl_mutex_destroy(kmutex_t *mp)
 {
+	KIRQL oldq;
+
 	if (!mp)
 		return;
 
 	if (mp->m_initialised != MUTEX_INITIALISED)
 		panic("%s: mutex not m_initialised\n", __func__);
 
-	// Make sure any call to KeSetEvent() has completed.
-	while (mp->m_set_event_guard != 0) {
-		kpreempt(KPREEMPT_SYNC);
-	}
-
-	mp->m_initialised = MUTEX_DESTROYED;
-
 	if (mp->m_owner != 0)
 		panic("SPL: releasing held mutex");
+
+	// Make sure any call to KeSetEvent() has completed.
+	KeAcquireSpinLock(&mp->m_destroy_lock, &oldq);
+	mp->m_initialised = MUTEX_DESTROYED;
+	KeReleaseSpinLock(&mp->m_destroy_lock, oldq);
 
 	// There is no FREE member for events
 	// KeDeleteEvent();
@@ -110,7 +111,6 @@ spl_mutex_destroy(kmutex_t *mp)
 void
 spl_mutex_enter(kmutex_t *mp)
 {
-	NTSTATUS Status;
 	kthread_t *thisthread = current_thread();
 
 	if (mp->m_initialised != MUTEX_INITIALISED)
@@ -121,26 +121,37 @@ spl_mutex_enter(kmutex_t *mp)
 
 	VERIFY3P(mp->m_owner, !=, 0xdeadbeefdeadbeef);
 
-	// Test if "m_owner" is NULL, if so, set it to "thisthread".
-	// Returns original value, so if NULL, it succeeded.
+	/*
+	 * Fast path: uncontested acquire — single CAS, no kernel objects.
+	 */
+	if (InterlockedCompareExchangePointer(&mp->m_owner,
+	    thisthread, NULL) == NULL) {
+		ASSERT(mp->m_owner == thisthread);
+		return;
+	}
+
+	/*
+	 * Slow path: register as a waiter so that mutex_exit knows it must
+	 * signal the event.  We increment before the retry loop so there is
+	 * no window where we sleep but the exiting thread skips the signal.
+	 */
+	atomic_inc_32(&mp->m_waiters);
 again:
 	if (InterlockedCompareExchangePointer(&mp->m_owner,
 	    thisthread, NULL) != NULL) {
 
-		// Failed to CAS-in 'thisthread', as owner was not NULL
-		// Wait forever for event to be signaled.
-		Status = KeWaitForSingleObject(
+		/* Failed to CAS-in 'thisthread'; sleep until signaled. */
+		(void) KeWaitForSingleObject(
 		    (PRKEVENT)&mp->m_lock,
 		    Executive,
 		    KernelMode,
 		    FALSE,
 		    NULL);
 
-		// We waited, but someone else may have beaten us to it
-		// so we need to attempt CAS again
+		/* Someone else may have beaten us; retry CAS. */
 		goto again;
 	}
-
+	atomic_dec_32(&mp->m_waiters);
 	ASSERT(mp->m_owner == thisthread);
 }
 
@@ -152,15 +163,29 @@ spl_mutex_exit(kmutex_t *mp)
 
 	VERIFY3P(mp->m_owner, !=, 0xdeadbeefdeadbeef);
 
-	atomic_inc_32(&mp->m_set_event_guard);
+	/*
+	 * Release ownership with a full memory barrier so that any thread
+	 * which subsequently reads m_owner == NULL is guaranteed to also see
+	 * all stores made while the mutex was held.
+	 */
+	(void) InterlockedExchangePointer(&mp->m_owner, NULL);
 
-	mp->m_owner = NULL;
+	/*
+	 * Only pay the spinlock + KeSetEvent cost when a thread is actually
+	 * sleeping in the slow path.  In the common uncontested case this
+	 * makes mutex_exit a single interlocked exchange — no kernel objects.
+	 *
+	 * The m_destroy_lock spinlock still guards against a racing
+	 * mutex_destroy() tearing down the KEVENT while we signal it.
+	 */
+	if (mp->m_waiters > 0) {
+		KIRQL oldq;
+		KeAcquireSpinLock(&mp->m_destroy_lock, &oldq);
+		KeSetEvent((PRKEVENT)&mp->m_lock, SEMAPHORE_INCREMENT, FALSE);
+		KeReleaseSpinLock(&mp->m_destroy_lock, oldq);
+	}
 
 	VERIFY3U(KeGetCurrentIrql(), <=, DISPATCH_LEVEL);
-
-	// Wake up one waiter now that it is available.
-	KeSetEvent((PRKEVENT)&mp->m_lock, SEMAPHORE_INCREMENT, FALSE);
-	atomic_dec_32(&mp->m_set_event_guard);
 }
 
 int

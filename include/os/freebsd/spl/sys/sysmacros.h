@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -191,7 +192,8 @@ extern unsigned char bcd_to_byte[256];
  * eg, P2ALIGN(0x1234, 0x100) == 0x1200 (0x12*align)
  * eg, P2ALIGN(0x5600, 0x100) == 0x5600 (0x56*align)
  */
-#define	P2ALIGN(x, align)		((x) & -(align))
+// Deprecated. Use P2ALIGN_TYPED instead.
+// #define	P2ALIGN(x, align)		((x) & -(align))
 
 /*
  * return x % (mod) align
@@ -281,46 +283,6 @@ extern unsigned char bcd_to_byte[256];
 #define	INCR_COUNT(var, mutex) mutex_enter(mutex), (*(var))++, mutex_exit(mutex)
 #define	DECR_COUNT(var, mutex) mutex_enter(mutex), (*(var))--, mutex_exit(mutex)
 
-/*
- * Macros to declare bitfields - the order in the parameter list is
- * Low to High - that is, declare bit 0 first.  We only support 8-bit bitfields
- * because if a field crosses a byte boundary it's not likely to be meaningful
- * without reassembly in its nonnative endianness.
- */
-#if defined(_BIT_FIELDS_LTOH)
-#define	DECL_BITFIELD2(_a, _b)				\
-	uint8_t _a, _b
-#define	DECL_BITFIELD3(_a, _b, _c)			\
-	uint8_t _a, _b, _c
-#define	DECL_BITFIELD4(_a, _b, _c, _d)			\
-	uint8_t _a, _b, _c, _d
-#define	DECL_BITFIELD5(_a, _b, _c, _d, _e)		\
-	uint8_t _a, _b, _c, _d, _e
-#define	DECL_BITFIELD6(_a, _b, _c, _d, _e, _f)		\
-	uint8_t _a, _b, _c, _d, _e, _f
-#define	DECL_BITFIELD7(_a, _b, _c, _d, _e, _f, _g)	\
-	uint8_t _a, _b, _c, _d, _e, _f, _g
-#define	DECL_BITFIELD8(_a, _b, _c, _d, _e, _f, _g, _h)	\
-	uint8_t _a, _b, _c, _d, _e, _f, _g, _h
-#elif defined(_BIT_FIELDS_HTOL)
-#define	DECL_BITFIELD2(_a, _b)				\
-	uint8_t _b, _a
-#define	DECL_BITFIELD3(_a, _b, _c)			\
-	uint8_t _c, _b, _a
-#define	DECL_BITFIELD4(_a, _b, _c, _d)			\
-	uint8_t _d, _c, _b, _a
-#define	DECL_BITFIELD5(_a, _b, _c, _d, _e)		\
-	uint8_t _e, _d, _c, _b, _a
-#define	DECL_BITFIELD6(_a, _b, _c, _d, _e, _f)		\
-	uint8_t _f, _e, _d, _c, _b, _a
-#define	DECL_BITFIELD7(_a, _b, _c, _d, _e, _f, _g)	\
-	uint8_t _g, _f, _e, _d, _c, _b, _a
-#define	DECL_BITFIELD8(_a, _b, _c, _d, _e, _f, _g, _h)	\
-	uint8_t _h, _g, _f, _e, _d, _c, _b, _a
-#else
-#error	One of _BIT_FIELDS_LTOH or _BIT_FIELDS_HTOL must be defined
-#endif  /* _BIT_FIELDS_LTOH */
-
 #if !defined(_KMEMUSER) && !defined(offsetof)
 
 /* avoid any possibility of clashing with <stddef.h> version */
@@ -328,80 +290,11 @@ extern unsigned char bcd_to_byte[256];
 #define	offsetof(type, field)	__offsetof(type, field)
 #endif
 
-/*
- * Find highest one bit set.
- *      Returns bit number + 1 of highest bit that is set, otherwise returns 0.
- * High order bit is 31 (or 63 in _LP64 kernel).
- */
-static __inline int
-highbit(ulong_t i)
-{
-#if defined(HAVE_INLINE_FLSL)
-	return (flsl(i));
-#else
-	int h = 1;
+#define	highbit(x)		flsl(x)
+#define	lowbit(x)		ffsl(x)
 
-	if (i == 0)
-		return (0);
-#ifdef _LP64
-	if (i & 0xffffffff00000000ul) {
-		h += 32; i >>= 32;
-	}
-#endif
-	if (i & 0xffff0000) {
-		h += 16; i >>= 16;
-	}
-	if (i & 0xff00) {
-		h += 8; i >>= 8;
-	}
-	if (i & 0xf0) {
-		h += 4; i >>= 4;
-	}
-	if (i & 0xc) {
-		h += 2; i >>= 2;
-	}
-	if (i & 0x2) {
-		h += 1;
-	}
-	return (h);
-#endif
-}
-
-/*
- * Find highest one bit set.
- *	Returns bit number + 1 of highest bit that is set, otherwise returns 0.
- */
-static __inline int
-highbit64(uint64_t i)
-{
-#if defined(HAVE_INLINE_FLSLL)
-	return (flsll(i));
-#else
-	int h = 1;
-
-	if (i == 0)
-		return (0);
-	if (i & 0xffffffff00000000ULL) {
-		h += 32; i >>= 32;
-	}
-	if (i & 0xffff0000) {
-		h += 16; i >>= 16;
-	}
-	if (i & 0xff00) {
-		h += 8; i >>= 8;
-	}
-	if (i & 0xf0) {
-		h += 4; i >>= 4;
-	}
-	if (i & 0xc) {
-		h += 2; i >>= 2;
-	}
-	if (i & 0x2) {
-		h += 1;
-	}
-	return (h);
-#endif
-}
+#define	highbit64(x)		flsll(x)
+#define	lowbit64(x)		ffsll(x)
 
 #ifdef	__cplusplus
 }

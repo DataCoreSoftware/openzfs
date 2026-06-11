@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * This file is part of the ZFS Event Daemon (ZED).
  *
@@ -35,8 +36,11 @@
 #include "zed_strings.h"
 
 #include "agents/zfs_agents.h"
+#include <libzutil.h>
 
 #define	MAXBUF	4096
+
+static int max_zevent_buf_len = 1 << 20;
 
 /*
  * Open the libzfs interface.
@@ -69,6 +73,9 @@ zed_event_init(struct zed_conf *zcp)
 			return (-1);
 		zed_log_die("Failed to initialize disk events");
 	}
+
+	if (zcp->max_zevent_buf_len != 0)
+		max_zevent_buf_len = zcp->max_zevent_buf_len;
 
 	return (0);
 }
@@ -103,9 +110,9 @@ zed_event_fini(struct zed_conf *zcp)
 static void
 _bump_event_queue_length(void)
 {
-	int zzlm = -1, wr;
+	int zzlm, wr;
 	char qlen_buf[12] = {0}; /* parameter is int => max "-2147483647\n" */
-	long int qlen;
+	long int qlen, orig_qlen;
 
 	zzlm = open("/sys/module/zfs/parameters/zfs_zevent_len_max", O_RDWR);
 	if (zzlm < 0)
@@ -116,7 +123,7 @@ _bump_event_queue_length(void)
 	qlen_buf[sizeof (qlen_buf) - 1] = '\0';
 
 	errno = 0;
-	qlen = strtol(qlen_buf, NULL, 10);
+	orig_qlen = qlen = strtol(qlen_buf, NULL, 10);
 	if (errno == ERANGE)
 		goto done;
 
@@ -125,11 +132,21 @@ _bump_event_queue_length(void)
 	else
 		qlen *= 2;
 
-	if (qlen > INT_MAX)
-		qlen = INT_MAX;
+	/*
+	 * Don't consume all of kernel memory with event logs if something
+	 * goes wrong.
+	 */
+	if (qlen > max_zevent_buf_len)
+		qlen = max_zevent_buf_len;
+	if (qlen == orig_qlen)
+		goto done;
 	wr = snprintf(qlen_buf, sizeof (qlen_buf), "%ld", qlen);
+	if (wr >= sizeof (qlen_buf)) {
+		wr = sizeof (qlen_buf) - 1;
+		zed_log_msg(LOG_WARNING, "Truncation in %s()", __func__);
+	}
 
-	if (pwrite(zzlm, qlen_buf, wr, 0) < 0)
+	if (pwrite(zzlm, qlen_buf, wr + 1, 0) < 0)
 		goto done;
 
 	zed_log_msg(LOG_WARNING, "Bumping queue length to %ld", qlen);
@@ -597,7 +614,7 @@ _zed_event_add_string_array(uint64_t eid, zed_strings_t *zsp,
 	char buf[MAXBUF];
 	int buflen = sizeof (buf);
 	const char *name;
-	char **strp;
+	const char **strp;
 	uint_t nelem;
 	uint_t i;
 	char *p;
@@ -637,7 +654,7 @@ _zed_event_add_nvpair(uint64_t eid, zed_strings_t *zsp, nvpair_t *nvp)
 	uint16_t i16;
 	uint32_t i32;
 	uint64_t i64;
-	char *str;
+	const char *str;
 
 	assert(zsp != NULL);
 	assert(nvp != NULL);
@@ -884,27 +901,46 @@ _zed_event_get_subclass(const char *class)
 static void
 _zed_event_add_time_strings(uint64_t eid, zed_strings_t *zsp, int64_t etime[])
 {
-	struct tm *stp;
+	struct tm stp;
 	char buf[32];
 
 	assert(zsp != NULL);
 	assert(etime != NULL);
 
 	_zed_event_add_var(eid, zsp, ZEVENT_VAR_PREFIX, "TIME_SECS",
-	    "%lld", (long long int) etime[0]);
+	    "%" PRId64, etime[0]);
 	_zed_event_add_var(eid, zsp, ZEVENT_VAR_PREFIX, "TIME_NSECS",
-	    "%lld", (long long int) etime[1]);
+	    "%" PRId64, etime[1]);
 
-	if (!(stp = localtime((const time_t *) &etime[0]))) {
+	if (!localtime_r((const time_t *) &etime[0], &stp)) {
 		zed_log_msg(LOG_WARNING, "Failed to add %s%s for eid=%llu: %s",
 		    ZEVENT_VAR_PREFIX, "TIME_STRING", eid, "localtime error");
-	} else if (!strftime(buf, sizeof (buf), "%Y-%m-%d %H:%M:%S%z", stp)) {
+	} else if (!strftime(buf, sizeof (buf), "%Y-%m-%d %H:%M:%S%z", &stp)) {
 		zed_log_msg(LOG_WARNING, "Failed to add %s%s for eid=%llu: %s",
 		    ZEVENT_VAR_PREFIX, "TIME_STRING", eid, "strftime error");
 	} else {
 		_zed_event_add_var(eid, zsp, ZEVENT_VAR_PREFIX, "TIME_STRING",
 		    "%s", buf);
 	}
+}
+
+
+static void
+_zed_event_update_enc_sysfs_path(nvlist_t *nvl)
+{
+	const char *vdev_path;
+
+	if (nvlist_lookup_string(nvl, FM_EREPORT_PAYLOAD_ZFS_VDEV_PATH,
+	    &vdev_path) != 0) {
+		return; /* some other kind of event, ignore it */
+	}
+
+	if (vdev_path == NULL) {
+		return;
+	}
+
+	update_vdev_config_dev_sysfs_path(nvl, vdev_path,
+	    FM_EREPORT_PAYLOAD_ZFS_VDEV_ENC_SYSFS_PATH);
 }
 
 /*
@@ -920,7 +956,7 @@ zed_event_service(struct zed_conf *zcp)
 	uint64_t eid;
 	int64_t *etime;
 	uint_t nelem;
-	char *class;
+	const char *class;
 	const char *subclass;
 	int rv;
 
@@ -954,6 +990,17 @@ zed_event_service(struct zed_conf *zcp)
 		zed_log_msg(LOG_WARNING,
 		    "Failed to lookup zevent class (eid=%llu)", eid);
 	} else {
+		/*
+		 * Special case: If we can dynamically detect an enclosure sysfs
+		 * path, then use that value rather than the one stored in the
+		 * vd->vdev_enc_sysfs_path.  There have been rare cases where
+		 * vd->vdev_enc_sysfs_path becomes outdated.  However, there
+		 * will be other times when we can not dynamically detect the
+		 * sysfs path (like if a disk disappears) and have to rely on
+		 * the old value for things like turning on the fault LED.
+		 */
+		_zed_event_update_enc_sysfs_path(nvl);
+
 		/* let internal modules see this event first */
 		zfs_agent_post_event(class, NULL, nvl);
 

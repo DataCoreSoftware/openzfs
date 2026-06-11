@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -24,6 +25,7 @@
  */
 /*
  * Copyright (c) 2012, 2017 by Delphix. All rights reserved.
+ * Copyright (c) 2025, Klara, Inc.
  */
 
 #ifndef _SYS_TXG_H
@@ -65,6 +67,23 @@ typedef struct txg_list {
 	txg_node_t	*tl_head[TXG_SIZE];
 } txg_list_t;
 
+/*
+ * Wait flags for txg_wait_synced_flags(). By default (TXG_WAIT_NONE), it will
+ * wait until the wanted txg is reached, or block forever. Additional flags
+ * indicate other conditions that the caller is interested in, that will cause
+ * the wait to break and return an error code describing the condition.
+ */
+typedef enum {
+	/* No special flags. Guaranteed to block forever or return 0 */
+	TXG_WAIT_NONE   = 0,
+
+	/* If a signal arrives while waiting, abort and return EINTR */
+	TXG_WAIT_SIGNAL = (1 << 0),
+
+	/* If the pool suspends while waiting, abort and return ESHUTDOWN. */
+	TXG_WAIT_SUSPEND = (1 << 1),
+} txg_wait_flag_t;
+
 struct dsl_pool;
 
 extern void txg_init(struct dsl_pool *dp, uint64_t txg);
@@ -78,20 +97,28 @@ extern void txg_register_callbacks(txg_handle_t *txghp, list_t *tx_callbacks);
 
 extern void txg_delay(struct dsl_pool *dp, uint64_t txg, hrtime_t delta,
     hrtime_t resolution);
-extern void txg_kick(struct dsl_pool *dp);
+extern void txg_kick(struct dsl_pool *dp, uint64_t txg);
 
 /*
  * Wait until the given transaction group has finished syncing.
  * Try to make this happen as soon as possible (eg. kick off any
  * necessary syncs immediately).  If txg==0, wait for the currently open
  * txg to finish syncing.
+ * See txg_wait_flag_t above for a description of how the flags affect the wait.
+ */
+extern int txg_wait_synced_flags(struct dsl_pool *dp, uint64_t txg,
+    txg_wait_flag_t flags);
+
+/*
+ * Traditional form of txg_wait_synced_flags, waits forever.
+ * Shorthand for VERIFY0(txg_wait_synced_flags(dp, TXG_WAIT_NONE))
  */
 extern void txg_wait_synced(struct dsl_pool *dp, uint64_t txg);
 
 /*
- * Wait as above. Returns true if the thread was signaled while waiting.
+ * Wake all threads waiting in txg_wait_synced_flags() so they can reevaluate.
  */
-extern boolean_t txg_wait_synced_sig(struct dsl_pool *dp, uint64_t txg);
+extern void txg_wait_kick(struct dsl_pool *dp);
 
 /*
  * Wait until the given transaction group, or one after it, is
@@ -138,16 +165,18 @@ extern void *txg_list_head(txg_list_t *tl, uint64_t txg);
 extern void *txg_list_next(txg_list_t *tl, void *p, uint64_t txg);
 
 /* Global tuning */
-extern int zfs_txg_timeout;
+extern uint_t zfs_txg_timeout;
+
+/* DataCore: adaptive dirty ceiling tunables */
 extern int zfs_adc_enable;
 extern uint_t zfs_adc_target_sync_pct;
-
 typedef struct dynamic_dirty_data_stats {
-    kstat_named_t adc_target;
-    kstat_named_t spa_sync_time;
-    kstat_named_t data_flushed_per_sync;
-    kstat_named_t total_dirty_data;
+	kstat_named_t adc_target;
+	kstat_named_t spa_sync_time;
+	kstat_named_t data_flushed_per_sync;
+	kstat_named_t total_dirty_data;
 } dynamic_dirty_data_stats_t;
+
 
 #ifdef ZFS_DEBUG
 #define	TXG_VERIFY(spa, txg)		txg_verify(spa, txg)

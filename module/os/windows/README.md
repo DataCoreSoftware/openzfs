@@ -2,10 +2,10 @@
 [![Build status](https://ci.appveyor.com/api/projects/status/dcw734sl0prmolwr/branch/master?svg=true)](https://ci.appveyor.com/project/lundman/openzfs/branch/master)
 
 
-# To setup a development environment for compiling ZFS.
+# To setup a development environment for compiling OpenZFS on Windows.
 
 
-Download free development Windows 10 image from Microsoft.
+Download free development Windows 11 image from Microsoft.
 
 https://developer.microsoft.com/en-us/windows/downloads/virtual-machines
 
@@ -14,18 +14,18 @@ and create two VMs.
 * Host (running Visual Studio and Kernel Debugger)
 * Target (runs the compiled kernel module)
 
-The VM images comes with Visual Studio 2017, which we use to compile the driver.
+The VM images comes with Visual Studio 2022, which we use to compile the driver.
 
 It is recommended that the VMs are placed on static IP, as they can
 change IP with all the crashes, and you have to configure the remote
 kernel development again.
 
-Go download the Windows Driver Kit 10
+Go download the Windows Driver Kit 11
 
 https://developer.microsoft.com/en-us/windows/hardware/windows-driver-kit
 
 and install on both VMs. You will need both the SDK and WDK:
-Download the SDK with the Visual Studio 2017 community edition first and install it.
+Download the SDK with the Visual Studio 2022 community edition first and install it.
 It will update the already installed Visual Studio.
 Then install the WDK. At the end of the installer, allow it to install the Visual Studio extension.
 
@@ -36,6 +36,8 @@ section "Prepare the target computer for provisioning".
 https://msdn.microsoft.com/windows/hardware/drivers/gettingstarted/provision-a-target-computer-wdk-8-1?f=255&MSPPError=-2147217396
 
 Which mostly entails running:
+
+Disable Secure Boot.
 
 C:\Program Files (x86)\Windows Kits\10\Remote\x64\WDK Test Target Setup x64-x64_en-us.msi
 
@@ -82,29 +84,14 @@ If your version of .NET newer, just move along.
 
 The Target VM should reboot, and login as "WDKRemoteUser".
 
-It is recommended you get GIT bash for Windows and install:
+Use your preferred Unix style shell to work with git and
+cmake. If you do not yet have a preferred shell, the
+"GIT bash for Windows" is small and sufficient:
 
 https://git-scm.com/downloads
 
 ---
 
-Handling configuration errors with Visual Studio 2019 & WDK 10:
-
-There are some issues with Visual Studio 2019 which can cause the following problem in setting up kernel debugging. 
-ERROR: Task “Configuring kernel debugger settings (possible reboot)” failed to complete successfully. Look at the logs in the driver test group explorer for more details on the failure.
-
-This problem is related to MSVC debug tool location mismatch, and as a workaround use the following steps to mitigate this problem:
-
-As Administrator, run Developer Command Prompt for VS 2019 in your Host VM
-Run the following commands in the VS Developer Command Prompt:
-
-cd /d %VCToolsRedistDir%\debug_nonredist
-MKLINK /J x86\Microsoft.VC141.DebugCRT x86\Microsoft.VC142.DebugCRT
-MKLINK /J x64\Microsoft.VC141.DebugCRT x64\Microsoft.VC142.DebugCRT
-
-Retry configuration by following guide to configure Visual Studio mentioned above.
-
----
 
 
 Host and Target VMs are now configured.
@@ -126,21 +113,27 @@ Add individual components:
 (Versions refer to what was available at the time)
 
 * C++ Cmake tools for Windows
-* C++ Clang Compiler for Windows (10.0.0)
-* C++ Clang-cl for v142 build tools (x64/x86)
-* MSVC v142 - VS 2019 C++ x64/x86 Spectre-mitigated libs (v14.28)
+* C++ Clang Compiler for Windows (14.0.5)
+* C++ Clang-cl for v143 build tools (x64/x86)
+* MSVC v143 - VS 2022 C++ x64/x86 Spectre-mitigated libs (v14.33-17.3)
 
 
-Open Visual Studio 2019 (As of Nov 2020)
+
+
+
+
+Open Visual Studio 2022 (As of Sep 2022)
 File -> Open -> Folder
 
 and open the top source folder. Hit build when ready.
 
-It is expected of you to set the environment variables
+It was previously expected of you to set the environment variables
 (either globally, or in your CMakeSettings.json)
 		${OPENZFS_SIGNTOOL_CERTSTORE}
 		${OPENZFS_SIGNTOOL_SHA1}
 		${OPENZFS_SIGNTOOL_TSA}
+
+but these now default to the test signing certificate
 
 Only the top `driver.c` is compiled using MSVC, and the
 linking of OpenZFS.sys.
@@ -263,72 +256,58 @@ Windows Updates run, you can disable those in gpedit.msc
 
   ✅ Compile ZFS on top of ZFS
 
+  ✅ Async vdev_disk.c I/O
+
+  ✅ posix.c substantially complete
+
+  ✅ DriveLetter dataset property (zfs set driveletter=Z pool)
+  *  Assigned first-available letter if set to "?:"
+  *  Imported Unix pools default to drive-letter mount
+
+  ✅ ZFS delegation (zfs allow / zfs unallow)
+
+  ✅ Windows Security Descriptor / ACL integration
+  *  SeAccessCheck on parent SD authoritative for IRP_MJ_CREATE
+  *  ZFS POSIX ACL checked via uid=0 credential bypass
+
+  ✅ UAC elevation relay for privileged operations
+
+  ✅ xattrs and alternate data streams (NTFS ADS)
+  *  Stream rename not yet supported
+
   ❎ Scrooge McDuck style swim in cash
 
 ---
 
 # Design issues that need addressing.
 
-* Windows does not handle EFI labels, for now they are parsed with
-libefi, and we send offset and size with the filename, that both
-libzfs and kernel will parse out and use. This works for a proof
-of concept.
+* Windows does not natively handle EFI disk labels. The current
+workaround encodes partition offset and size in the device filename,
+which is parsed by both libzfs and the kernel driver. This is
+functional but not ideal; a cleaner solution would be a thin virtual
+disk driver that presents EFI partitions directly to Windows. This
+remains an open item.
 
-Possibly a more proper solution would be to write a thin virtual
-hard disk driver, which reads the EFI label and present just the
-partitions.
+* Alternate data streams (xattrs / NTFS ADS) are implemented.
+Renaming streams is not yet supported.
 
-* vdev_disk.c spawns a thread to get around that IoCompletionRoutine
-is called in a different context, to sleep until signalled. Is there
-a better way to do async in Windows?
-
-* ThreadId should be checked, using PsGetCurrentThreadId() but
-it makes zio_taskq_member(taskq_member()) crash. Investigate.
-
-* Functions in posix.c need sustenance.
-
-* The Volume created for MOUNT has something wrong with it, we are
-  unable to query it for mountpoint, currently has to string compare a
-  list of all mounts. Possibly also related is that we can not call
-  any of the functions to set mountpoint to change it. This needs to
-  be researched.
-
-* Find a way to get system RAM in SPL, so we can size up the kmem as
-expected. Currently looks up the information in the Registry.
-kmem should also use Windows signals
-"\KernelObjects\LowMemoryCondition" to sense pressure.
-
-Thinking on mount structure. Second design:
-
-Add dataset property WinDriveLetter, which is ignored on Unix system.
-So for a simple drive letter dataset:
-
-zfs set driveletter=Z pool
-
-The default creating of a new pool, AND, importing a UNIX pool, would
-set the root dataset to
-
-driveletter=?:
-
-So it is assigned first-available drive letter. All lower datasets
-will be mounted inside the drive letter. If pool's WinDriveLetter is
-not set, it will mount "/pool" as "C:/pool".
+* cmdbox/console text colour attributes (ANSI escape sequences) are
+not yet wired up in posix.c.
 
 ---
 
 # Installing a binary release
 
 Latest binary files are available at [GitHub releases](https://github.com/openzfsonwindows/OpenZFS/releases)
+for the lastest builds use [Nightly builds](https://openzfsonosx.org/wiki/Windows_builds)
 
+Developers may want to enable TestMode for quicker developments.
 
-If you are running windows 10 with secure boot on and/or installing an older release you will need to enable unsigned drivers from an elevated CMD:
-
- 
 * `bcdedit.exe -set testsigning on `
 * Then **reboot**. After restart it should have _Test Mode_ bottom right corner of the screen.
 
 
-After that either 
+After that either
 
 * Run OpenZFSOnWindows.exe installer to install
 * *Would you like to install device software?* should pop up, click install
@@ -410,7 +389,7 @@ Creating a virtual hard disk (ZVOL) is done by passing "-V <size>" to the "zfs c
 # zfs create -V 2g tank/hello
 ```
 
-Which would create a disk of 2GB in size, called "tank/hello". 
+Which would create a disk of 2GB in size, called "tank/hello".
 Confirm it was created with:
 
 ```
@@ -470,12 +449,6 @@ A reboot might be necessary to uninstall it completely.
 
 # Tuning
 
-You can use the [registry](https://openzfsonosx.org/wiki/Windows_Registry) to tune various parameters.  
+You can use the [registry](https://openzfsonosx.org/wiki/Windows_Registry) to tune various parameters.
 Also, there is [`kstat`](https://openzfsonosx.org/wiki/Windows_kstat) to dynamically change parameters.
 
-# Nightly builds
-
-There are nightly builds available at [AppVeyor](https://ci.appveyor.com/project/lundman/openzfs/branch/master/artifacts)  
-- These builds are currently not signed and therefore require test mode to be enabled.
-
-There also are test builds [available here](https://openzfsonosx.org/wiki/Windows_builds). These are "hotfix" builds for allowing people to test specific fixes before they are ready for a release.

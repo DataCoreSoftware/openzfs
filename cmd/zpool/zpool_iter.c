@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -25,15 +26,14 @@
 
 /*
  * Copyright 2016 Igor Kozhukhov <ikozhukhov@gmail.com>.
+ * Copyright (c) 2025, Klara, Inc.
  */
 
 #include <libintl.h>
-#include <libuutil.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <strings.h>
-#include <thread_pool.h>
+#include <string.h>
 
 #include <libzfs.h>
 #include <libzutil.h>
@@ -50,28 +50,28 @@
 
 typedef struct zpool_node {
 	zpool_handle_t	*zn_handle;
-	uu_avl_node_t	zn_avlnode;
-	int		zn_mark;
+	avl_node_t	zn_avlnode;
+	hrtime_t	zn_last_refresh;
 } zpool_node_t;
 
 struct zpool_list {
 	boolean_t	zl_findall;
 	boolean_t	zl_literal;
-	uu_avl_t	*zl_avl;
-	uu_avl_pool_t	*zl_pool;
+	avl_tree_t	zl_avl;
 	zprop_list_t	**zl_proplist;
+	zfs_type_t	zl_type;
+	hrtime_t	zl_last_refresh;
 };
 
-/* ARGSUSED */
 static int
-zpool_compare(const void *larg, const void *rarg, void *unused)
+zpool_compare(const void *larg, const void *rarg)
 {
 	zpool_handle_t *l = ((zpool_node_t *)larg)->zn_handle;
 	zpool_handle_t *r = ((zpool_node_t *)rarg)->zn_handle;
 	const char *lname = zpool_get_name(l);
 	const char *rname = zpool_get_name(r);
 
-	return (strcmp(lname, rname));
+	return (TREE_ISIGN(strcmp(lname, rname)));
 }
 
 /*
@@ -79,30 +79,44 @@ zpool_compare(const void *larg, const void *rarg, void *unused)
  * of known pools.
  */
 static int
-add_pool(zpool_handle_t *zhp, void *data)
+add_pool(zpool_handle_t *zhp, zpool_list_t *zlp)
 {
-	zpool_list_t *zlp = data;
-	zpool_node_t *node = safe_malloc(sizeof (zpool_node_t));
-	uu_avl_index_t idx;
+	zpool_node_t *node, *new = safe_malloc(sizeof (zpool_node_t));
+	avl_index_t idx;
 
-	node->zn_handle = zhp;
-	uu_avl_node_init(node, &node->zn_avlnode, zlp->zl_pool);
-	if (uu_avl_find(zlp->zl_avl, node, NULL, &idx) == NULL) {
+	new->zn_handle = zhp;
+
+	node = avl_find(&zlp->zl_avl, new, &idx);
+	if (node == NULL) {
 		if (zlp->zl_proplist &&
 		    zpool_expand_proplist(zhp, zlp->zl_proplist,
-		    zlp->zl_literal)
-		    != 0) {
+		    zlp->zl_type, zlp->zl_literal) != 0) {
 			zpool_close(zhp);
-			free(node);
+			free(new);
 			return (-1);
 		}
-		uu_avl_insert(zlp->zl_avl, node, idx);
+		new->zn_last_refresh = zlp->zl_last_refresh;
+		avl_insert(&zlp->zl_avl, new, idx);
 	} else {
+		zpool_refresh_stats_from_handle(node->zn_handle, zhp);
+		node->zn_last_refresh = zlp->zl_last_refresh;
 		zpool_close(zhp);
-		free(node);
+		free(new);
 		return (-1);
 	}
 
+	return (0);
+}
+
+/*
+ * add_pool(), but always returns 0. This allows zpool_iter() to continue
+ * even if a pool exists in the tree, or we fail to get the properties for
+ * a new one.
+ */
+static int
+add_pool_cb(zpool_handle_t *zhp, void *data)
+{
+	(void) add_pool(zhp, data);
 	return (0);
 }
 
@@ -113,29 +127,24 @@ add_pool(zpool_handle_t *zhp, void *data)
  * line.
  */
 zpool_list_t *
-pool_list_get(int argc, char **argv, zprop_list_t **proplist,
+pool_list_get(int argc, char **argv, zprop_list_t **proplist, zfs_type_t type,
     boolean_t literal, int *err)
 {
 	zpool_list_t *zlp;
 
 	zlp = safe_malloc(sizeof (zpool_list_t));
 
-	zlp->zl_pool = uu_avl_pool_create("zfs_pool", sizeof (zpool_node_t),
-	    offsetof(zpool_node_t, zn_avlnode), zpool_compare, UU_DEFAULT);
-
-	if (zlp->zl_pool == NULL)
-		zpool_no_memory();
-
-	if ((zlp->zl_avl = uu_avl_create(zlp->zl_pool, NULL,
-	    UU_DEFAULT)) == NULL)
-		zpool_no_memory();
+	avl_create(&zlp->zl_avl, zpool_compare,
+	    sizeof (zpool_node_t), offsetof(zpool_node_t, zn_avlnode));
 
 	zlp->zl_proplist = proplist;
+	zlp->zl_type = type;
 
 	zlp->zl_literal = literal;
+	zlp->zl_last_refresh = gethrtime();
 
 	if (argc == 0) {
-		(void) zpool_iter(g_zfs, add_pool, zlp);
+		(void) zpool_iter(g_zfs, add_pool_cb, zlp);
 		zlp->zl_findall = B_TRUE;
 	} else {
 		int i;
@@ -157,15 +166,61 @@ pool_list_get(int argc, char **argv, zprop_list_t **proplist,
 }
 
 /*
- * Search for any new pools, adding them to the list.  We only add pools when no
- * options were given on the command line.  Otherwise, we keep the list fixed as
- * those that were explicitly specified.
+ * Refresh the state of all pools on the list. Additionally, if no options were
+ * given on the command line, add any new pools and remove any that are no
+ * longer available.
  */
-void
-pool_list_update(zpool_list_t *zlp)
+int
+pool_list_refresh(zpool_list_t *zlp)
 {
-	if (zlp->zl_findall)
-		(void) zpool_iter(g_zfs, add_pool, zlp);
+	zlp->zl_last_refresh = gethrtime();
+
+	if (!zlp->zl_findall) {
+		/*
+		 * This list is a fixed list of pools, so we must not add
+		 * or remove any. Just walk over them and refresh their
+		 * state.
+		 */
+		int navail = 0;
+		for (zpool_node_t *node = avl_first(&zlp->zl_avl);
+		    node != NULL; node = AVL_NEXT(&zlp->zl_avl, node)) {
+			boolean_t missing;
+			zpool_refresh_stats(node->zn_handle, &missing);
+			navail += !missing;
+			node->zn_last_refresh = zlp->zl_last_refresh;
+		}
+		return (navail);
+	}
+
+	/* Search for any new pools and add them to the list. */
+	(void) zpool_iter(g_zfs, add_pool_cb, zlp);
+
+	/* Walk the list of existing pools, and update or remove them. */
+	zpool_node_t *node, *next;
+	for (node = avl_first(&zlp->zl_avl); node != NULL; node = next) {
+		next = AVL_NEXT(&zlp->zl_avl, node);
+
+		/*
+		 * Skip any that were refreshed and are online; they were added
+		 * by zpool_iter() and are already up to date.
+		 */
+		if (node->zn_last_refresh == zlp->zl_last_refresh &&
+		    zpool_get_state(node->zn_handle) != POOL_STATE_UNAVAIL)
+			continue;
+
+		/* Refresh and remove if necessary. */
+		boolean_t missing;
+		zpool_refresh_stats(node->zn_handle, &missing);
+		if (missing) {
+			avl_remove(&zlp->zl_avl, node);
+			zpool_close(node->zn_handle);
+			free(node);
+		} else {
+			node->zn_last_refresh = zlp->zl_last_refresh;
+		}
+	}
+
+	return (avl_numnodes(&zlp->zl_avl));
 }
 
 /*
@@ -178,8 +233,8 @@ pool_list_iter(zpool_list_t *zlp, int unavail, zpool_iter_f func,
 	zpool_node_t *node, *next_node;
 	int ret = 0;
 
-	for (node = uu_avl_first(zlp->zl_avl); node != NULL; node = next_node) {
-		next_node = uu_avl_next(zlp->zl_avl, node);
+	for (node = avl_first(&zlp->zl_avl); node != NULL; node = next_node) {
+		next_node = AVL_NEXT(&zlp->zl_avl, node);
 		if (zpool_get_state(node->zn_handle) != POOL_STATE_UNAVAIL ||
 		    unavail)
 			ret |= func(node->zn_handle, data);
@@ -189,47 +244,20 @@ pool_list_iter(zpool_list_t *zlp, int unavail, zpool_iter_f func,
 }
 
 /*
- * Remove the given pool from the list.  When running iostat, we want to remove
- * those pools that no longer exist.
- */
-void
-pool_list_remove(zpool_list_t *zlp, zpool_handle_t *zhp)
-{
-	zpool_node_t search, *node;
-
-	search.zn_handle = zhp;
-	if ((node = uu_avl_find(zlp->zl_avl, &search, NULL, NULL)) != NULL) {
-		uu_avl_remove(zlp->zl_avl, node);
-		zpool_close(node->zn_handle);
-		free(node);
-	}
-}
-
-/*
  * Free all the handles associated with this list.
  */
 void
 pool_list_free(zpool_list_t *zlp)
 {
-	uu_avl_walk_t *walk;
 	zpool_node_t *node;
+	void *cookie = NULL;
 
-	if ((walk = uu_avl_walk_start(zlp->zl_avl, UU_WALK_ROBUST)) == NULL) {
-		(void) fprintf(stderr,
-		    gettext("internal error: out of memory"));
-		exit(1);
-	}
-
-	while ((node = uu_avl_walk_next(walk)) != NULL) {
-		uu_avl_remove(zlp->zl_avl, node);
+	while ((node = avl_destroy_nodes(&zlp->zl_avl, &cookie)) != NULL) {
 		zpool_close(node->zn_handle);
 		free(node);
 	}
 
-	uu_avl_walk_end(walk);
-	uu_avl_destroy(zlp->zl_avl);
-	uu_avl_pool_destroy(zlp->zl_pool);
-
+	avl_destroy(&zlp->zl_avl);
 	free(zlp);
 }
 
@@ -239,7 +267,7 @@ pool_list_free(zpool_list_t *zlp)
 int
 pool_list_count(zpool_list_t *zlp)
 {
-	return (uu_avl_numnodes(zlp->zl_avl));
+	return (avl_numnodes(&zlp->zl_avl));
 }
 
 /*
@@ -248,63 +276,20 @@ pool_list_count(zpool_list_t *zlp)
  */
 int
 for_each_pool(int argc, char **argv, boolean_t unavail,
-    zprop_list_t **proplist, boolean_t literal, zpool_iter_f func, void *data)
+    zprop_list_t **proplist, zfs_type_t type, boolean_t literal,
+    zpool_iter_f func, void *data)
 {
 	zpool_list_t *list;
 	int ret = 0;
 
-	if ((list = pool_list_get(argc, argv, proplist, literal, &ret)) == NULL)
+	if ((list = pool_list_get(argc, argv, proplist, type, literal,
+	    &ret)) == NULL)
 		return (1);
 
 	if (pool_list_iter(list, unavail, func, data) != 0)
 		ret = 1;
 
 	pool_list_free(list);
-
-	return (ret);
-}
-
-static int
-for_each_vdev_cb(zpool_handle_t *zhp, nvlist_t *nv, pool_vdev_iter_f func,
-    void *data)
-{
-	nvlist_t **child;
-	uint_t c, children;
-	int ret = 0;
-	int i;
-	char *type;
-
-	const char *list[] = {
-	    ZPOOL_CONFIG_SPARES,
-	    ZPOOL_CONFIG_L2CACHE,
-	    ZPOOL_CONFIG_CHILDREN
-	};
-
-	for (i = 0; i < ARRAY_SIZE(list); i++) {
-		if (nvlist_lookup_nvlist_array(nv, list[i], &child,
-		    &children) == 0) {
-			for (c = 0; c < children; c++) {
-				uint64_t ishole = 0;
-
-				(void) nvlist_lookup_uint64(child[c],
-				    ZPOOL_CONFIG_IS_HOLE, &ishole);
-
-				if (ishole)
-					continue;
-
-				ret |= for_each_vdev_cb(zhp, child[c], func,
-				    data);
-			}
-		}
-	}
-
-	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_TYPE, &type) != 0)
-		return (ret);
-
-	/* Don't run our function on root vdevs */
-	if (strcmp(type, VDEV_TYPE_ROOT) != 0) {
-		ret |= func(zhp, nv, data);
-	}
 
 	return (ret);
 }
@@ -327,7 +312,7 @@ for_each_vdev(zpool_handle_t *zhp, pool_vdev_iter_f func, void *data)
 		verify(nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE,
 		    &nvroot) == 0);
 	}
-	return (for_each_vdev_cb(zhp, nvroot, func, data));
+	return (for_each_vdev_cb((void *) zhp, nvroot, func, data));
 }
 
 /*
@@ -420,8 +405,8 @@ process_unique_cmd_columns(vdev_cmd_data_list_t *vcdl)
 static int
 vdev_process_cmd_output(vdev_cmd_data_t *data, char *line)
 {
-	char *col = NULL;
-	char *val = line;
+	char *col;
+	char *val;
 	char *equals;
 	char **tmp;
 
@@ -438,6 +423,7 @@ vdev_process_cmd_output(vdev_cmd_data_t *data, char *line)
 		col = line;
 		val = equals + 1;
 	} else {
+		col = NULL;
 		val = line;
 	}
 
@@ -484,39 +470,23 @@ static void
 vdev_run_cmd(vdev_cmd_data_t *data, char *cmd)
 {
 	int rc;
-	char *argv[2] = {cmd, 0};
-	char *env[5] = {"PATH=/bin:/sbin:/usr/bin:/usr/sbin", NULL, NULL, NULL,
-	    NULL};
+	char *argv[2] = {cmd};
+	char **env;
 	char **lines = NULL;
 	int lines_cnt = 0;
 	int i;
 
-	/* Setup our custom environment variables */
-	rc = asprintf(&env[1], "VDEV_PATH=%s",
-	    data->path ? data->path : "");
-	if (rc == -1) {
-		env[1] = NULL;
+	env = zpool_vdev_script_alloc_env(data->pool, data->path, data->upath,
+	    data->vdev_enc_sysfs_path, NULL, NULL);
+	if (env == NULL)
 		goto out;
-	}
-
-	rc = asprintf(&env[2], "VDEV_UPATH=%s",
-	    data->upath ? data->upath : "");
-	if (rc == -1) {
-		env[2] = NULL;
-		goto out;
-	}
-
-	rc = asprintf(&env[3], "VDEV_ENC_SYSFS_PATH=%s",
-	    data->vdev_enc_sysfs_path ?
-	    data->vdev_enc_sysfs_path : "");
-	if (rc == -1) {
-		env[3] = NULL;
-		goto out;
-	}
 
 	/* Run the command */
 	rc = libzfs_run_process_get_stdout_nopath(cmd, argv, env, &lines,
 	    &lines_cnt);
+
+	zpool_vdev_script_free_env(env);
+
 	if (rc != 0)
 		goto out;
 
@@ -528,10 +498,6 @@ vdev_run_cmd(vdev_cmd_data_t *data, char *cmd)
 out:
 	if (lines != NULL)
 		libzfs_free_str_array(lines, lines_cnt);
-
-	/* Start with i = 1 since env[0] was statically allocated */
-	for (i = 1; i < ARRAY_SIZE(env); i++)
-		free(env[i]);
 }
 
 /*
@@ -603,17 +569,22 @@ vdev_run_cmd_thread(void *cb_cmd_data)
 
 /* For each vdev in the pool run a command */
 static int
-for_each_vdev_run_cb(zpool_handle_t *zhp, nvlist_t *nv, void *cb_vcdl)
+for_each_vdev_run_cb(void *zhp_data, nvlist_t *nv, void *cb_vcdl)
 {
 	vdev_cmd_data_list_t *vcdl = cb_vcdl;
 	vdev_cmd_data_t *data;
-	char *path = NULL;
+	const char *path = NULL;
 	char *vname = NULL;
-	char *vdev_enc_sysfs_path = NULL;
+	const char *vdev_enc_sysfs_path = NULL;
 	int i, match = 0;
+	zpool_handle_t *zhp = zhp_data;
 
 	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &path) != 0)
 		return (1);
+
+	/* Make sure we're getting the updated enclosure sysfs path */
+	update_vdev_config_dev_sysfs_path(nv, path,
+	    ZPOOL_CONFIG_VDEV_ENC_SYSFS_PATH);
 
 	nvlist_lookup_string(nv, ZPOOL_CONFIG_VDEV_ENC_SYSFS_PATH,
 	    &vdev_enc_sysfs_path);
@@ -681,21 +652,21 @@ all_pools_for_each_vdev_gather_cb(zpool_handle_t *zhp, void *cb_vcdl)
 static void
 all_pools_for_each_vdev_run_vcdl(vdev_cmd_data_list_t *vcdl)
 {
-	tpool_t *t;
-
-	t = tpool_create(1, 5 * sysconf(_SC_NPROCESSORS_ONLN), 0, NULL);
-	if (t == NULL)
+	taskq_t *tq = taskq_create("vdev_run_cmd",
+	    5 * sysconf(_SC_NPROCESSORS_ONLN), minclsyspri, 1, INT_MAX,
+	    TASKQ_DYNAMIC);
+	if (tq == NULL)
 		return;
 
 	/* Spawn off the command for each vdev */
 	for (int i = 0; i < vcdl->count; i++) {
-		(void) tpool_dispatch(t, vdev_run_cmd_thread,
-		    (void *) &vcdl->data[i]);
+		(void) taskq_dispatch(tq, vdev_run_cmd_thread,
+		    (void *) &vcdl->data[i], TQ_SLEEP);
 	}
 
 	/* Wait for threads to finish */
-	tpool_wait(t);
-	tpool_destroy(t);
+	taskq_wait(tq);
+	taskq_destroy(tq);
 }
 
 /*
@@ -722,8 +693,8 @@ all_pools_for_each_vdev_run(int argc, char **argv, char *cmd,
 	vcdl->g_zfs = g_zfs;
 
 	/* Gather our list of all vdevs in all pools */
-	for_each_pool(argc, argv, B_TRUE, NULL, B_FALSE,
-	    all_pools_for_each_vdev_gather_cb, vcdl);
+	for_each_pool(argc, argv, B_TRUE, NULL, ZFS_TYPE_POOL,
+	    B_FALSE, all_pools_for_each_vdev_gather_cb, vcdl);
 
 	/* Run command on all vdevs in all pools */
 	all_pools_for_each_vdev_run_vcdl(vcdl);

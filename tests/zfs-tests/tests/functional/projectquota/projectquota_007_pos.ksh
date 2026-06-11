@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -52,7 +53,7 @@ log_assert "Check zfs get all will not print out project{obj}quota"
 log_must zfs set projectquota@$PRJID1=50m $QFS
 log_must zfs set projectobjquota@$PRJID2=100 $QFS
 
-log_mustnot eval "zfs get all $QFS | grep projectquota"
-log_mustnot eval "zfs get all $QFS | grep projectobjquota"
+log_mustnot eval "zfs get all $QFS | grep -w projectquota"
+log_mustnot eval "zfs get all $QFS | grep -w projectobjquota"
 
 log_pass "zfs get all will not print out project{obj}quota"

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -37,7 +38,7 @@ extern "C" {
 
 /*
  * Additional file level attributes, that are stored
- * in the upper half of zp_flags
+ * in the upper half of z_pflags
  */
 #define	ZFS_READONLY		0x0000000100000000ull
 #define	ZFS_HIDDEN		0x0000000200000000ull
@@ -72,7 +73,7 @@ extern "C" {
 		pflags |= attr; \
 	else \
 		pflags &= ~attr; \
-	VERIFY(0 == sa_update(zp->z_sa_hdl, SA_ZPL_FLAGS(ZTOZSB(zp)), \
+	VERIFY0(sa_update(zp->z_sa_hdl, SA_ZPL_FLAGS(ZTOZSB(zp)), \
 	    &pflags, sizeof (pflags), tx)); \
 }
 
@@ -158,6 +159,9 @@ extern "C" {
 #define	ZFS_DIRENT_OBJ(de) BF64_GET(de, 0, 48)
 
 extern int zfs_obj_to_path(objset_t *osp, uint64_t obj, char *buf, int len);
+extern int zfs_obj_to_pobj(objset_t *osp, sa_handle_t *hdl,
+    sa_attr_type_t *sa_table, uint64_t *pobjp, int *is_xattrdir);
+extern int zfs_get_zplprop(objset_t *os, zfs_prop_t prop, uint64_t *value);
 
 #ifdef _KERNEL
 #include <sys/zfs_znode_impl.h>
@@ -188,9 +192,7 @@ typedef struct znode {
 	boolean_t	z_atime_dirty;	/* atime needs to be synced */
 	boolean_t	z_zn_prefetch;	/* Prefetch znodes? */
 	boolean_t	z_is_sa;	/* are we native sa? */
-	boolean_t	z_is_mapped;	/* are we mmap'ed */
 	boolean_t	z_is_ctldir;	/* are we .zfs entry */
-	boolean_t	z_is_stale;	/* are we stale due to rollback? */
 	boolean_t	z_suspended;	/* extra ref from a suspend? */
 	uint_t		z_blksz;	/* block size in bytes */
 	uint_t		z_seq;		/* modification sequence number */
@@ -216,11 +218,34 @@ typedef struct znode {
 	ZNODE_OS_FIELDS;
 } znode_t;
 
+/* Verifies the znode is valid. */
+static inline int
+zfs_verify_zp(znode_t *zp)
+{
+	if (unlikely(zp->z_sa_hdl == NULL))
+		return (SET_ERROR(EIO));
+	return (0);
+}
+
+/* zfs_enter and zfs_verify_zp together */
+static inline int
+zfs_enter_verify_zp(zfsvfs_t *zfsvfs, znode_t *zp, const char *tag)
+{
+	int error;
+	if ((error = zfs_enter(zfsvfs, tag)) != 0)
+		return (error);
+	if ((error = zfs_verify_zp(zp)) != 0) {
+		zfs_exit(zfsvfs, tag);
+		return (error);
+	}
+	return (0);
+}
+
 typedef struct znode_hold {
 	uint64_t	zh_obj;		/* object id */
-	kmutex_t	zh_lock;	/* lock serializing object access */
 	avl_node_t	zh_node;	/* avl tree linkage */
-	zfs_refcount_t	zh_refcount;	/* active consumer reference count */
+	kmutex_t	zh_lock;	/* lock serializing object access */
+	int		zh_refcount;	/* active consumer reference count */
 } znode_hold_t;
 
 static inline uint64_t
@@ -248,6 +273,8 @@ extern int	zfs_freesp(znode_t *, uint64_t, uint64_t, int, boolean_t);
 extern void	zfs_znode_init(void);
 extern void	zfs_znode_fini(void);
 extern int	zfs_znode_hold_compare(const void *, const void *);
+extern znode_hold_t *zfs_znode_hold_enter(zfsvfs_t *, uint64_t);
+extern void	zfs_znode_hold_exit(zfsvfs_t *, znode_hold_t *);
 extern int	zfs_zget(zfsvfs_t *, uint64_t, znode_t **);
 extern int	zfs_rezget(znode_t *);
 extern void	zfs_zinactive(znode_t *);
@@ -255,7 +282,6 @@ extern void	zfs_znode_delete(znode_t *, dmu_tx_t *);
 extern void	zfs_remove_op_tables(void);
 extern int	zfs_create_op_tables(void);
 extern dev_t	zfs_cmpldev(uint64_t);
-extern int	zfs_get_zplprop(objset_t *os, zfs_prop_t prop, uint64_t *value);
 extern int	zfs_get_stats(objset_t *os, nvlist_t *nv);
 extern boolean_t zfs_get_vfs_flag_unmounted(objset_t *os);
 extern void	zfs_znode_dmu_fini(znode_t *);
@@ -275,17 +301,28 @@ extern void zfs_log_symlink(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
 extern void zfs_log_rename(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
     znode_t *sdzp, const char *sname, znode_t *tdzp, const char *dname,
     znode_t *szp);
+extern void zfs_log_rename_exchange(zilog_t *zilog, dmu_tx_t *tx,
+    uint64_t txtype, znode_t *sdzp, const char *sname, znode_t *tdzp,
+    const char *dname, znode_t *szp);
+extern void zfs_log_rename_whiteout(zilog_t *zilog, dmu_tx_t *tx,
+    uint64_t txtype, znode_t *sdzp, const char *sname, znode_t *tdzp,
+    const char *dname, znode_t *szp, znode_t *wzp);
 extern void zfs_log_write(zilog_t *zilog, dmu_tx_t *tx, int txtype,
-    znode_t *zp, offset_t off, ssize_t len, int ioflag,
-    zil_callback_t callback, void *callback_data);
+    znode_t *zp, offset_t off, ssize_t len, boolean_t commit,
+    boolean_t o_direct, zil_callback_t callback, void *callback_data);
 extern void zfs_log_truncate(zilog_t *zilog, dmu_tx_t *tx, int txtype,
     znode_t *zp, uint64_t off, uint64_t len);
 extern void zfs_log_setattr(zilog_t *zilog, dmu_tx_t *tx, int txtype,
     znode_t *zp, vattr_t *vap, uint_t mask_applied, zfs_fuid_info_t *fuidp);
 extern void zfs_log_acl(zilog_t *zilog, dmu_tx_t *tx, znode_t *zp,
     vsecattr_t *vsecp, zfs_fuid_info_t *fuidp);
+extern void zfs_log_clone_range(zilog_t *zilog, dmu_tx_t *tx, int txtype,
+    znode_t *zp, uint64_t offset, uint64_t length, uint64_t blksz,
+    const blkptr_t *bps, size_t nbps);
 extern void zfs_xvattr_set(znode_t *zp, xvattr_t *xvap, dmu_tx_t *tx);
 extern void zfs_upgrade(zfsvfs_t *zfsvfs, dmu_tx_t *tx);
+extern void zfs_log_setsaxattr(zilog_t *zilog, dmu_tx_t *tx, int txtype,
+    znode_t *zp, const char *name, const void *value, size_t size);
 
 extern void zfs_znode_update_vfs(struct znode *);
 

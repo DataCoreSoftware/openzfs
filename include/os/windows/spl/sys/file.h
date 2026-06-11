@@ -23,6 +23,12 @@
 #define	_SPL_FILE_H
 
 #define	FIGNORECASE	0x00080000
+#define	FLINKREPLACE	0x00100000 // Windows
+/*
+ * Windows-only: skip ZFS POSIX ACL check in zfs_rename because Windows
+ * already validated DELETE access on the source FileObject at open time.
+ */
+#define	FBYPASS_ZFS_ACL	0x00200000
 #define	FKIOCTL		0x80000000
 #define	FCOPYSTR	0x40000000
 
@@ -40,12 +46,16 @@ struct spl_fileproc {
 	HANDLE		f_handle;
 	void		*f_fileobject;
 	void		*f_deviceobject;
+	uint64_t	f_win_offset; /* soft partition start */
+	uint64_t	f_win_length; /* soft partition length */
 };
 
 #define	file_t struct spl_fileproc
 
 void *getf(uint64_t fd);
 void releasef(uint64_t fd);
+void releasefp(struct spl_fileproc *fp);
+
 /* O3X extended - get vnode from previos getf() */
 struct vnode *getf_vnode(void *fp);
 

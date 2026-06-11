@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -34,7 +35,7 @@ extern int zpl_get_file_info(dmu_object_type_t,
 extern int zfs_userspace_one(struct zfsvfs *, zfs_userquota_prop_t,
     const char *, uint64_t, uint64_t *);
 extern int zfs_userspace_many(struct zfsvfs *, zfs_userquota_prop_t,
-    uint64_t *, void *, uint64_t *);
+    uint64_t *, void *, uint64_t *, uint64_t *);
 extern int zfs_set_userquota(struct zfsvfs *, zfs_userquota_prop_t,
     const char *, uint64_t, uint64_t);
 

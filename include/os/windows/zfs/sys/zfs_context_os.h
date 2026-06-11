@@ -19,6 +19,9 @@
  *
  * CDDL HEADER END
  */
+
+/* Copyright(c) 2015 Jorgen Lundman <lundman@lundman.net> */
+
 #ifndef _SPL_ZFS_CONTEXT_OS_H
 #define	_SPL_ZFS_CONTEXT_OS_H
 
@@ -31,6 +34,7 @@
 		IRP *irp; \
 		void *b_addr; \
 		IO_STATUS_BLOCK IoStatus; \
+		volatile uint32_t completion_called; \
 		PIO_WORKITEM work_item; \
 	} windows;
 
@@ -65,6 +69,7 @@ typedef struct spa_iokit spa_iokit_t;
 extern boolean_t ml_set_interrupts_enabled(boolean_t);
 extern PDRIVER_OBJECT WIN_DriverObject;
 
+
 /*
  * Ok this is pretty gross - until we can get rid of it from lua -
  * it works as long as it doesn't parse strings
@@ -79,14 +84,17 @@ extern PDRIVER_OBJECT WIN_DriverObject;
 
 #include <Trace.h>
 
-/* Since Linux code uses vmem_free() and we already have one: */
-#define	vmem_free(A, B)			zfs_kmem_free((A), (B))
-#define	vmem_alloc(A, B)		zfs_kmem_alloc((A), (B))
-#define	vmem_zalloc(A, B)		zfs_kmem_zalloc((A), (B))
-
 typedef	int	fstrans_cookie_t;
 #define	spl_fstrans_mark()		(0)
 #define	spl_fstrans_unmark(x)	(x = 0)
+
+// "zfs send" will try to use a new thread to send, which is
+// not allowed (thread can't use HANDLE from userland unless
+// it is exactly the same process). Set this here, to call
+// "zfs send" directly.
+#define	HAVE_LARGE_STACKS   1
+
+
 
 #ifdef _KERNEL
 
@@ -155,10 +163,10 @@ hlist_del(struct hlist_node *n)
 #define	INIT_HLIST_HEAD(head) (head)->first = NULL
 
 /* BEGIN CSTYLED */
-#define	INIT_HLIST_NODE(node)											\
-	do {																\
-		(node)->next = NULL;											\
-		(node)->pprev = NULL;											\
+#define	INIT_HLIST_NODE(node)	\
+	do {	\
+		(node)->next = NULL;	\
+		(node)->pprev = NULL;	\
 	} while (0)
 
 /* END CSTYLED */
@@ -187,10 +195,6 @@ extern void kx_qsort(void *array, size_t nm, size_t member_size,
 
 #define	strstr kmem_strstr
 
-void spa_create_os(void *spa);
-void spa_export_os(void *spa);
-void spa_activate_os(void *spa);
-void spa_deactivate_os(void *spa);
 
 #define	task_io_account_read(n)
 #define	task_io_account_write(n)
@@ -204,5 +208,22 @@ void spa_deactivate_os(void *spa);
 #endif
 
 #endif // _KERNEL
+
+#define	FSCTL_ZFS_VOLUME_MOUNTPOINT CTL_CODE(FILE_DEVICE_UNKNOWN, \
+    0x8ff, METHOD_BUFFERED, FILE_ANY_ACCESS)
+typedef struct {
+	int len;
+	WCHAR buffer[1]; // make this dynamic?
+} fsctl_zfs_volume_mountpoint_t;
+
+/* DataCore: vmem aliases and spa OS hooks */
+#ifndef vmem_free
+#define	vmem_free(A, B)			zfs_kmem_free((A), (B))
+#define	vmem_alloc(A, B)		zfs_kmem_alloc((A), (B))
+#define	vmem_zalloc(A, B)		zfs_kmem_zalloc((A), (B))
+#endif
+
+void spa_create_os(void *spa);
+/* spa_export_os, spa_activate_os, spa_deactivate_os are declared in include/sys/spa.h */
 
 #endif

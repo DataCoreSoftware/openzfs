@@ -1,4 +1,4 @@
-/* BEGIN CSTYLED */
+// SPDX-License-Identifier: MIT
 /*
 ** $Id: llimits.h,v 1.103.1.1 2013/04/12 18:48:47 roberto Exp $
 ** Limits, basic types, and some other `installation-dependent' definitions
@@ -311,4 +311,3 @@ union luai_Cast { double l_d; LUA_INT32 l_p[2]; };
 #endif
 
 #endif
-/* END CSTYLED */

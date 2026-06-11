@@ -1,3 +1,4 @@
+.\" SPDX-License-Identifier: CDDL-1.0
 .\"
 .\" CDDL HEADER START
 .\"
@@ -6,7 +7,7 @@
 .\" You may not use this file except in compliance with the License.
 .\"
 .\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or http://www.opensolaris.org/os/licensing.
+.\" or https://opensource.org/licenses/CDDL-1.0.
 .\" See the License for the specific language governing permissions
 .\" and limitations under the License.
 .\"
@@ -23,7 +24,7 @@
 .\" reserved.
 .\" Copyright (c) 2017, Intel Corporation.
 .\"
-.Dd May 26, 2021
+.Dd July 12, 2025
 .Dt ZTEST 1
 .Os
 .
@@ -51,6 +52,16 @@
 .Op Fl p Ar pool_name
 .Op Fl T Ar time
 .Op Fl z Ar zil_failure_rate
+.
+.Nm
+.Fl X
+.Op Fl VG
+.Op Fl s Ar size_of_each_vdev
+.Op Fl a Ar alignment_shift
+.Op Fl r Ar raidz_disks
+.Op Fl R Ar raid_parity
+.Op Fl d Ar datasets
+.Op Fl t Ar threads
 .
 .Sh DESCRIPTION
 .Nm
@@ -114,19 +125,25 @@ Print a help summary.
 Number of vdevs.
 .It Fl s , -vdev-size Ns = (default: Sy 64M )
 Size of each vdev.
-.It Fl a , -alignment-shift Ns = (default: Sy 9 ) No (use Sy 0 No for random)
+.It Fl a , -alignment-shift Ns = (default: Sy 9 ) No (use Sy 0 No for random )
 Alignment shift used in test.
 .It Fl m , -mirror-copies Ns = (default: Sy 2 )
 Number of mirror copies.
-.It Fl r , -raid-disks Ns = (default: Sy 4 No for raidz/ Ns Sy 16 No for draid)
+.It Fl r , -raid-disks Ns = (default: Sy 4 No for raidz/ Ns Sy 16 No for draid )
 Number of raidz/draid disks.
 .It Fl R , -raid-parity Ns = (default: Sy 1 )
 Raid parity (raidz & draid).
-.It Fl K , -raid-kind Ns = Ns Sy raidz Ns | Ns Sy draid Ns | Ns Sy random No (default: Sy random )
+.It Xo
+.Fl K , -raid-kind Ns = Ns
+.Sy raidz Ns | Ns Sy eraidz Ns | Ns Sy draid Ns | Ns Sy random
+(default:
+.Sy random Ns
+)
+.Xc
 The kind of RAID config to use.
 With
 .Sy random
-the kind alternates between raidz and draid.
+the kind alternates between raidz, eraidz (expandable raidz) and draid.
 .It Fl D , -draid-data Ns = (default: Sy 4 )
 Number of data disks in a dRAID redundancy group.
 .It Fl S , -draid-spares Ns = (default: Sy 1 )
@@ -157,19 +174,28 @@ Time per pass.
 Max loops in
 .Fn spa_freeze .
 .It Fl B , -alt-ztest Ns =
-Alternate ztest path.
-.It Fl C , -vdev-class-state Ns = Ns Sy on Ns | Ns Sy off Ns | Ns Sy random No (default: Sy random )
+Path to alternate ("older")
+.Nm ztest
+to drive, which will be used to initialize the pool, and, a stochastic half the
+time, to run the tests.
+The parallel
+.Pa lib
+directory is prepended to
+.Ev LD_LIBRARY_PATH ;
+i.e. given
+.Fl B Pa ./chroots/lenny/usr/bin/ Ns Nm ,
+.Pa ./chroots/lenny/usr/lib
+will be loaded.
+.It Fl C , -vdev-class-state Ns = Ns Sy on Ns | Ns Sy off Ns | Ns Sy random No (default : Sy random  )
 The vdev allocation class state.
-.It Fl o , -option Ns = Ns Ar variable Ns = Ns Ar value
-Set global
-.Ar variable
-to an unsigned 32-bit integer
-.Ar value
-(little-endian only).
+.It Fl o , -option Ns = Ns Ar var Ns = Ns Ar value Ns …
+Set the given tunable to the provided value.
 .It Fl G , -dump-debug
 Dump zfs_dbgmsg buffer before exiting due to an error.
 .It Fl V , -verbose
 Verbose (use multiple times for ever more verbosity).
+.It Fl X , -raidz-expansion
+Perform a dedicated raidz expansion test.
 .El
 .
 .Sh EXAMPLES

@@ -1,3 +1,4 @@
+dnl # SPDX-License-Identifier: CDDL-1.0
 dnl #
 dnl # 2.6.33 API change
 dnl # Added eops->commit_metadata() callback to allow the underlying
@@ -7,7 +8,7 @@ dnl #
 AC_DEFUN([ZFS_AC_KERNEL_SRC_COMMIT_METADATA], [
 	ZFS_LINUX_TEST_SRC([export_operations_commit_metadata], [
 		#include <linux/exportfs.h>
-		int commit_metadata(struct inode *inode) { return 0; }
+		static int commit_metadata(struct inode *inode) { return 0; }
 		static struct export_operations eops __attribute__ ((unused))={
 			.commit_metadata = commit_metadata,
 		};

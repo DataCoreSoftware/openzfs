@@ -28,6 +28,7 @@
 #define	_LIBSPL_WINDOWS_SYS_TIME_H
 
 // #include_next <sys/time.h>
+#include <time.h>
 #include <sys/types.h>
 #if !defined(_WINSOCKAPI_) && !defined(_WINSOCK2API_)
 #include <winsock2.h>
@@ -35,6 +36,7 @@
 #endif
 
 typedef struct timespec	inode_timespec_t;
+typedef void *timer_t;
 
 #ifndef SEC
 #define	SEC		1
@@ -73,6 +75,23 @@ typedef struct timespec	inode_timespec_t;
 #define	SEC2NSEC(m)	((hrtime_t)(m) * (NANOSEC / SEC))
 #define	NSEC2USEC(n)	((n) / (NANOSEC / MICROSEC))
 
+static inline hrtime_t
+getlrtime(void)
+{
+	static LARGE_INTEGER freq = { 0 };
+	LARGE_INTEGER c;
+
+	if (freq.QuadPart == 0)
+		QueryPerformanceFrequency(&freq);
+
+	QueryPerformanceCounter(&c);
+
+	// Convert to ns without overflowing too easily:
+	// ns = (c * 1e9) / freq
+	return (hrtime_t)((c.QuadPart * (LONGLONG)1000000000LL) /
+	    freq.QuadPart);
+}
+
 /* Technically timeval lives in winsock2.h */
 #if 0
 #ifndef _WINSOCK2API_
@@ -100,5 +119,38 @@ const char *win_ctime_r(char *buffer, size_t bufsize, time_t cur_time);
 #define	ctime_r(CLOCK, STR) win_ctime_r((STR), sizeof ((STR)), (CLOCK))
 
 struct tm *localtime_r(const time_t *clock, struct tm *result);
+
+extern void clock_gettime(clock_type_t t, struct timespec *ts);
+extern uint64_t gethrestime_sec(void);
+
+#define	timegm _mkgmtime
+
+struct sigevent;
+
+// timespec.h
+
+struct itimerspec {
+	struct timespec it_interval;
+	struct timespec it_value;
+};
+
+int timer_create(clockid_t, struct sigevent *__restrict, timer_t *__restrict);
+int timer_delete(timer_t);
+int timer_gettime(timer_t, struct itimerspec *);
+int timer_getoverrun(timer_t);
+int timer_settime(timer_t, int, const struct itimerspec *__restrict,
+    struct itimerspec *__restrict);
+
+#define	timersub(tvp, uvp, vvp)						\
+	do {								\
+		(vvp)->tv_sec = (tvp)->tv_sec - (uvp)->tv_sec;		\
+		(vvp)->tv_usec = (tvp)->tv_usec - (uvp)->tv_usec;	\
+		if ((vvp)->tv_usec < 0) {				\
+			(vvp)->tv_sec--;				\
+			(vvp)->tv_usec += 1000000;			\
+		}							\
+	} while (0)
+
+char *strptime(const char *s, const char *f, struct tm *tm);
 
 #endif /* _LIBSPL_SYS_TIME_H */

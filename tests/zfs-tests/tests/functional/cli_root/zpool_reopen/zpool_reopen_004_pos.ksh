@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 
 #
 # This file and its contents are supplied under the terms of the
@@ -46,6 +47,8 @@ function cleanup
 	# bring back removed disk online for further tests
 	insert_disk $REMOVED_DISK $scsi_host
 	poolexists $TESTPOOL && destroy_pool $TESTPOOL
+	# Since the disk was offline during destroy, remove the label
+	zpool labelclear $DISK2 -f
 }
 
 log_assert "Testing zpool reopen with pool name as argument"
@@ -62,6 +65,7 @@ log_must zpool reopen -n $TESTPOOL
 log_must check_state $TESTPOOL "$REMOVED_DISK_ID" "unavail"
 # 3. Write test file to pool.
 log_must generate_random_file /$TESTPOOL/data $LARGE_FILE_SIZE
+sync_pool $TESTPOOL
 # 4. Execute scrub.
 # add delay to I/O requests for remaining disk in pool
 log_must zinject -d $DISK2 -D125:1 $TESTPOOL

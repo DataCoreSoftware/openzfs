@@ -40,55 +40,370 @@
 #include <sys/zvol_impl.h>
 #include <sys/zvol_os.h>
 
+#include <sys/openzvol.h>
+
+extern zv_taskq_t zvol_taskqs;
+taskq_t *zvol_taskq = NULL;
+
 static uint32_t zvol_major = ZVOL_MAJOR;
 
-unsigned int zvol_request_sync = 0;
-unsigned int zvol_prefetch_bytes = (128 * 1024);
 unsigned long zvol_max_discard_blocks = 16384;
-int zvol_threads = 0;
-int zfs_prealloc_percent = 90;
 
-taskq_t *zvol_taskq;
+/*
+ * Is round-robin enough? We internally only spawn for
+ * IOKit deadlock avoidance, and low-stack situations,
+ * not performace in read/write.
+ */
+static volatile uint32_t zvol_os_rr;
 
-extern void wzvol_clear_targetid(uint8_t targetid, uint8_t lun,
-    zvol_state_t *zv);
-extern void wzvol_announce_buschange(void);
-extern int wzvol_assign_targetid(zvol_state_t *zv);
+extern list_t zvol_state_list;
 
-typedef struct zv_request {
+_Atomic uint64_t spl_lowest_zvol_stack_remaining = 0;
+
+typedef struct zv_os_request {
 	zvol_state_t *zv;
 
 	void (*zv_func)(void *);
 	void *zv_arg;
 
 	taskq_ent_t	ent;
-} zv_request_t;
+} zv_os_request_t;
 
 #define	ZVOL_LOCK_HELD		(1<<0)
 #define	ZVOL_LOCK_SPA		(1<<1)
 #define	ZVOL_LOCK_SUSPEND	(1<<2)
 
+// After we register with openzvol.sys, we hold a reference to the fileObject
+// until deregister is called. So we do not need to reopen it to issue IRPs.
+// we can then use openzvol_deviceObject as a test for registered or not.
+static HANDLE g_zvolHandle = NULL; // real handle > vetoes removal
+static PFILE_OBJECT g_zvolFile = NULL; // optional: for DevObj access
+static PDEVICE_OBJECT g_zvolDevObj = NULL; // derived from g_zvolFile
+
+static kcondvar_t zvol_os_wait_openzvol_thread_cv;
+static kmutex_t zvol_os_wait_openzvol_thread_lock;
+static boolean_t zvol_os_wait_openzvol_thread_exit;
+
+static NTSTATUS
+zvol_bind_open(void)
+{
+	NTSTATUS st;
+	IO_STATUS_BLOCK iosb;
+	UNICODE_STRING us;
+	OBJECT_ATTRIBUTES oa;
+
+	// Prefer DOS link (easy to open as a file).
+	RtlInitUnicodeString(&us, SYMBOLIC_LINK_NAME);
+	InitializeObjectAttributes(&oa, &us,
+	    OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+	st = ZwCreateFile(&g_zvolHandle,
+	    GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
+	    &oa, &iosb, NULL,
+	    FILE_ATTRIBUTE_NORMAL,
+	    FILE_SHARE_READ | FILE_SHARE_WRITE,
+	    FILE_OPEN,
+	    FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+	    NULL, 0);
+	if (!NT_SUCCESS(st)) {
+		dprintf("ZFS: ZwCreateFile(OpenZVOL) failed %08x\n", st);
+		return (STATUS_SUCCESS);
+	}
+
+	dprintf("ZFS: ZwCreateFile(OpenZVOL) succeeded\n");
+	st = ObReferenceObjectByHandle(g_zvolHandle, 0, *IoFileObjectType,
+	    KernelMode, (PVOID *)&g_zvolFile, NULL);
+	if (!NT_SUCCESS(st)) {
+		ZwClose(g_zvolHandle); g_zvolHandle = NULL;
+		return (st);
+	}
+
+	g_zvolDevObj = IoGetRelatedDeviceObject(g_zvolFile);
+	return (STATUS_SUCCESS);
+}
+
+static void
+zvol_bind_close(void)
+{
+	if (g_zvolFile) {
+		ObDereferenceObject(g_zvolFile);
+		g_zvolFile = NULL;
+	}
+
+	if (g_zvolHandle) {
+		ZwClose(g_zvolHandle);
+		g_zvolHandle = NULL;
+	}
+	g_zvolDevObj = NULL;
+}
+
+static void
+register_with_openzvol(void)
+{
+	NTSTATUS status;
+
+	status = zvol_bind_open();
+
+	if (!NT_SUCCESS(status)) {
+		dprintf("ZFS: OpenZVOL bind failed %08x\n", status);
+		return;
+	}
+
+	IO_STATUS_BLOCK iosb;
+	zvol_api_t *api;
+
+	api = ExAllocatePoolWithTag(NonPagedPoolNx, sizeof (zvol_api_t),
+	    'lovZ');
+	if (!api) {
+		dprintf("ZFS: Failed to allocate memory\n");
+		goto out;
+	}
+
+	api->zvol_os_read_zv = zvol_os_read_zv;
+	api->zvol_os_write_zv = zvol_os_write_zv;
+	api->zvol_os_unmap = zvol_os_unmap;
+
+	status = ZwDeviceIoControlFile(g_zvolHandle,
+	    NULL, NULL, NULL,
+	    &iosb,
+	    OPENZVOL_REGISTER,
+	    api, sizeof (zvol_api_t),
+	    NULL, 0);
+	if (status == STATUS_PENDING) {
+		status = ZwWaitForSingleObject(g_zvolHandle, FALSE, NULL);
+		if (NT_SUCCESS(status))
+			status = iosb.Status;
+	}
+
+
+	if (!NT_SUCCESS(status)) {
+		dprintf("ZFS: Failed to register with OpenZVOL %08x\n",
+		    status);
+		goto out;
+	}
+
+	ExFreePool(api);
+
+	// Do not release it here. Look in deregister()
+	return;
+
+out:
+	if (api)
+		ExFreePool(api);
+	zvol_bind_close();
+}
+
+static void
+zvol_os_wait_openzvol(void *arg)
+{
+	UNICODE_STRING deviceName;
+	NTSTATUS status;
+	PFILE_OBJECT fileObject;
+	PDEVICE_OBJECT deviceObject;
+	callb_cpr_t cpr;
+
+	CALLB_CPR_INIT(&cpr, &zvol_os_wait_openzvol_thread_lock,
+	    callb_generic_cpr, FTAG);
+
+	dprintf("%s thread start\n", __func__);
+
+	RtlInitUnicodeString(&deviceName, L"\\Device\\OpenZVOL");
+
+	mutex_enter(&zvol_os_wait_openzvol_thread_lock);
+	while (!zvol_os_wait_openzvol_thread_exit) {
+
+		status = IoGetDeviceObjectPointer(&deviceName, FILE_READ_DATA,
+		    &fileObject, &deviceObject);
+		if (NT_SUCCESS(status)) {
+			ObDereferenceObject(fileObject);
+			register_with_openzvol();
+			break;
+		}
+
+		CALLB_CPR_SAFE_BEGIN(&cpr);
+		(void) cv_timedwait_hires(&zvol_os_wait_openzvol_thread_cv,
+		    &zvol_os_wait_openzvol_thread_lock, SEC2NSEC(3), 0, 0);
+		CALLB_CPR_SAFE_END(&cpr, &zvol_os_wait_openzvol_thread_lock);
+	}
+
+	zvol_os_wait_openzvol_thread_exit = TRUE;
+	cv_broadcast(&zvol_os_wait_openzvol_thread_cv);
+	CALLB_CPR_EXIT(&cpr);
+	dprintf("%s thread_exit\n", __func__);
+
+	thread_exit();
+}
+
+static void
+zvol_os_assign_targetid(zvol_state_t *zv)
+{
+	PIRP irp;
+	IO_STATUS_BLOCK ioStatus;
+	KEVENT event;
+	NTSTATUS status;
+
+	if (!g_zvolHandle)
+		return;
+
+	dprintf("%s\n", __func__);
+
+	status = ZwDeviceIoControlFile(g_zvolHandle,
+	    NULL, NULL, NULL,
+	    &ioStatus,
+	    OPENZVOL_ASSIGN_TARGETID,
+	    &zv, sizeof (zvol_state_t *),
+	    NULL, 0);
+	if (status == STATUS_PENDING) {
+		status = ZwWaitForSingleObject(g_zvolHandle, FALSE, NULL);
+		if (NT_SUCCESS(status))
+			status = ioStatus.Status;
+	}
+
+	if (!NT_SUCCESS(status)) {
+		dprintf("%s: assign_targetid failed %08x\n",
+		    __func__, status);
+	}
+}
+
+static void
+zvol_os_clear_targetid(zvol_state_t *zv)
+{
+	PIRP irp;
+	IO_STATUS_BLOCK ioStatus;
+	KEVENT event;
+	NTSTATUS status;
+
+	if (!g_zvolHandle)
+		return;
+
+	dprintf("%s\n", __func__);
+
+	status = ZwDeviceIoControlFile(g_zvolHandle,
+	    NULL, NULL, NULL,
+	    &ioStatus,
+	    OPENZVOL_CLEAR_TARGETID,
+	    &zv, sizeof (zvol_state_t *),
+	    NULL, 0);
+	if (status == STATUS_PENDING) {
+		status = ZwWaitForSingleObject(g_zvolHandle, FALSE, NULL);
+		if (NT_SUCCESS(status))
+			status = ioStatus.Status;
+	}
+
+	if (!NT_SUCCESS(status)) {
+		dprintf("%s: clear_targetid failed %08x\n",
+		    __func__, status);
+	}
+}
+
+static void
+zvol_os_announce_buschange(void)
+{
+	PIRP irp;
+	IO_STATUS_BLOCK ioStatus;
+	KEVENT event;
+	NTSTATUS status;
+
+	if (!g_zvolHandle)
+		return;
+
+	dprintf("%s\n", __func__);
+	status = ZwDeviceIoControlFile(g_zvolHandle,
+	    NULL, NULL, NULL,
+	    &ioStatus,
+	    OPENZVOL_ANNOUNCE_BUSCHANGE,
+	    NULL, 0,
+	    NULL, 0);
+	if (status == STATUS_PENDING) {
+		status = ZwWaitForSingleObject(g_zvolHandle, FALSE, NULL);
+		if (NT_SUCCESS(status))
+			status = ioStatus.Status;
+	}
+
+	if (!NT_SUCCESS(status)) {
+		dprintf("%s: announce_buschange failed %08x\n",
+		    __func__, status);
+	}
+}
+
+/*
+ * Attempt to register with the OpenZVOL module,
+ * either now if loaded, or later when it loads.
+ */
+int
+zvol_os_register_module(void)
+{
+	zvol_os_wait_openzvol_thread_exit = FALSE;
+	mutex_init(&zvol_os_wait_openzvol_thread_lock,
+	    "zvol_os_wait_openzvol_thead_lock", MUTEX_DEFAULT, NULL);
+	(void) cv_init(&zvol_os_wait_openzvol_thread_cv, NULL, CV_DEFAULT,
+	    NULL);
+	(void) thread_create(NULL, 0, zvol_os_wait_openzvol, 0, 0, 0, 0,
+	    defclsyspri);
+
+	return (0);
+}
+
+void
+zvol_os_deregister_module(void)
+{
+	PIRP irp;
+	IO_STATUS_BLOCK ioStatus;
+	KEVENT event;
+	NTSTATUS status;
+
+	dprintf("%s: waiting for thread to exit...\n", __func__);
+	mutex_enter(&zvol_os_wait_openzvol_thread_lock);
+	if (!zvol_os_wait_openzvol_thread_exit) {
+		zvol_os_wait_openzvol_thread_exit = TRUE;
+		cv_signal(&zvol_os_wait_openzvol_thread_cv);
+		cv_wait(&zvol_os_wait_openzvol_thread_cv,
+		    &zvol_os_wait_openzvol_thread_lock);
+	}
+	dprintf("%s: thread exited.\n", __func__);
+	mutex_exit(&zvol_os_wait_openzvol_thread_lock);
+	cv_destroy(&zvol_os_wait_openzvol_thread_cv);
+	mutex_destroy(&zvol_os_wait_openzvol_thread_lock);
+
+	if (g_zvolHandle) {
+		IO_STATUS_BLOCK iosb;
+		(void) ZwDeviceIoControlFile(g_zvolHandle,
+		    NULL, NULL, NULL,
+		    &iosb,
+		    OPENZVOL_DEREGISTER,
+		    NULL, 0, NULL, 0);
+		if (status == STATUS_PENDING) {
+			status = ZwWaitForSingleObject(g_zvolHandle, FALSE,
+			    NULL);
+			if (NT_SUCCESS(status))
+				status = ioStatus.Status;
+		}
+	}
+	zvol_bind_close();
+}
+
 static void
 zvol_os_spawn_cb(void *param)
 {
-	zv_request_t *zvr = (zv_request_t *)param;
+	zv_os_request_t *zvr = (zv_os_request_t *)param;
 
 	zvr->zv_func(zvr->zv_arg);
 
-	kmem_free(zvr, sizeof (zv_request_t));
+	kmem_free(zvr, sizeof (zv_os_request_t));
 }
 
 static void
 zvol_os_spawn(void (*func)(void *), void *arg)
 {
-	zv_request_t *zvr;
-	zvr = kmem_alloc(sizeof (zv_request_t), KM_SLEEP);
+	zv_os_request_t *zvr;
+	int tqid = atomic_inc_32_nv(&zvol_os_rr) % zvol_taskqs.tqs_cnt;
+	zvr = kmem_alloc(sizeof (zv_os_request_t), KM_SLEEP);
 	zvr->zv_arg = arg;
 	zvr->zv_func = func;
 
 	taskq_init_ent(&zvr->ent);
 
-	taskq_dispatch_ent(zvol_taskq,
+	taskq_dispatch_ent(zvol_taskqs.tqs_taskq[tqid],
 	    zvol_os_spawn_cb, zvr, 0, &zvr->ent);
 }
 
@@ -134,15 +449,15 @@ retry:
 
 		/* If this is to be first open, deal with spa_namespace */
 		if (zv->zv_open_count == 0 &&
-		    !mutex_owned(&spa_namespace_lock)) {
+		    !spa_namespace_held()) {
 			/*
 			 * We need to guarantee that the namespace lock is held
 			 * to avoid spurious failures in zvol_first_open.
 			 */
 			ret |= ZVOL_LOCK_SPA;
-			if (!mutex_tryenter(&spa_namespace_lock)) {
+			if (!spa_namespace_tryenter(FTAG)) {
 				rw_exit(&zvol_state_lock);
-				mutex_enter(&spa_namespace_lock);
+				spa_namespace_enter(FTAG);
 				/* Sadly, this will restart for loop */
 				goto retry;
 			}
@@ -163,9 +478,9 @@ retry:
 				/* If we hold spa_namespace, we can deadlock */
 				if (ret & ZVOL_LOCK_SPA) {
 					rw_exit(&zvol_state_lock);
-					mutex_exit(&spa_namespace_lock);
+					spa_namespace_exit(FTAG);
 					ret &= ~ZVOL_LOCK_SPA;
-					TraceEvent(TRACE_NOISY, "%s: spa_namespace loop\n",
+					dprintf("%s: spa_namespace loop\n",
 					    __func__);
 					/* Let's not busy loop */
 					delay(hz>>2);
@@ -192,7 +507,7 @@ retry:
 
 	/* It's possible we grabbed spa, but then didn't re-find zv */
 	if (ret & ZVOL_LOCK_SPA)
-		mutex_exit(&spa_namespace_lock);
+		spa_namespace_exit(FTAG);
 	return (0);
 }
 
@@ -200,7 +515,7 @@ static void
 zvol_os_verify_lock_exit(zvol_state_t *zv, int locks)
 {
 	if (locks & ZVOL_LOCK_SPA)
-		mutex_exit(&spa_namespace_lock);
+		spa_namespace_exit(FTAG);
 	mutex_exit(&zv->zv_state_lock);
 	if (locks & ZVOL_LOCK_SUSPEND)
 		rw_exit(&zv->zv_suspend_lock);
@@ -237,6 +552,14 @@ zvol_os_read_zv(zvol_state_t *zv, zfs_uio_t *uio, int flags)
 	int error = 0;
 	uint64_t offset = 0;
 
+	const ULONG_PTR r = IoGetRemainingStackSize();
+
+	if (spl_lowest_zvol_stack_remaining == 0) {
+		spl_lowest_zvol_stack_remaining = r;
+	} else if (spl_lowest_zvol_stack_remaining > r) {
+		spl_lowest_zvol_stack_remaining = r;
+	}
+
 	if (zv == NULL || zv->zv_dn == NULL)
 		return (ENXIO);
 
@@ -260,7 +583,8 @@ zvol_os_read_zv(zvol_state_t *zv, zfs_uio_t *uio, int flags)
 		    " %llu\n", __func__, __LINE__, "zvol_read_iokit: position",
 		    zfs_uio_offset(uio), zfs_uio_resid(uio), bytes);
 
-		error = dmu_read_uio_dnode(zv->zv_dn, uio, bytes);
+		error = dmu_read_uio_dnode(zv->zv_dn, uio, bytes,
+		    DMU_READ_PREFETCH);
 
 		if (error) {
 			/* convert checksum errors into IO errors */
@@ -289,8 +613,23 @@ zvol_os_write_zv(zvol_state_t *zv, zfs_uio_t *uio, int flags)
 	uint64_t bytes = 0;
 	uint64_t off;
 
+	const ULONG_PTR r = IoGetRemainingStackSize();
+
+	if (spl_lowest_zvol_stack_remaining == 0) {
+		spl_lowest_zvol_stack_remaining = r;
+	} else if (spl_lowest_zvol_stack_remaining > r) {
+		spl_lowest_zvol_stack_remaining = r;
+	}
+
+
 	if (zv == NULL)
 		return (ENXIO);
+
+	if (zv->zv_objset == NULL)
+		return (ENXIO);
+
+	if (zv->zv_flags & ZVOL_RDONLY)
+		return (EROFS);
 
 	/* Some requests are just for flush and nothing else. */
 	if (zfs_uio_resid(uio) == 0)
@@ -313,15 +652,15 @@ zvol_os_write_zv(zvol_state_t *zv, zfs_uio_t *uio, int flags)
 		rw_enter(&zv->zv_suspend_lock, RW_WRITER);
 		if (zv->zv_zilog == NULL) {
 			zv->zv_zilog = zil_open(zv->zv_objset,
-			    zvol_get_data);
+			    zvol_get_data, NULL);
 			zv->zv_flags |= ZVOL_WRITTEN_TO;
 		}
 		rw_downgrade(&zv->zv_suspend_lock);
 	}
 
 	TraceEvent(TRACE_VERBOSE, "%s:%d: zvol_write_iokit(offset "
-	    "0x%llx bytes 0x%llx)\n", __func__, __LINE__,
-	    zfs_uio_offset(uio), zfs_uio_resid(uio));
+	    "0x%llx bytes 0x%llx resid 0x%llx)\n", __func__, __LINE__,
+	    zfs_uio_offset(uio), bytes, zfs_uio_resid(uio));
 
 	sync = (zv->zv_objset->os_sync == ZFS_SYNC_ALWAYS);
 
@@ -340,14 +679,14 @@ zvol_os_write_zv(zvol_state_t *zv, zfs_uio_t *uio, int flags)
 			bytes = volsize - off;
 
 		dmu_tx_hold_write_by_dnode(tx, zv->zv_dn, off, bytes);
-		error = dmu_tx_assign(tx, TXG_WAIT);
+		error = dmu_tx_assign(tx, DMU_TX_WAIT);
 		if (error) {
 			dmu_tx_abort(tx);
 			break;
 		}
 
 		error = dmu_write_uio_dnode(zv->zv_dn, uio,
-		    bytes, tx);
+		    bytes, tx, DMU_READ_PREFETCH);
 
 		if (error == 0) {
 			zvol_log_write(zv, tx, offset, bytes, sync);
@@ -361,8 +700,8 @@ zvol_os_write_zv(zvol_state_t *zv, zfs_uio_t *uio, int flags)
 
 	dataset_kstats_update_write_kstats(&zv->zv_kstat, offset);
 
-	if (sync)
-		zil_commit(zv->zv_zilog, ZVOL_OBJ);
+	if (error == 0 && sync)
+		error = zil_commit(zv->zv_zilog, ZVOL_OBJ);
 
 	rw_exit(&zv->zv_suspend_lock);
 
@@ -407,7 +746,7 @@ zvol_os_unmap(zvol_state_t *zv, uint64_t off, uint64_t bytes)
 		rw_enter(&zv->zv_suspend_lock, RW_WRITER);
 		if (zv->zv_zilog == NULL) {
 			zv->zv_zilog = zil_open(zv->zv_objset,
-			    zvol_get_data);
+			    zvol_get_data, NULL);
 			zv->zv_flags |= ZVOL_WRITTEN_TO;
 		}
 		rw_downgrade(&zv->zv_suspend_lock);
@@ -431,13 +770,13 @@ zvol_os_unmap(zvol_state_t *zv, uint64_t off, uint64_t bytes)
 
 	dmu_tx_mark_netfree(tx);
 
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 
 	if (error) {
 		dmu_tx_abort(tx);
 	} else {
 
-		zvol_log_truncate(zv, tx, off, bytes, B_TRUE);
+		zvol_log_truncate(zv, tx, off, bytes);
 
 		dmu_tx_commit(tx);
 
@@ -470,8 +809,8 @@ zvol_os_update_volsize(zvol_state_t *zv, uint64_t volsize)
 	return (0);
 }
 
-static void
-zvol_os_clear_private(zvol_state_t *zv)
+void
+zvol_os_remove_minor(zvol_state_t *zv)
 {
 #if 0
 	// Close the Storport half open
@@ -493,7 +832,7 @@ zvol_os_find_by_dev(dev_t dev)
 {
 	zvol_state_t *zv;
 
-	TraceEvent(TRACE_VERBOSE, "%s\n", __func__);
+	dprintf("%s\n", __func__);
 
 	rw_enter(&zvol_state_lock, RW_READER);
 	for (zv = list_head(&zvol_state_list); zv != NULL;
@@ -515,7 +854,7 @@ zvol_os_targetlun_lookup(uint8_t target, uint8_t lun)
 {
 	zvol_state_t *zv;
 
-	TraceEvent(TRACE_VERBOSE, "%s\n", __func__);
+	dprintf("%s\n", __func__);
 
 	rw_enter(&zvol_state_lock, RW_READER);
 	for (zv = list_head(&zvol_state_list); zv != NULL;
@@ -618,7 +957,7 @@ zvol_os_free(zvol_state_t *zv)
 }
 
 void
-zvol_os_attach(char *name)
+zvol_os_attach(const char *name)
 {
 	zvol_state_t *zv;
 	uint64_t hash = zvol_name_hash(name);
@@ -633,14 +972,8 @@ zvol_os_attach(char *name)
 		    FREAD : FWRITE, 0, NULL); // readonly?
 		// Assign new TargetId and Lun
 		if (error == 0) {
-			wzvol_assign_targetid(zv);
-			wzvol_announce_buschange();
-			dprintf("%s:%d returning zvol '%s', targetid:%d, "
-			    "lun_id:%d, open_count:%d, volsize:%llu, "
-			    "flags:%d\n",
-			    __func__, __LINE__, zv->zv_name,
-			    zv->zv_zso->zso_target_id, zv->zv_zso->zso_lun_id,
-			    zv->zv_open_count, zv->zv_volsize, zv->zv_flags);
+			zvol_os_assign_targetid(zv);
+			zvol_os_announce_buschange();
 		}
 	}
 }
@@ -649,8 +982,7 @@ void
 zvol_os_detach_zv(zvol_state_t *zv)
 {
 	if (zv != NULL) {
-		wzvol_clear_targetid(zv->zv_zso->zso_target_id,
-		    zv->zv_zso->zso_lun_id, zv);
+		zvol_os_clear_targetid(zv);
 		/* Last close needs suspect lock, give it a try */
 		if (zv->zv_open_count == 1) {
 			if (rw_tryenter(&zv->zv_suspend_lock, RW_READER)) {
@@ -659,7 +991,7 @@ zvol_os_detach_zv(zvol_state_t *zv)
 				rw_exit(&zv->zv_suspend_lock);
 			}
 		}
-		wzvol_announce_buschange();
+		zvol_os_announce_buschange();
 	}
 }
 
@@ -675,7 +1007,7 @@ zvol_os_detach(char *name)
 	if (zv != NULL) {
 		zvol_os_detach_zv(zv);
 		mutex_exit(&zv->zv_state_lock);
-		wzvol_announce_buschange();
+		zvol_os_announce_buschange();
 	}
 }
 
@@ -699,6 +1031,7 @@ zvol_os_create_minor(const char *name)
 	unsigned minor = 0;
 	int error = 0;
 	uint64_t hash = zvol_name_hash(name);
+	boolean_t replayed_zil = B_FALSE;
 
 	dprintf("%s\n", __func__);
 
@@ -743,14 +1076,15 @@ zvol_os_create_minor(const char *name)
 
 	// set_capacity(zv->zv_zso->zvo_disk, zv->zv_volsize >> 9);
 	ASSERT3P(zv->zv_zilog, ==, NULL);
-	zv->zv_zilog = zil_open(os, zvol_get_data);
+	zv->zv_zilog = zil_open(os, zvol_get_data, NULL);
 	if (spa_writeable(dmu_objset_spa(os))) {
 		if (zil_replay_disable)
-			zil_destroy(zv->zv_zilog, B_FALSE);
+			replayed_zil = zil_destroy(zv->zv_zilog, B_FALSE);
 		else
-			zil_replay(os, zv, zvol_replay_vector);
+			replayed_zil = zil_replay(os, zv, zvol_replay_vector);
 	}
-	zil_close(zv->zv_zilog);
+	if (replayed_zil)
+		zil_close(zv->zv_zilog);
 	zv->zv_zilog = NULL;
 
 	dataset_kstats_create(&zv->zv_kstat, zv->zv_objset);
@@ -818,7 +1152,7 @@ static void zvol_os_rename_device_cb(void *param)
 //	zvolRenameDevice(zv);
 }
 
-static void
+static int
 zvol_os_rename_minor(zvol_state_t *zv, const char *newname)
 {
 	// int readonly = get_disk_ro(zv->zv_zso->zvo_disk);
@@ -845,6 +1179,7 @@ zvol_os_rename_minor(zvol_state_t *zv, const char *newname)
 	 */
 	// set_disk_ro(zv->zv_zso->zvo_disk, !readonly);
 	// set_disk_ro(zv->zv_zso->zvo_disk, readonly);
+	return (0);
 }
 
 static void
@@ -996,7 +1331,7 @@ zvol_os_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk,
 	int error = 0;
 	zvol_state_t *zv = NULL;
 
-	TraceEvent(TRACE_NOISY, "%s\n", __func__);
+	dprintf("%s\n", __func__);
 
 	if (!getminor(dev))
 		return (ENXIO);
@@ -1004,7 +1339,7 @@ zvol_os_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk,
 	zv = zvol_os_find_by_dev(dev);
 
 	if (zv == NULL) {
-	    TraceEvent(TRACE_VERBOSE, "zv is NULL\n");
+		dprintf("zv is NULL\n");
 		return (ENXIO);
 	}
 
@@ -1015,47 +1350,55 @@ zvol_os_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk,
 	return (SET_ERROR(error));
 }
 
-const static zvol_platform_ops_t zvol_windows_ops = {
-	.zv_free = zvol_os_free,
-	.zv_rename_minor = zvol_os_rename_minor,
-	.zv_create_minor = zvol_os_create_minor,
-	.zv_update_volsize = zvol_os_update_volsize,
-	.zv_clear_private = zvol_os_clear_private,
-	.zv_is_zvol = zvol_os_is_zvol,
-	.zv_set_disk_ro = zvol_os_set_disk_ro,
-	.zv_set_capacity = zvol_os_set_capacity,
-};
-
 int
 zvol_init(void)
 {
-	int logical_ncpu_to_use = boot_ncpus / 2; // boot_ncpus is derived from KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS)
-
-	int threads = MIN(MAX((zvol_threads ? zvol_threads: logical_ncpu_to_use), 1), 1024);
-
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-		"%s: number of zvol taskq threads to be created: %d, registry value: %d ncpus: %d\n",
-		__func__, threads, zvol_threads, boot_ncpus));
-	zvol_taskq = taskq_create(ZVOL_DRIVER, threads, maxclsyspri,
-	    threads * 2, INT_MAX, TASKQ_PREPOPULATE | TASKQ_DYNAMIC);
-	if (zvol_taskq == NULL) {
-		return (-ENOMEM);
-	}
-
-	zvol_threads = threads; // Update it so that kstat gets the current value
-
-	zvol_init_impl();
-	zvol_register_ops(&zvol_windows_ops);
-	return (0);
+	int err = zvol_init_impl();
+	if (err == 0 && zvol_taskqs.tqs_cnt > 0)
+		zvol_taskq = zvol_taskqs.tqs_taskq[0];
+	return (err);
 }
 
 void
 zvol_fini(void)
 {
+	zvol_taskq = NULL;
 	zvol_fini_impl();
-	taskq_destroy(zvol_taskq);
 }
 
+/* ZFS ZVOLDI */
+
+_Function_class_(PINTERFACE_REFERENCE) void
+IncZvolRef(PVOID Context)
+{
+	zvol_state_t *zv = (zvol_state_t *)Context;
+	atomic_inc_32(&zv->zv_open_count);
+}
+
+_Function_class_(PINTERFACE_REFERENCE) void
+DecZvolRef(PVOID Context)
+{
+	zvol_state_t *zv = (zvol_state_t *)Context;
+	atomic_dec_32(&zv->zv_open_count);
+}
+
+zvol_state_t *
+zvol_name2zvolState(const char *name, uint32_t *openCount)
+{
+	zvol_state_t *zv;
+
+	zv = zvol_find_by_name(name, RW_NONE);
+	if (zv == NULL)
+		return (zv);
+
+	if (openCount)
+		*openCount = zv->zv_open_count;
+
+	mutex_exit(&zv->zv_state_lock);
+	return (zv);
+}
+
+/* DataCore: zpool size stats IOCTL (zvol-side) */
 /* Returns 1 on failure; Returns 0 on success */
 int
 fetch_zpool_stats(zpool_size_stats *zstats) {

@@ -36,7 +36,6 @@
 
 #include <sys/efi_partition.h>
 #include <sys/stat.h>
-#include <sys/vtoc.h>
 #include <sys/mntent.h>
 #include <uuid/uuid.h>
 
@@ -63,7 +62,55 @@ check_error(int err)
 static int
 check_slice(const char *path, int force, boolean_t isspare)
 {
-	return (0);
+	int flags = O_RDONLY | O_DIRECT;
+	int fd;
+	int err = 0;
+	DWORD bytesReturned;
+	BOOL result;
+
+	// If it starts with # it is a EFI partition we handle differently.
+	// Since we can't lock that, we call check_file() to see if it
+	// is a ZFS partition.
+	if (path[0] == '#')
+		return (check_file(path, force, isspare));
+
+	if ((fd = open(path, flags)) < 0) {
+		fprintf(stderr, "%s: failed to open %s\n", __func__, path);
+		return (0);
+	}
+
+	result = DeviceIoControl(
+	    fd,
+	    FSCTL_LOCK_VOLUME,
+	    NULL, 0,
+	    NULL, 0,
+	    &bytesReturned, NULL);
+
+	if (!result) {
+		DWORD dwError = GetLastError();
+		if (dwError == ERROR_ACCESS_DENIED) {
+			printf("Volume is already in use "
+			    "(locked by another process or OS).\n");
+		} else {
+			printf("Failed to lock volume: %lu\n", dwError);
+		}
+		(void) fprintf(stderr,
+		    gettext("Slice %s appears in use.\n"), path);
+
+		err = force ? 0 : EBUSY;
+	} else {
+		printf("Volume locked successfully. (So available for use)\n");
+		result = DeviceIoControl(
+		    fd,
+		    FSCTL_UNLOCK_VOLUME,
+		    NULL, 0,
+		    NULL, 0,
+		    &bytesReturned, NULL);
+		err = 0;
+	}
+
+	(void) close(fd);
+	return (err);
 }
 
 /*
@@ -87,6 +134,10 @@ check_disk(const char *path, int force,
 	int err = 0;
 	int fd, i;
 	int flags = O_RDONLY|O_DIRECT;
+	STORAGE_DEVICE_NUMBER deviceNumber;
+	DWORD bytesReturned;
+	DRIVE_LAYOUT_INFORMATION_EX *driveLayout;
+	BYTE buffer[1024];
 
 	if (!iswholedisk)
 		return (check_slice(path, force, isspare));
@@ -96,7 +147,50 @@ check_disk(const char *path, int force,
 		flags |= O_EXCL;
 
 	if ((fd = open(path, flags)) < 0) {
+		fprintf(stderr, "%s: failed to open %s\n", __func__, path);
 		return (-1);
+	}
+
+	// Query the device number using IOCTL_STORAGE_GET_DEVICE_NUMBER
+	if (!DeviceIoControl(fd,
+	    IOCTL_STORAGE_GET_DEVICE_NUMBER,
+	    NULL, 0,
+	    &deviceNumber, sizeof (deviceNumber),
+	    &bytesReturned, NULL)) {
+		return (force ? 0 : -1);
+	}
+
+	driveLayout = (DRIVE_LAYOUT_INFORMATION_EX *)buffer;
+
+	// Retrieve the drive layout information
+	BOOL result = DeviceIoControl(
+	    fd,
+	    IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
+	    NULL, 0,
+	    driveLayout, sizeof (buffer),
+	    &bytesReturned,
+	    NULL);
+
+	if (result) {
+
+		// Print out the partition information
+		err = 0;
+		for (DWORD i = 0; i < driveLayout->PartitionCount; i++) {
+			PARTITION_INFORMATION_EX partition =
+			    driveLayout->PartitionEntry[i];
+			snprintf(slice_path, sizeof (slice_path),
+			    "\\\\?\\Harddisk%luPartition%lu",
+			    deviceNumber.DeviceNumber,
+			    partition.PartitionNumber);
+			err += check_slice(slice_path, force, isspare);
+		}
+		if (err > 0) {
+
+			(void) fprintf(stderr,
+			    gettext("Disk appears in use.\n"));
+
+			return (force ? 0 : EBUSY);
+		}
 	}
 
 	/*
@@ -132,8 +226,16 @@ check_disk(const char *path, int force,
 		if (vtoc->efi_parts[i].p_tag == V_UNASSIGNED ||
 		    uuid_is_null((uchar_t *)&vtoc->efi_parts[i].p_guid))
 			continue;
-		(void) snprintf(slice_path, sizeof (slice_path),
-		    "%ss%d", path, i+1);
+
+		size_t length =
+		    vtoc->efi_parts[i].p_size *
+		    vtoc->efi_lbasize;
+		off_t  offset =
+		    vtoc->efi_parts[i].p_start *
+		    vtoc->efi_lbasize;
+		snprintf(slice_path, sizeof (slice_path),
+		    "#%llu#%llu#%s",
+		    offset, length, path);
 
 		err = check_slice(slice_path, force, isspare);
 		if (err)
@@ -142,7 +244,6 @@ check_disk(const char *path, int force,
 
 	efi_free(vtoc);
 	(void) close(fd);
-
 	return (err);
 }
 
@@ -171,3 +272,22 @@ after_zpool_upgrade(zpool_handle_t *zhp)
 {
 }
 
+
+int
+zpool_power_current_state(zpool_handle_t *zhp, char *vdev)
+{
+	(void) zhp;
+	(void) vdev;
+	/* Enclosure slot power not supported on macOS yet */
+	return (-1);
+}
+
+int
+zpool_power(zpool_handle_t *zhp, char *vdev, boolean_t turn_on)
+{
+	(void) zhp;
+	(void) vdev;
+	(void) turn_on;
+	/* Enclosure slot power not supported on macOS yet */
+	return (ENOTSUP);
+}

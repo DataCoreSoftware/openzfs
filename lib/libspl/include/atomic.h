@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -34,7 +35,7 @@
 extern "C" {
 #endif
 
-#if defined(__STDC__)
+#if defined(__STDC__) || defined(_WIN32)
 /*
  * Increment target.
  */
@@ -312,6 +313,13 @@ extern void membar_enter(void);
  * will be resolved before the subsequent lock update reaches visibility.
  */
 extern void membar_exit(void);
+
+/*
+ * Make all stores and loads emitted prior to the the barrier complete before
+ * crossing it, while also making sure stores and loads emitted after the
+ * barrier only start being executed after crossing it.
+ */
+extern void membar_sync(void);
 
 /*
  * Arrange that all stores issued before this point in the code reach

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -27,6 +28,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <libzutil.h>
+#include <string.h>
 
 /*
  * Return B_TRUE if "str" is a number string, B_FALSE otherwise.
@@ -41,6 +43,14 @@ zfs_isnumber(const char *str)
 	for (; *str; str++)
 		if (!(isdigit(*str) || (*str == '.')))
 			return (B_FALSE);
+
+	/*
+	 * Numbers should not end with a period ("." ".." or "5." are
+	 * not valid)
+	 */
+	if (str[strlen(str) - 1] == '.') {
+		return (B_FALSE);
+	}
 
 	return (B_TRUE);
 }

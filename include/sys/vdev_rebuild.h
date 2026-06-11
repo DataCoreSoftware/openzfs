@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -65,7 +66,8 @@ typedef struct vdev_rebuild_phys {
 typedef struct vdev_rebuild {
 	vdev_t		*vr_top_vdev;		/* top-level vdev to rebuild */
 	metaslab_t	*vr_scan_msp;		/* scanning disabled metaslab */
-	range_tree_t	*vr_scan_tree;		/* scan ranges (in metaslab) */
+	/* scan ranges (in metaslab) */
+	zfs_range_tree_t	*vr_scan_tree;
 	kmutex_t	vr_io_lock;		/* inflight IO lock */
 	kcondvar_t	vr_io_cv;		/* inflight IO cv */
 
@@ -79,6 +81,7 @@ typedef struct vdev_rebuild {
 	uint64_t	vr_pass_start_time;
 	uint64_t	vr_pass_bytes_scanned;
 	uint64_t	vr_pass_bytes_issued;
+	uint64_t	vr_pass_bytes_skipped;
 
 	/* On-disk state updated by vdev_rebuild_zap_update_sync() */
 	vdev_rebuild_phys_t vr_rebuild_phys;

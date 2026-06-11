@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -28,28 +29,13 @@
 #ifndef _LIBZUTIL_ZUTIL_IMPORT_H_
 #define	_LIBZUTIL_ZUTIL_IMPORT_H_
 
-#define	EZFS_BADCACHE	"invalid or missing cache file"
-#define	EZFS_BADPATH	"must be an absolute path"
-#define	EZFS_NOMEM	"out of memory"
-#define	EZFS_EACESS	"some devices require root privileges"
-
 #define	IMPORT_ORDER_PREFERRED_1	1
 #define	IMPORT_ORDER_PREFERRED_2	2
 #define	IMPORT_ORDER_SCAN_OFFSET	10
 #define	IMPORT_ORDER_DEFAULT		100
 
-typedef struct libpc_handle {
-	boolean_t lpc_printerr;
-	boolean_t lpc_open_access_error;
-	boolean_t lpc_desc_active;
-	char lpc_desc[1024];
-	const pool_config_ops_t *lpc_ops;
-	void *lpc_lib_handle;
-} libpc_handle_t;
-
-
-int label_paths(libpc_handle_t *hdl, nvlist_t *label, char **path,
-    char **devid);
+int label_paths(libpc_handle_t *hdl, nvlist_t *label, const char **path,
+    const char **devid);
 int zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
     avl_tree_t **slice_cache);
 
@@ -73,6 +59,7 @@ int slice_cache_compare(const void *, const void *);
 
 void zpool_open_func(void *);
 int zfs_resolve_shortname_os(const char *name, char *path, size_t len);
+
 
 
 #endif /* _LIBZUTIL_ZUTIL_IMPORT_H_ */

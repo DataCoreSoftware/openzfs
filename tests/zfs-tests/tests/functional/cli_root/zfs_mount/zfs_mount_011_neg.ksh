@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -45,12 +46,11 @@ verify_runnable "both"
 
 function cleanup
 {
-	if snapexists $TESTPOOL/$TESTFS@$TESTSNAP; then
-		log_must_busy zfs destroy $TESTPOOL/$TESTFS@$TESTSNAP
-	fi
+	snapexists $TESTPOOL/$TESTFS@$TESTSNAP && \
+		destroy_dataset $TESTPOOL/$TESTFS@$TESTSNAP
 
 	if is_global_zone && datasetexists $TESTPOOL/$TESTVOL; then
-		log_must_busy zfs destroy $TESTPOOL/$TESTVOL
+		destroy_dataset $TESTPOOL/$TESTVOL
 	fi
 }
 
@@ -70,8 +70,10 @@ for opt in "-o abc" "-O"; do
 done
 
 #verify that zfs mount fails with volume and snapshot
-log_must zfs snapshot $TESTPOOL/$TESTFS@$TESTSNAP
-log_mustnot eval "zfs mount $TESTPOOL/$TESTFS@$TESTSNAP >/dev/null 2>&1"
+# Update: Windows and macOS now require snapshots to be
+# mountable.
+# log_must zfs snapshot $TESTPOOL/$TESTFS@$TESTSNAP
+# log_mustnot eval "zfs mount $TESTPOOL/$TESTFS@$TESTSNAP >/dev/null 2>&1"
 
 if is_global_zone; then
 	log_must zfs create -V 10m $TESTPOOL/$TESTVOL

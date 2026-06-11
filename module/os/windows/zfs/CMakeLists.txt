@@ -1,6 +1,7 @@
 
 use_clang()
 
+# DataCore: generate WPP tracing .tmh files for all sources
 file(GLOB CSOURCES CONFIGURE_DEPENDS "*.c")
 
 list(REMOVE_ITEM CSOURCES "${CMAKE_CURRENT_SOURCE_DIR}/zfs_vnops_os.c"
@@ -22,10 +23,11 @@ qat.c
 qat_compress.c
 qat_crypt.c
 spa_misc_os.c
+sysctl_os.c
 vdev_disk.c
-vdev_file.c
+vdev_label_os.c
 zfs_acl.c
-zfs_racct.c 
+zfs_racct.c
 zfs_ctldir.c
 zfs_debug.c
 zfs_dir.c
@@ -38,10 +40,12 @@ zfs_vnops_os.c
 zfs_vnops_windows.c
 zfs_vnops_windows_lib.c
 zfs_vnops_windows_mount.c
+zfs_vnops_windows_xattr.c
+zfs_vss.c
 zfs_windows_zvol.c
 zfs_windows_zvol_scsi.c
 zfs_windows_zvol_wmi.c
-zfs_znode.c
+zfs_znode_os.c
 zio_crypt.c
 zvol_os.c
 ${TMH_FILE_LIST}

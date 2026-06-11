@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -56,7 +57,7 @@ log_assert "Destroying a regular volume with reservation allows more data to" \
 function cleanup
 {
 	datasetexists $TESTPOOL/$TESTVOL && \
-	    log_must zfs destroy $TESTPOOL/$TESTVOL
+	    destroy_dataset $TESTPOOL/$TESTVOL
 
 	[[ -e $TESTDIR/$TESTFILE1 ]] && log_must rm -rf $TESTDIR/$TESTFILE1
 	[[ -e $TESTDIR/$TESTFILE2 ]] && log_must rm -rf $TESTDIR/$TESTFILE2
@@ -76,6 +77,7 @@ vol_set_size=$(floor_volsize $vol_set_size)
 # Creating a regular volume implicitly sets its reservation
 # property to the same value.
 log_must zfs create -V $vol_set_size $TESTPOOL/$TESTVOL
+block_device_wait $TESTPOOL/$TESTVOL
 
 space_avail_still=$(get_prop available $TESTPOOL)
 fill_size=$((space_avail_still + $RESV_TOLERANCE))

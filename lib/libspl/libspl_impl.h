@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -7,7 +8,7 @@
  * with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -20,5 +21,12 @@
  * CDDL HEADER END
  */
 
+#ifndef _LIBSPL_IMPL_H
+#define	_LIBSPL_IMPL_H
 
 extern ssize_t getexecname_impl(char *execname);
+
+extern void random_init(void);
+extern void random_fini(void);
+
+#endif

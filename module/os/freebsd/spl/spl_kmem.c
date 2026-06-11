@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2006-2007 Pawel Jakub Dawidek <pjd@FreeBSD.org>
  * All rights reserved.
@@ -23,9 +24,6 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-
-#include <sys/cdefs.h>
-__FBSDID("$FreeBSD$");
 
 #include <sys/types.h>
 #include <sys/param.h>
@@ -156,13 +154,13 @@ kmem_std_destructor(void *mem, int size __unused, void *private)
 }
 
 kmem_cache_t *
-kmem_cache_create(char *name, size_t bufsize, size_t align,
+kmem_cache_create(const char *name, size_t bufsize, size_t align,
     int (*constructor)(void *, void *, int), void (*destructor)(void *, void *),
     void (*reclaim)(void *) __unused, void *private, vmem_t *vmp, int cflags)
 {
 	kmem_cache_t *cache;
 
-	ASSERT3P(vmp, ==, NULL);
+	ASSERT0P(vmp);
 
 	cache = kmem_alloc(sizeof (*cache), KM_SLEEP);
 	strlcpy(cache->kc_name, name, sizeof (cache->kc_name));
@@ -243,22 +241,14 @@ void
 kmem_cache_reap_soon(kmem_cache_t *cache)
 {
 #ifndef KMEM_DEBUG
-#if __FreeBSD_version >= 1300043
 	uma_zone_reclaim(cache->kc_zone, UMA_RECLAIM_DRAIN);
-#else
-	zone_drain(cache->kc_zone);
-#endif
 #endif
 }
 
 void
 kmem_reap(void)
 {
-#if __FreeBSD_version >= 1300043
 	uma_reclaim(UMA_RECLAIM_TRIM);
-#else
-	uma_reclaim();
-#endif
 }
 #else
 void

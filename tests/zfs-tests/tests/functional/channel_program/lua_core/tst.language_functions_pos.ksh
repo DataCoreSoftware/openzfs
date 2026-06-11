@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -33,9 +34,7 @@ log_assert "Simple lua scripts pass."
 
 typeset -i i=0
 while (( i < ${#args[*]} )); do
-	log_must_program $TESTPOOL - <<-EOF
-		${args[i]}
-	EOF
+	log_must_program $TESTPOOL - <<<"${args[i]}"
 	((i = i + 1))
 done
 

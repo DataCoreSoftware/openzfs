@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -27,12 +28,10 @@
  */
 
 #include <libintl.h>
-#include <libuutil.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 #include <libzfs.h>
 
@@ -50,14 +49,16 @@
  * When finished, we have an AVL tree of ZFS handles.  We go through and execute
  * the provided callback for each one, passing whatever data the user supplied.
  */
+typedef struct callback_data callback_data_t;
 
 typedef struct zfs_node {
 	zfs_handle_t	*zn_handle;
-	uu_avl_node_t	zn_avlnode;
+	callback_data_t	*zn_callback;
+	avl_node_t	zn_avlnode;
 } zfs_node_t;
 
-typedef struct callback_data {
-	uu_avl_t		*cb_avl;
+struct callback_data {
+	avl_tree_t		cb_avl;
 	int			cb_flags;
 	zfs_type_t		cb_types;
 	zfs_sort_column_t	*cb_sortcol;
@@ -65,9 +66,7 @@ typedef struct callback_data {
 	int			cb_depth_limit;
 	int			cb_depth;
 	uint8_t			cb_props_table[ZFS_NUM_PROPS];
-} callback_data_t;
-
-uu_avl_pool_t *avl_pool;
+};
 
 /*
  * Include snaps if they were requested or if this a zfs list where types
@@ -99,13 +98,12 @@ zfs_callback(zfs_handle_t *zhp, void *data)
 
 	if ((zfs_get_type(zhp) & cb->cb_types) ||
 	    ((zfs_get_type(zhp) == ZFS_TYPE_SNAPSHOT) && include_snaps)) {
-		uu_avl_index_t idx;
+		avl_index_t idx;
 		zfs_node_t *node = safe_malloc(sizeof (zfs_node_t));
 
 		node->zn_handle = zhp;
-		uu_avl_node_init(node, &node->zn_avlnode, avl_pool);
-		if (uu_avl_find(cb->cb_avl, node, cb->cb_sortcol,
-		    &idx) == NULL) {
+		node->zn_callback = cb;
+		if (avl_find(&cb->cb_avl, node, &idx) == NULL) {
 			if (cb->cb_proplist) {
 				if ((*cb->cb_proplist) &&
 				    !(*cb->cb_proplist)->pl_all)
@@ -120,7 +118,7 @@ zfs_callback(zfs_handle_t *zhp, void *data)
 					return (-1);
 				}
 			}
-			uu_avl_insert(cb->cb_avl, node, idx);
+			avl_insert(&cb->cb_avl, node, idx);
 			should_close = B_FALSE;
 		} else {
 			free(node);
@@ -144,19 +142,20 @@ zfs_callback(zfs_handle_t *zhp, void *data)
 		    (cb->cb_types &
 		    (ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME))) &&
 		    zfs_get_type(zhp) == ZFS_TYPE_FILESYSTEM) {
-			(void) zfs_iter_filesystems(zhp, zfs_callback, data);
+			(void) zfs_iter_filesystems_v2(zhp, cb->cb_flags,
+			    zfs_callback, data);
 		}
 
 		if (((zfs_get_type(zhp) & (ZFS_TYPE_SNAPSHOT |
 		    ZFS_TYPE_BOOKMARK)) == 0) && include_snaps) {
-			(void) zfs_iter_snapshots(zhp,
-			    (cb->cb_flags & ZFS_ITER_SIMPLE) != 0,
+			(void) zfs_iter_snapshots_v2(zhp, cb->cb_flags,
 			    zfs_callback, data, 0, 0);
 		}
 
 		if (((zfs_get_type(zhp) & (ZFS_TYPE_SNAPSHOT |
 		    ZFS_TYPE_BOOKMARK)) == 0) && include_bmarks) {
-			(void) zfs_iter_bookmarks(zhp, zfs_callback, data);
+			(void) zfs_iter_bookmarks_v2(zhp, cb->cb_flags,
+			    zfs_callback, data);
 		}
 
 		cb->cb_depth--;
@@ -175,7 +174,7 @@ zfs_add_sort_column(zfs_sort_column_t **sc, const char *name,
 	zfs_sort_column_t *col;
 	zfs_prop_t prop;
 
-	if ((prop = zfs_name_to_prop(name)) == ZPROP_INVAL &&
+	if ((prop = zfs_name_to_prop(name)) == ZPROP_USERPROP &&
 	    !zfs_prop_user(name))
 		return (-1);
 
@@ -183,7 +182,7 @@ zfs_add_sort_column(zfs_sort_column_t **sc, const char *name,
 
 	col->sc_prop = prop;
 	col->sc_reverse = reverse;
-	if (prop == ZPROP_INVAL) {
+	if (prop == ZPROP_USERPROP) {
 		col->sc_user_prop = safe_malloc(strlen(name) + 1);
 		(void) strcpy(col->sc_user_prop, name);
 	}
@@ -212,16 +211,62 @@ zfs_free_sort_columns(zfs_sort_column_t *sc)
 	}
 }
 
-int
-zfs_sort_only_by_name(const zfs_sort_column_t *sc)
+/*
+ * Return true if all of the properties to be sorted are populated by
+ * dsl_dataset_fast_stat(). Note that sc == NULL (no sort) means we
+ * don't need any extra properties, so returns true.
+ */
+boolean_t
+zfs_sort_only_by_fast(const zfs_sort_column_t *sc)
 {
-	return (sc != NULL && sc->sc_next == NULL &&
-	    sc->sc_prop == ZFS_PROP_NAME);
+	while (sc != NULL) {
+		switch (sc->sc_prop) {
+		case ZFS_PROP_NAME:
+		case ZFS_PROP_GUID:
+		case ZFS_PROP_CREATETXG:
+		case ZFS_PROP_NUMCLONES:
+		case ZFS_PROP_INCONSISTENT:
+		case ZFS_PROP_REDACTED:
+		case ZFS_PROP_ORIGIN:
+			break;
+		default:
+			return (B_FALSE);
+		}
+		sc = sc->sc_next;
+	}
+
+	return (B_TRUE);
 }
 
-/* ARGSUSED */
+boolean_t
+zfs_list_only_by_fast(const zprop_list_t *p)
+{
+	if (p == NULL) {
+		/* NULL means 'all' so we can't use simple mode */
+		return (B_FALSE);
+	}
+
+	while (p != NULL) {
+		switch (p->pl_prop) {
+		case ZFS_PROP_NAME:
+		case ZFS_PROP_GUID:
+		case ZFS_PROP_CREATETXG:
+		case ZFS_PROP_NUMCLONES:
+		case ZFS_PROP_INCONSISTENT:
+		case ZFS_PROP_REDACTED:
+		case ZFS_PROP_ORIGIN:
+			break;
+		default:
+			return (B_FALSE);
+		}
+		p = p->pl_next;
+	}
+
+	return (B_TRUE);
+}
+
 static int
-zfs_compare(const void *larg, const void *rarg, void *unused)
+zfs_compare(const void *larg, const void *rarg)
 {
 	zfs_handle_t *l = ((zfs_node_t *)larg)->zn_handle;
 	zfs_handle_t *r = ((zfs_node_t *)rarg)->zn_handle;
@@ -239,7 +284,7 @@ zfs_compare(const void *larg, const void *rarg, void *unused)
 	if (rat != NULL)
 		*rat = '\0';
 
-	ret = strcmp(lname, rname);
+	ret = TREE_ISIGN(strcmp(lname, rname));
 	if (ret == 0 && (lat != NULL || rat != NULL)) {
 		/*
 		 * If we're comparing a dataset to one of its snapshots, we
@@ -293,17 +338,17 @@ zfs_compare(const void *larg, const void *rarg, void *unused)
  * with snapshots grouped under their parents.
  */
 static int
-zfs_sort(const void *larg, const void *rarg, void *data)
+zfs_sort(const void *larg, const void *rarg)
 {
 	zfs_handle_t *l = ((zfs_node_t *)larg)->zn_handle;
 	zfs_handle_t *r = ((zfs_node_t *)rarg)->zn_handle;
-	zfs_sort_column_t *sc = (zfs_sort_column_t *)data;
+	zfs_sort_column_t *sc = ((zfs_node_t *)larg)->zn_callback->cb_sortcol;
 	zfs_sort_column_t *psc;
 
 	for (psc = sc; psc != NULL; psc = psc->sc_next) {
 		char lbuf[ZFS_MAXPROPLEN], rbuf[ZFS_MAXPROPLEN];
-		char *lstr, *rstr;
-		uint64_t lnum, rnum;
+		const char *lstr, *rstr;
+		uint64_t lnum = 0, rnum = 0;
 		boolean_t lvalid, rvalid;
 		int ret = 0;
 
@@ -313,7 +358,7 @@ zfs_sort(const void *larg, const void *rarg, void *data)
 		 * Otherwise, we compare 'lnum' and 'rnum'.
 		 */
 		lstr = rstr = NULL;
-		if (psc->sc_prop == ZPROP_INVAL) {
+		if (psc->sc_prop == ZPROP_USERPROP) {
 			nvlist_t *luser, *ruser;
 			nvlist_t *lval, *rval;
 
@@ -354,11 +399,9 @@ zfs_sort(const void *larg, const void *rarg, void *data)
 			    zfs_get_type(r), B_FALSE);
 
 			if (lvalid)
-				(void) zfs_prop_get_numeric(l, psc->sc_prop,
-				    &lnum, NULL, NULL, 0);
+				lnum = zfs_prop_get_int(l, psc->sc_prop);
 			if (rvalid)
-				(void) zfs_prop_get_numeric(r, psc->sc_prop,
-				    &rnum, NULL, NULL, 0);
+				rnum = zfs_prop_get_int(r, psc->sc_prop);
 		}
 
 		if (!lvalid && !rvalid)
@@ -369,7 +412,7 @@ zfs_sort(const void *larg, const void *rarg, void *data)
 			return (-1);
 
 		if (lstr)
-			ret = strcmp(lstr, rstr);
+			ret = TREE_ISIGN(strcmp(lstr, rstr));
 		else if (lnum < rnum)
 			ret = -1;
 		else if (lnum > rnum)
@@ -382,7 +425,7 @@ zfs_sort(const void *larg, const void *rarg, void *data)
 		}
 	}
 
-	return (zfs_compare(larg, rarg, NULL));
+	return (zfs_compare(larg, rarg));
 }
 
 int
@@ -393,13 +436,6 @@ zfs_for_each(int argc, char **argv, int flags, zfs_type_t types,
 	callback_data_t cb = {0};
 	int ret = 0;
 	zfs_node_t *node;
-	uu_avl_walk_t *walk;
-
-	avl_pool = uu_avl_pool_create("zfs_pool", sizeof (zfs_node_t),
-	    offsetof(zfs_node_t, zn_avlnode), zfs_sort, UU_DEFAULT);
-
-	if (avl_pool == NULL)
-		nomem();
 
 	cb.cb_sortcol = sortcol;
 	cb.cb_flags = flags;
@@ -444,8 +480,8 @@ zfs_for_each(int argc, char **argv, int flags, zfs_type_t types,
 		    sizeof (cb.cb_props_table));
 	}
 
-	if ((cb.cb_avl = uu_avl_create(avl_pool, NULL, UU_DEFAULT)) == NULL)
-		nomem();
+	avl_create(&cb.cb_avl, zfs_sort,
+	    sizeof (zfs_node_t), offsetof(zfs_node_t, zn_avlnode));
 
 	if (argc == 0) {
 		/*
@@ -454,23 +490,21 @@ zfs_for_each(int argc, char **argv, int flags, zfs_type_t types,
 		cb.cb_flags |= ZFS_ITER_RECURSE;
 		ret = zfs_iter_root(g_zfs, zfs_callback, &cb);
 	} else {
-		int i;
-		zfs_handle_t *zhp;
-		zfs_type_t argtype;
+		zfs_handle_t *zhp = NULL;
+		zfs_type_t argtype = types;
 
 		/*
 		 * If we're recursive, then we always allow filesystems as
 		 * arguments.  If we also are interested in snapshots or
 		 * bookmarks, then we can take volumes as well.
 		 */
-		argtype = types;
 		if (flags & ZFS_ITER_RECURSE) {
 			argtype |= ZFS_TYPE_FILESYSTEM;
 			if (types & (ZFS_TYPE_SNAPSHOT | ZFS_TYPE_BOOKMARK))
 				argtype |= ZFS_TYPE_VOLUME;
 		}
 
-		for (i = 0; i < argc; i++) {
+		for (int i = 0; i < argc; i++) {
 			if (flags & ZFS_ITER_ARGS_CAN_BE_PATHS) {
 				zhp = zfs_path_to_zhandle(g_zfs, argv[i],
 				    argtype);
@@ -488,25 +522,20 @@ zfs_for_each(int argc, char **argv, int flags, zfs_type_t types,
 	 * At this point we've got our AVL tree full of zfs handles, so iterate
 	 * over each one and execute the real user callback.
 	 */
-	for (node = uu_avl_first(cb.cb_avl); node != NULL;
-	    node = uu_avl_next(cb.cb_avl, node))
+	for (node = avl_first(&cb.cb_avl); node != NULL;
+	    node = AVL_NEXT(&cb.cb_avl, node))
 		ret |= callback(node->zn_handle, data);
 
 	/*
 	 * Finally, clean up the AVL tree.
 	 */
-	if ((walk = uu_avl_walk_start(cb.cb_avl, UU_WALK_ROBUST)) == NULL)
-		nomem();
-
-	while ((node = uu_avl_walk_next(walk)) != NULL) {
-		uu_avl_remove(cb.cb_avl, node);
+	void *cookie = NULL;
+	while ((node = avl_destroy_nodes(&cb.cb_avl, &cookie)) != NULL) {
 		zfs_close(node->zn_handle);
 		free(node);
 	}
 
-	uu_avl_walk_end(walk);
-	uu_avl_destroy(cb.cb_avl);
-	uu_avl_pool_destroy(avl_pool);
+	avl_destroy(&cb.cb_avl);
 
 	return (ret);
 }

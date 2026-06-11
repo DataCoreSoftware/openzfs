@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -46,9 +47,7 @@ function cleanup
 {
 	for fs in $TESTPOOL/$TESTFS $TESTPOOL/$TESTVOL $TESTPOOL/$TESTCTR $TESTPOOL ; do
 		typeset fssnap=$fs@snap
-		if datasetexists $fssnap ; then
-			log_must zfs destroy -rf $fssnap
-		fi
+		datasetexists $fssnap && destroy_dataset $fssnap -rf
 	done
 	cleanup_user_prop $TESTPOOL
 }
@@ -74,16 +73,11 @@ typeset ro_props="type used available avail creation referenced refer compressra
 	mounted origin"
 typeset snap_ro_props="volsize recordsize recsize quota reservation reserv mountpoint \
 	sharenfs checksum compression compress atime devices exec readonly rdonly \
-	setuid"
+	setuid version"
 if is_freebsd; then
 	snap_ro_props+=" jailed"
 else
 	snap_ro_props+=" zoned"
-fi
-
-zfs upgrade -v > /dev/null 2>&1
-if [[ $? -eq 0 ]]; then
-	snap_ro_props="$snap_ro_props version"
 fi
 
 

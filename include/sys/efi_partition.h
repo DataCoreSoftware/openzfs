@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -80,16 +81,8 @@ typedef struct efi_gpe_Attrs {
 
 /*
  * 6a96237f-1dd2-11b2-99a6-080020736631	V_UNASSIGNED (not used as such)
- * 6a82cb45-1dd2-11b2-99a6-080020736631	V_BOOT
- * 6a85cf4d-1dd2-11b2-99a6-080020736631	V_ROOT
- * 6a87c46f-1dd2-11b2-99a6-080020736631	V_SWAP
  * 6a898cc3-1dd2-11b2-99a6-080020736631	V_USR
- * 6a8b642b-1dd2-11b2-99a6-080020736631	V_BACKUP
- * 6a8d2ac7-1dd2-11b2-99a6-080020736631	V_STAND (not used)
- * 6a8ef2e9-1dd2-11b2-99a6-080020736631	V_VAR
- * 6a90ba39-1dd2-11b2-99a6-080020736631	V_HOME
- * 6a9283a5-1dd2-11b2-99a6-080020736631	V_ALTSCTR
- * 6a945a3b-1dd2-11b2-99a6-080020736631	V_CACHE
+ * 6a945a3b-1dd2-11b2-99a6-080020736631	V_RESERVED
  */
 
 #define	EFI_UNUSED		{ 0x00000000, 0x0000, 0x0000, 0x00, 0x00, \
@@ -394,11 +387,11 @@ _SYS_EFI_PARTITION_H int efi_alloc_and_read(int, struct dk_gpt **);
 #ifdef _WIN32
 _SYS_EFI_PARTITION_H int efi_alloc_and_read_flags(int, struct dk_gpt **,
     uint_t);
+_SYS_EFI_PARTITION_H void efi_set_fix_gpt(boolean_t);
 #endif
 _SYS_EFI_PARTITION_H int efi_write(int, struct dk_gpt *);
 _SYS_EFI_PARTITION_H int efi_rescan(int);
 _SYS_EFI_PARTITION_H void efi_free(struct dk_gpt *);
-_SYS_EFI_PARTITION_H int efi_type(int);
 _SYS_EFI_PARTITION_H void efi_err_check(struct dk_gpt *);
 _SYS_EFI_PARTITION_H int efi_use_whole_disk(int fd);
 #endif

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CDDL HEADER START
  *
  * The contents of this file are subject to the terms of the
@@ -24,7 +24,7 @@
  * Copyright (C) 2008 MacZFS
  * Copyright (C) 2013, 2020 Jorgen Lundman <lundman@lundman.net>
  * Copyright (C) 2014 Brendon Humphrey <brendon.humphrey@mac.com>
- * Copyright (C) 2017 Sean Doran <smd@use.net>
+ * Copyright (C) 2017, 2021, 2023 Sean Doran <smd@use.net>
  * Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
  * Portions Copyright 2022 Andrew Innes <andrew.c12@gmail.com>
  *
@@ -49,6 +49,8 @@
 
 #include <Trace.h>
 
+#include <sys/mod.h>
+
 // TODO, track down what is using floats in this file
 int _fltused = 0;
 
@@ -71,41 +73,50 @@ const unsigned int spl_vm_page_free_min = 3500;
 static kcondvar_t spl_free_thread_cv;
 static kmutex_t spl_free_thread_lock;
 static boolean_t spl_free_thread_exit;
-volatile boolean_t spl_free_thread_running = FALSE;
 static volatile _Atomic int64_t spl_free = 0;
-int64_t spl_free_delta_ema;
 
 static boolean_t spl_event_thread_exit = FALSE;
-static boolean_t spl_abd_prealloc_thread_exit = FALSE;
 PKEVENT low_mem_event = NULL;
 
 static volatile _Atomic int64_t spl_free_manual_pressure = 0;
+ZFS_MODULE_RAW(spl, free_manual_pressure, spl_free_manual_pressure,
+    S64, ZMOD_RW, 0, "Set to simulate memory pressure.");
+
 static volatile _Atomic boolean_t spl_free_fast_pressure = FALSE;
 static _Atomic bool spl_free_maybe_reap_flag = false;
 static _Atomic uint64_t spl_free_last_pressure = 0;
 
+uint64_t spl_enforce_memory_caps = 1;
+_Atomic uint64_t spl_dynamic_memory_cap = 0;
+hrtime_t spl_dynamic_memory_cap_last_downward_adjust = 0;
+uint64_t spl_dynamic_memory_cap_skipped = 0;
+kmutex_t spl_dynamic_memory_cap_lock;
+uint64_t spl_dynamic_memory_cap_reductions = 0;
+uint64_t spl_dynamic_memory_cap_hit_floor = 0;
+static uint64_t spl_manual_memory_cap = 0;
+static uint64_t spl_memory_cap_enforcements = 0;
+
+ZFS_MODULE_RAW(spl, manual_memory_cap, spl_manual_memory_cap,
+    U64, ZMOD_RW, 0, "Set manual memory limit.");
+ZFS_MODULE_RAW(spl, memory_cap_enforcements, spl_memory_cap_enforcements,
+    U64, ZMOD_RW, 0, "Enforce manual memory limits.");
+
+extern void spl_set_arc_no_grow(int);
+
+/*
+ * variables informed by "pure"  mach_vm_pressure interface
+ *
+ * osfmk/vm/vm_pageout.c: "We don't need fully
+ * accurate monitoring anyway..."
+ *
+ * but in macOS_pure we do want modifications of these
+ * variables to be seen by all the other threads
+ * consistently, and asap (there may be hundreds
+ * of simultaneous readers, even if few writers!)
+ */
 _Atomic uint32_t spl_vm_pages_reclaimed = 0;
 _Atomic uint32_t spl_vm_pages_wanted = 0;
 _Atomic uint32_t spl_vm_pressure_level = 0;
-
-/*
- * Global flag set by prealloc thread.
- *
- * PREALLOC_PHASE_IDLE     : prealloc not running
- * PREALLOC_PHASE_ALLOC    : thread is allocating (Phase 1)
- *                           free_warm ≈ 0, pressure is FAKE → suppress
- * PREALLOC_PHASE_FREE     : thread is freeing back to slab (Phase 2)
- *                           free_warm growing, discount valid
- * PREALLOC_PHASE_DONE     : prealloc complete, normal operation
- */
-typedef enum {
-    PREALLOC_PHASE_IDLE = 0,
-    PREALLOC_PHASE_ALLOC = 1,
-    PREALLOC_PHASE_FREE = 2,
-    PREALLOC_PHASE_DONE = 3,
-} prealloc_phase_t;
-
-volatile prealloc_phase_t prealloc_phase = PREALLOC_PHASE_IDLE;
 
 /*
  * the spl_pressure_level enum only goes to four,
@@ -136,7 +147,7 @@ void read_random(void *buffer, uint_t numbytes);
 // the kmem module is preparing to unload.
 static int			shutting_down = 0;
 
-// Amount of RAM in machine
+// Amount of RAM PAGES in machine
 uint64_t			physmem = 0;
 
 // Size in bytes of the memory allocated in seg_kmem
@@ -149,10 +160,6 @@ extern uint64_t		zfs_active_rwlock;
 
 extern uint64_t		total_memory;
 extern uint64_t		real_total_memory;
-
-extern kmem_cache_t *abd_chunk_cache;
-extern uint64_t zfs_arc_max;
-extern int zfs_prealloc_percent;
 
 #define	MULT 1
 
@@ -455,8 +462,8 @@ for (_e = &_s[(count) - 1]; _e > _s; _e--)		\
 struct {
 	hrtime_t	kmp_timestamp;	/* timestamp of panic */
 	int		kmp_error;	/* type of kmem error */
-	void		*kmp_buffer;	/* buffer that induced panic */
-	void		*kmp_realbuf;	/* real start address for buffer */
+	const void	*kmp_buffer;	/* buffer that induced panic */
+	const void	*kmp_realbuf;	/* real start address for buffer */
 	kmem_cache_t	*kmp_cache;	/* buffer's cache according to client */
 	kmem_cache_t	*kmp_realcache;	/* actual cache containing buffer */
 	kmem_slab_t	*kmp_slab;	/* slab accoring to kmem_findslab() */
@@ -464,9 +471,15 @@ struct {
 } kmem_panic_info;
 
 extern uint64_t stat_osif_malloc_success;
+extern uint64_t stat_osif_malloc_fail;
 extern uint64_t stat_osif_malloc_bytes;
 extern uint64_t stat_osif_free;
 extern uint64_t stat_osif_free_bytes;
+extern uint64_t stat_osif_malloc_sub128k;
+extern uint64_t stat_osif_malloc_sub64k;
+extern uint64_t stat_osif_malloc_sub32k;
+extern uint64_t stat_osif_malloc_page;
+extern uint64_t stat_osif_malloc_subpage;
 
 extern uint64_t spl_bucket_non_pow2_allocs;
 
@@ -486,20 +499,14 @@ extern uint64_t spl_vmem_conditional_alloc_bytes;
 extern uint64_t spl_vmem_conditional_alloc_deny;
 extern uint64_t spl_vmem_conditional_alloc_deny_bytes;
 
-extern uint64_t spl_xat_success;
-extern uint64_t spl_xat_late_success;
-extern uint64_t spl_xat_late_success_nosleep;
 extern uint64_t spl_xat_pressured;
-extern uint64_t spl_xat_bailed;
-extern uint64_t spl_xat_bailed_contended;
 extern uint64_t spl_xat_lastalloc;
 extern uint64_t spl_xat_lastfree;
-extern uint64_t spl_xat_forced;
 extern uint64_t spl_xat_sleep;
-extern uint64_t spl_xat_late_deny;
-extern uint64_t spl_xat_no_waiters;
-extern uint64_t spl_xft_wait;
 
+extern uint64_t spl_vba_fastpath;
+extern uint64_t spl_vba_fastexit;
+extern uint64_t spl_vba_slowpath;
 extern uint64_t spl_vba_parent_memory_appeared;
 extern uint64_t spl_vba_parent_memory_blocked;
 extern uint64_t spl_vba_hiprio_blocked;
@@ -527,6 +534,12 @@ uint64_t spl_arc_reclaim_avoided = 0;
 
 uint64_t kmem_free_to_slab_when_fragmented = 0;
 
+// Keep an eye on stack size in known places (macOS)
+extern _Atomic uint64_t spl_lowest_vdev_disk_stack_remaining;
+extern _Atomic uint64_t spl_lowest_zvol_stack_remaining;
+extern _Atomic uint64_t spl_lowest_alloc_stack_remaining;
+extern unsigned int spl_split_stack_below;
+
 typedef struct spl_stats {
 	kstat_named_t spl_os_alloc;
 	kstat_named_t spl_active_threads;
@@ -537,12 +550,27 @@ typedef struct spl_stats {
 	kstat_named_t spl_spl_free;
 	kstat_named_t spl_spl_free_manual_pressure;
 	kstat_named_t spl_spl_free_fast_pressure;
-	kstat_named_t spl_spl_free_delta_ema;
 	kstat_named_t spl_spl_free_negative_count;
 	kstat_named_t spl_osif_malloc_success;
+	kstat_named_t spl_osif_malloc_fail;
 	kstat_named_t spl_osif_malloc_bytes;
 	kstat_named_t spl_osif_free;
 	kstat_named_t spl_osif_free_bytes;
+
+	kstat_named_t spl_enforce_memory_caps;
+	kstat_named_t spl_dynamic_memory_cap;
+	kstat_named_t spl_dynamic_memory_cap_skipped;
+	kstat_named_t spl_dynamic_memory_cap_reductions;
+	kstat_named_t spl_dynamic_memory_cap_hit_floor;
+	kstat_named_t spl_manual_memory_cap;
+	kstat_named_t spl_memory_cap_enforcements;
+
+	kstat_named_t spl_osif_malloc_sub128k;
+	kstat_named_t spl_osif_malloc_sub64k;
+	kstat_named_t spl_osif_malloc_sub32k;
+	kstat_named_t spl_osif_malloc_page;
+	kstat_named_t spl_osif_malloc_subpage;
+
 	kstat_named_t spl_bucket_non_pow2_allocs;
 
 	kstat_named_t spl_vmem_unconditional_allocs;
@@ -552,20 +580,15 @@ typedef struct spl_stats {
 	kstat_named_t spl_vmem_conditional_alloc_deny;
 	kstat_named_t spl_vmem_conditional_alloc_deny_bytes;
 
-	kstat_named_t spl_xat_success;
-	kstat_named_t spl_xat_late_success;
-	kstat_named_t spl_xat_late_success_nosleep;
 	kstat_named_t spl_xat_pressured;
 	kstat_named_t spl_xat_bailed;
-	kstat_named_t spl_xat_bailed_contended;
 	kstat_named_t spl_xat_lastalloc;
 	kstat_named_t spl_xat_lastfree;
-	kstat_named_t spl_xat_forced;
 	kstat_named_t spl_xat_sleep;
-	kstat_named_t spl_xat_late_deny;
-	kstat_named_t spl_xat_no_waiters;
-	kstat_named_t spl_xft_wait;
 
+	kstat_named_t spl_vba_fastpath;
+	kstat_named_t spl_vba_fastexit;
+	kstat_named_t spl_vba_slowpath;
 	kstat_named_t spl_vba_parent_memory_appeared;
 	kstat_named_t spl_vba_parent_memory_blocked;
 	kstat_named_t spl_vba_hiprio_blocked;
@@ -592,6 +615,10 @@ typedef struct spl_stats {
 	kstat_named_t spl_vm_pages_reclaimed;
 	kstat_named_t spl_vm_pages_wanted;
 	kstat_named_t spl_vm_pressure_level;
+	kstat_named_t spl_lowest_alloc_stack_remaining;
+	kstat_named_t spl_lowest_vdev_disk_stack_remaining;
+	kstat_named_t spl_lowest_zvol_stack_remaining;
+	kstat_named_t spl_split_stack_below;
 } spl_stats_t;
 
 static spl_stats_t spl_stats = {
@@ -604,12 +631,27 @@ static spl_stats_t spl_stats = {
 	{"spl_spl_free", KSTAT_DATA_INT64},
 	{"spl_spl_free_manual_pressure", KSTAT_DATA_UINT64},
 	{"spl_spl_free_fast_pressure", KSTAT_DATA_UINT64},
-	{"spl_spl_free_delta_ema", KSTAT_DATA_UINT64},
 	{"spl_spl_free_negative_count", KSTAT_DATA_UINT64},
 	{"spl_osif_malloc_success", KSTAT_DATA_UINT64},
+	{"spl_osif_malloc_fail", KSTAT_DATA_UINT64},
 	{"spl_osif_malloc_bytes", KSTAT_DATA_UINT64},
 	{"spl_osif_free", KSTAT_DATA_UINT64},
 	{"spl_osif_free_bytes", KSTAT_DATA_UINT64},
+
+	{"spl_osif_enforce_memory_caps", KSTAT_DATA_UINT64},
+	{"spl_osif_dynamic_memory_cap", KSTAT_DATA_UINT64},
+	{"spl_osif_dynamic_memory_cap_skipped", KSTAT_DATA_UINT64},
+	{"spl_osif_dynamic_memory_cap_reductions", KSTAT_DATA_UINT64},
+	{"spl_osif_dynamic_memory_cap_hit_floor", KSTAT_DATA_UINT64},
+	{"spl_osif_manual_memory_cap", KSTAT_DATA_UINT64},
+	{"spl_osif_memory_cap_enforcements", KSTAT_DATA_UINT64},
+
+	{"spl_osif_malloc_sub128k", KSTAT_DATA_UINT64},
+	{"spl_osif_malloc_sub64k", KSTAT_DATA_UINT64},
+	{"spl_osif_malloc_sub32k", KSTAT_DATA_UINT64},
+	{"spl_osif_malloc_page", KSTAT_DATA_UINT64},
+	{"spl_osif_malloc_subpage", KSTAT_DATA_UINT64},
+
 	{"spl_bucket_non_pow2_allocs", KSTAT_DATA_UINT64},
 
 	{"vmem_unconditional_allocs", KSTAT_DATA_UINT64},
@@ -619,20 +661,14 @@ static spl_stats_t spl_stats = {
 	{"vmem_conditional_alloc_deny", KSTAT_DATA_UINT64},
 	{"vmem_conditional_alloc_deny_bytes", KSTAT_DATA_UINT64},
 
-	{"spl_xat_success", KSTAT_DATA_UINT64},
-	{"spl_xat_late_success", KSTAT_DATA_UINT64},
-	{"spl_xat_late_success_nosleep", KSTAT_DATA_UINT64},
 	{"spl_xat_pressured", KSTAT_DATA_UINT64},
-	{"spl_xat_bailed", KSTAT_DATA_UINT64},
-	{"spl_xat_bailed_contended", KSTAT_DATA_UINT64},
 	{"spl_xat_lastalloc", KSTAT_DATA_UINT64},
 	{"spl_xat_lastfree", KSTAT_DATA_UINT64},
-	{"spl_xat_forced", KSTAT_DATA_UINT64},
 	{"spl_xat_sleep", KSTAT_DATA_UINT64},
-	{"spl_xat_late_deny", KSTAT_DATA_UINT64},
-	{"spl_xat_no_waiters", KSTAT_DATA_UINT64},
-	{"spl_xft_wait", KSTAT_DATA_UINT64},
 
+	{"spl_vba_fastpath", KSTAT_DATA_UINT64},
+	{"spl_vba_fastexit", KSTAT_DATA_UINT64},
+	{"spl_vba_slowpath", KSTAT_DATA_UINT64},
 	{"spl_vba_parent_memory_appeared", KSTAT_DATA_UINT64},
 	{"spl_vba_parent_memory_blocked", KSTAT_DATA_UINT64},
 	{"spl_vba_hiprio_blocked", KSTAT_DATA_UINT64},
@@ -659,6 +695,10 @@ static spl_stats_t spl_stats = {
 	{"spl_vm_pages_reclaimed", KSTAT_DATA_UINT64},
 	{"spl_vm_pages_wanted", KSTAT_DATA_UINT64},
 	{"spl_vm_pressure_level", KSTAT_DATA_UINT64},
+	{"lowest_alloc_stack_remaining", KSTAT_DATA_UINT64},
+	{"lowest_vdev_disk_stack_remaining", KSTAT_DATA_UINT64},
+	{"lowest_zvol_stack_remaining", KSTAT_DATA_UINT64},
+	{"split_stack_below", KSTAT_DATA_UINT64},
 };
 
 static kstat_t *spl_ksp = 0;
@@ -731,11 +771,11 @@ copy_pattern(uint64_t pattern, void *buf_arg, size_t size)
 		*buf++ = pattern;
 }
 
-static void *
-verify_pattern(uint64_t pattern, void *buf_arg, size_t size)
+static const void *
+verify_pattern(uint64_t pattern, const void *buf_arg, size_t size)
 {
-	uint64_t *bufend = (uint64_t *)((char *)buf_arg + size);
-	uint64_t *buf;
+	const uint64_t *bufend = (const uint64_t *)((char *)buf_arg + size);
+	const uint64_t *buf;
 
 	for (buf = buf_arg; buf < bufend; buf++)
 		if (*buf != pattern)
@@ -800,7 +840,7 @@ kmem_cache_applyall_id(void (*func)(kmem_cache_t *), taskq_t *tq, int tqflag)
  * Debugging support.  Given a buffer address, find its slab.
  */
 static kmem_slab_t *
-kmem_findslab(kmem_cache_t *cp, void *buf)
+kmem_findslab(kmem_cache_t *cp, const void *buf)
 {
 	kmem_slab_t *sp;
 
@@ -825,14 +865,14 @@ kmem_findslab(kmem_cache_t *cp, void *buf)
 }
 
 static void
-kmem_error(int error, kmem_cache_t *cparg, void *bufarg)
+kmem_error(int error, kmem_cache_t *cparg, const void *bufarg)
 {
 	kmem_buftag_t *btp = NULL;
 	kmem_bufctl_t *bcp = NULL;
 	kmem_cache_t *cp = cparg;
 	kmem_slab_t *sp;
-	uint64_t *off;
-	void *buf = bufarg;
+	const uint64_t *off;
+	const void *buf = bufarg;
 
 	kmem_logging = 0;	/* stop logging when a bad thing happens */
 
@@ -893,10 +933,15 @@ kmem_error(int error, kmem_cache_t *cparg, void *bufarg)
 		case KMERR_MODIFIED:
 			TraceEvent(TRACE_ERROR, "buffer modified after being"
 			    " freed\n");
+			dprintf("buffer modified after being freed\n");
 			off = verify_pattern(KMEM_FREE_PATTERN, buf,
 			    cp->cache_verify);
 			if (off == NULL)	/* shouldn't happen */
 				off = buf;
+			dprintf("SPL: modification occurred at offset 0x%lx "
+			    "(0x%llx replaced by 0x%llx)\n",
+			    (uintptr_t)off - (uintptr_t)buf,
+			    (longlong_t)KMEM_FREE_PATTERN, (longlong_t)*off);
 			TraceEvent(TRACE_ERROR, "SPL: modification occurred "
 			    "at offset 0x%lx (0x%llx replaced by 0x%llx)\n",
 			    (uintptr_t)off - (uintptr_t)buf,
@@ -904,21 +949,28 @@ kmem_error(int error, kmem_cache_t *cparg, void *bufarg)
 			break;
 
 		case KMERR_REDZONE:
+			dprintf("redzone violation: write past end of buf\n");
 			TraceEvent(TRACE_ERROR, "redzone violation: write past"
 			    " end of buffer\n");
 			break;
 
 		case KMERR_BADADDR:
+			dprintf("invalid free: buffer not in cache\n");
 			TraceEvent(TRACE_ERROR, "invalid free: buffer not in"
 			    " cache\n");
 			break;
 
 		case KMERR_DUPFREE:
+			dprintf("duplicate free: buffer freed twice\n");
 			TraceEvent(TRACE_ERROR, "duplicate free: buffer freed"
 			    " twice\n");
 			break;
 
 		case KMERR_BADBUFTAG:
+			dprintf("boundary tag corrupted\n");
+			dprintf("SPL: bcp ^ bxstat = %lx, should be %lx\n",
+			    (intptr_t)btp->bt_bufctl ^ btp->bt_bxstat,
+			    KMEM_BUFTAG_FREE);
 			TraceEvent(TRACE_ERROR, "boundary tag corrupted\n");
 			TraceEvent(TRACE_ERROR, "SPL: bcp ^ bxstat = %lx, "
 			    "should be %lx\n",
@@ -927,10 +979,16 @@ kmem_error(int error, kmem_cache_t *cparg, void *bufarg)
 			break;
 
 		case KMERR_BADBUFCTL:
+			dprintf("bufctl corrupted\n");
 			TraceEvent(TRACE_ERROR, "bufctl corrupted\n");
 			break;
 
 		case KMERR_BADCACHE:
+			dprintf("buffer freed to wrong cache\n");
+			dprintf("SPL: buffer was allocated from %s,\n",
+			    cp->cache_name);
+			dprintf("SPL: caller attempting free to %s.\n",
+			    cparg->cache_name);
 			TraceEvent(TRACE_ERROR, "buffer freed to wrong "
 			    "cache\n");
 			TraceEvent(TRACE_ERROR, "SPL: buffer was allocated"
@@ -940,6 +998,9 @@ kmem_error(int error, kmem_cache_t *cparg, void *bufarg)
 			break;
 
 		case KMERR_BADSIZE:
+			dprintf("bad free: free size (%u) != alloc size (%u)\n",
+			    KMEM_SIZE_DECODE(((uint32_t *)btp)[0]),
+			    KMEM_SIZE_DECODE(((uint32_t *)btp)[1]));
 			TraceEvent(TRACE_ERROR, "bad free: free size (%u) !="
 			    " alloc size (%u)\n",
 			    KMEM_SIZE_DECODE(((uint32_t *)btp)[0]),
@@ -947,6 +1008,8 @@ kmem_error(int error, kmem_cache_t *cparg, void *bufarg)
 			break;
 
 		case KMERR_BADBASE:
+			dprintf("bad free: free address (%p) != alloc address"
+			    " (%p)\n", bufarg, buf);
 			TraceEvent(TRACE_ERROR, "bad free: free address"
 			    " (%p) != alloc address (%p)\n", bufarg, buf);
 			break;
@@ -967,7 +1030,7 @@ kmem_error(int error, kmem_cache_t *cparg, void *bufarg)
 		    "%s\n", (void *)bcap->bc_thread, ts.tv_sec, ts.tv_nsec,
 		    (void *)sp, cp->cache_name);
 		for (d = 0; d < MIN(bcap->bc_depth, KMEM_STACK_DEPTH); d++) {
-			dprintf("   : %p\n, ", bcap->bc_stack[d]);
+			dprintf("   : %p\n, ", (void *)bcap->bc_stack[d]);
 		}
 	}
 
@@ -995,16 +1058,16 @@ kmem_log_init(size_t logsize)
 	lhsize = P2ROUNDUP(lhsize, KMEM_ALIGN);
 	lhp = vmem_xalloc(kmem_log_arena, lhsize, 64, P2NPHASE(lhsize, 64), 0,
 	    NULL, NULL, VM_SLEEP);
-	bzero(lhp, lhsize);
+	memset(lhp, 0, lhsize);
 
 	mutex_init(&lhp->lh_lock, NULL, MUTEX_DEFAULT, NULL);
 	lhp->lh_nchunks = nchunks;
 	lhp->lh_chunksize = P2ROUNDUP(logsize / nchunks + 1, PAGESIZE);
-	lhp->lh_base = vmem_alloc(kmem_log_arena,
+	lhp->lh_base = vmem_alloc_impl(kmem_log_arena,
 	    lhp->lh_chunksize * nchunks, VM_SLEEP);
-	lhp->lh_free = vmem_alloc(kmem_log_arena,
+	lhp->lh_free = vmem_alloc_impl(kmem_log_arena,
 	    nchunks * sizeof (int), VM_SLEEP);
-	bzero(lhp->lh_base, lhp->lh_chunksize * nchunks);
+	memset(lhp->lh_base, 0, lhp->lh_chunksize * nchunks);
 
 	for (i = 0; i < max_ncpus; i++) {
 		kmem_cpu_log_header_t *clhp = &lhp->lh_cpu[i];
@@ -1036,9 +1099,10 @@ kmem_log_fini(kmem_log_header_t *lhp)
 		mutex_destroy(&clhp->clh_lock);
 	}
 
-	vmem_free(kmem_log_arena, lhp->lh_free, nchunks * sizeof (int));
+	vmem_free_impl(kmem_log_arena, lhp->lh_free, nchunks * sizeof (int));
 
-	vmem_free(kmem_log_arena, lhp->lh_base, lhp->lh_chunksize * nchunks);
+	vmem_free_impl(kmem_log_arena, lhp->lh_base,
+	    lhp->lh_chunksize * nchunks);
 
 	mutex_destroy(&lhp->lh_lock);
 
@@ -1077,7 +1141,7 @@ kmem_log_enter(kmem_log_header_t *lhp, void *data, size_t size)
 	logspace = clhp->clh_current;
 	clhp->clh_current += size;
 	clhp->clh_avail -= size;
-	bcopy(data, logspace, size);
+	memcpy(logspace, data, size);
 	mutex_exit(&clhp->clh_lock);
 	return (logspace);
 }
@@ -1099,7 +1163,7 @@ kmem_log_event(kmem_log_header_t *lp, kmem_cache_t *cp,
 {
 	kmem_bufctl_audit_t bca;
 
-	bzero(&bca, sizeof (kmem_bufctl_audit_t));
+	memset(&bca, 0, sizeof (kmem_bufctl_audit_t));
 	bca.bc_addr = addr;
 	bca.bc_slab = sp;
 	KMEM_AUDIT(lp, cp, &bca);
@@ -1128,7 +1192,7 @@ kmem_slab_create(kmem_cache_t *cp, int kmflag)
 		color = cp->cache_mincolor;
 	cp->cache_color = color;
 
-	slab = vmem_alloc(vmp, slabsize, kmflag & KM_VMFLAGS);
+	slab = vmem_alloc_impl(vmp, slabsize, kmflag & KM_VMFLAGS);
 
 	if (slab == NULL)
 		goto vmem_alloc_failure;
@@ -1173,7 +1237,7 @@ kmem_slab_create(kmem_cache_t *cp, int kmflag)
 			if (cache_flags & KMF_AUDIT) {
 				kmem_bufctl_audit_t *bcap =
 				    (kmem_bufctl_audit_t *)bcp;
-				bzero(bcap, sizeof (kmem_bufctl_audit_t));
+				memset(bcap, 0, sizeof (kmem_bufctl_audit_t));
 				bcap->bc_cache = cp;
 			}
 			bcp->bc_addr = buf;
@@ -1210,7 +1274,7 @@ bufctl_alloc_failure:
 
 slab_alloc_failure:
 
-	vmem_free(vmp, slab, slabsize);
+	vmem_free_impl(vmp, slab, slabsize);
 
 vmem_alloc_failure:
 
@@ -1243,7 +1307,7 @@ kmem_slab_destroy(kmem_cache_t *cp, kmem_slab_t *sp)
 		kmem_cache_free(kmem_slab_cache, sp);
 	}
 	kpreempt(KPREEMPT_SYNC);
-	vmem_free(vmp, slab, cp->cache_slabsize);
+	vmem_free_impl(vmp, slab, cp->cache_slabsize);
 }
 
 static void *
@@ -1385,7 +1449,7 @@ static void kmem_slab_move_yes(kmem_cache_t *, kmem_slab_t *, void *);
 static void
 kmem_slab_free(kmem_cache_t *cp, void *buf)
 {
-	kmem_slab_t *sp;
+	kmem_slab_t *sp = NULL;
 	kmem_bufctl_t *bcp, **prev_bcpp;
 
 	ASSERT(buf != NULL);
@@ -1763,12 +1827,24 @@ kmem_depot_ws_zero(kmem_cache_t *cp)
 }
 
 /*
- * The number of bytes to reap before we call kpreempt(). The default (1MB)
- * causes us to preempt reaping up to hundres of times per second.  Using a
- * larger value (1GB) causes this to have virtually no effect.
+ * The number of bytes to reap before we call kpreempt().
+ *
+ * There is a tradeoff between potentially many many preempts when giving
+ * freeing a large amount of ARC scatter ABDs (the preempts slightly slow down
+ * the return of memory to parent arenas during a larger reap, which in turn
+ * slightly delays the return of memory to the operating system) versus
+ * letting other threads on low-core-count machines make forward progress
+ * (which was upstream's goal when reap preemption was first introduced) or
+ * (in more modern times) gaining efficiencies in busy high-core-count
+ * machines that can have many threads allocating while an inevitably
+ * long-lived reap is in progress, narrowing the possibility of destroying
+ * kmem structures that might have to be rebuilt during the next preemption.
+ *
+ * Historically 1M was the value from upstream, which was increased for o3x
+ * for performance reasons. The reap mechanisms have evolved such that 1M
+ * is once again the better default.
  */
-size_t kmem_reap_preempt_bytes = 64 * 1024 * 1024;
-
+size_t kmem_reap_preempt_bytes = 1024 * 1024;
 
 /*
  * Reap all magazines that have fallen out of the depot's working set.
@@ -1782,6 +1858,22 @@ kmem_depot_ws_reap(kmem_cache_t *cp)
 
 	ASSERT(!list_link_active(&cp->cache_link) ||
 	    taskq_member(kmem_taskq, curthread));
+
+	bool mtx_contended = false;
+
+	if (!mutex_tryenter(&cp->cache_reap_lock)) {
+		mtx_contended = true;
+		dprintf("ZFS: SPL: %s:%s:%d: could not get lock\n",
+		    __FILE__, __func__, __LINE__);
+		IOSleep(1);
+		mutex_enter(&cp->cache_reap_lock);
+	}
+
+	if (mtx_contended)
+		dprintf("ZFS: SPL: %s:%s:%d: reap mutex for %s "
+		    "was contended\n",
+		    __FILE__, __func__, __LINE__,
+		    cp->cache_name);
 
 	reap = MIN(cp->cache_full.ml_reaplimit, cp->cache_full.ml_min);
 	while (reap-- &&
@@ -1804,6 +1896,8 @@ kmem_depot_ws_reap(kmem_cache_t *cp)
 			bytes = 0;
 		}
 	}
+
+	mutex_exit(&cp->cache_reap_lock);
 }
 
 static void
@@ -1816,7 +1910,7 @@ kmem_cpu_reload(kmem_cpu_cache_t *ccp, kmem_magazine_t *mp, int rounds)
 	ccp->cc_ploaded = ccp->cc_loaded;
 	ccp->cc_prounds = ccp->cc_rounds;
 	ccp->cc_loaded = mp;
-	ccp->cc_rounds = rounds;
+	ccp->cc_rounds = (short)rounds;
 }
 
 /*
@@ -1960,7 +2054,6 @@ kmem_dump_finish(char *buf, size_t size)
 	int kdi_end = kmem_dump_log_idx;
 	int percent = 0;
 	int header = 0;
-	int warn = 0;
 	size_t used;
 	kmem_cache_t *cp;
 	kmem_dump_log_t *kdl;
@@ -1978,7 +2071,7 @@ kmem_dump_finish(char *buf, size_t size)
 	kmem_dumppr(&p, e, "heap size,%ld\n", kmem_dump_size);
 	kmem_dumppr(&p, e, "Oversize allocs,%d\n",
 	    kmem_dump_oversize_allocs);
-	kmem_dumppr(&p, e, "Oversize max size,%ld\n",
+	kmem_dumppr(&p, e, "Oversize max size,%u\n",
 	    kmem_dump_oversize_max);
 
 	for (kdi_idx = 0; kdi_idx < kdi_end; kdi_idx++) {
@@ -1986,8 +2079,6 @@ kmem_dump_finish(char *buf, size_t size)
 		cp = kdl->kdl_cache;
 		if (cp == NULL)
 			break;
-		if (kdl->kdl_alloc_fails)
-			++warn;
 		if (header == 0) {
 			kmem_dumppr(&p, e,
 			    "Cache Name,Allocs,Frees,Alloc Fails,"
@@ -2002,7 +2093,7 @@ kmem_dump_finish(char *buf, size_t size)
 
 	/* return buffer size used */
 	if (p < e)
-		bzero(p, e - p);
+		memset(p, 0, e - p);
 	return (p - buf);
 }
 
@@ -2363,7 +2454,7 @@ kmem_cache_parent_arena_fragmented(kmem_cache_t *cp)
  * Free a constructed object to cache cp.
  */
 void
-kmem_cache_free(kmem_cache_t *cp, void *buf)
+kmem_cache_free(kmem_cache_t *cp, const void *buf)
 {
 	kmem_cpu_cache_t *ccp = KMEM_CPU_CACHE(cp);
 
@@ -2381,11 +2472,13 @@ kmem_cache_free(kmem_cache_t *cp, void *buf)
 			ASSERT(!(ccp->cc_flags & KMF_DUMPDIVERT));
 			/* log it so that we can warn about it */
 			KDI_LOG(cp, kdl_unsafe);
-		} else if (KMEM_DUMPCC(ccp) && !kmem_cache_free_dump(cp, buf)) {
+		} else if (KMEM_DUMPCC(ccp) && !kmem_cache_free_dump(cp,
+		    __DECONST(void *, buf))) {
 			return;
 		}
 		if (ccp->cc_flags & KMF_BUFTAG) {
-			if (kmem_cache_free_debug(cp, buf, caller()) == -1)
+			if (kmem_cache_free_debug(cp, __DECONST(void *, buf),
+			    caller()) == -1)
 				return;
 		}
 	}
@@ -2400,7 +2493,8 @@ kmem_cache_free(kmem_cache_t *cp, void *buf)
 		 * loaded magazine, just put the object there and return.
 		 */
 		if ((uint_t)ccp->cc_rounds < ccp->cc_magsize) {
-			ccp->cc_loaded->mag_round[ccp->cc_rounds++] = buf;
+			ccp->cc_loaded->mag_round[ccp->cc_rounds++] =
+			    __DECONST(void *, buf);
 			ccp->cc_free++;
 			mutex_exit(&ccp->cc_lock);
 			return;
@@ -2448,7 +2542,7 @@ kmem_cache_free(kmem_cache_t *cp, void *buf)
 	}
 	mutex_exit(&ccp->cc_lock);
 	kpreempt(KPREEMPT_SYNC);
-	kmem_slab_free_constructed(cp, buf, B_TRUE);
+	kmem_slab_free_constructed(cp, __DECONST(void *, buf), B_TRUE);
 }
 
 /*
@@ -2602,12 +2696,12 @@ zfs_kmem_zalloc(size_t size, int kmflag)
 					    kmem_lite_count, caller());
 				}
 			}
-			bzero(buf, size);
+			memset(buf, 0, size);
 		}
 	} else {
 		buf = zfs_kmem_alloc(size, kmflag);
 		if (buf != NULL)
-			bzero(buf, size);
+			memset(buf, 0, size);
 	}
 	return (buf);
 }
@@ -2633,7 +2727,7 @@ zfs_kmem_alloc(size_t size, int kmflag)
 
 	} else {
 
-		buf = vmem_alloc(kmem_oversize_arena, size,
+		buf = vmem_alloc_impl(kmem_oversize_arena, size,
 		    kmflag & KM_VMFLAGS);
 		if (buf == NULL)
 			kmem_log_event(kmem_failure_log, NULL, NULL,
@@ -2661,7 +2755,7 @@ zfs_kmem_alloc(size_t size, int kmflag)
 }
 
 void
-zfs_kmem_free(void *buf, size_t size)
+zfs_kmem_free(const void *buf, size_t size)
 {
 	size_t index;
 	kmem_cache_t *cp;
@@ -2679,7 +2773,7 @@ zfs_kmem_free(void *buf, size_t size)
 		/* fall through to kmem_cache_free() */
 
 	} else {
-		vmem_free(kmem_oversize_arena, buf, size);
+		vmem_free_impl(kmem_oversize_arena, buf, size);
 		return;
 	}
 
@@ -2781,20 +2875,25 @@ kmem_reap_timeout(void *flag_arg)
 {
 	uint32_t *flag = (uint32_t *)flag_arg;
 
-	ASSERT(flag == &kmem_reaping || flag == &kmem_reaping_idspace);
-	*flag = 0;
+	ASSERT(flag == (uint32_t *)&kmem_reaping ||
+	    flag == (uint32_t *)&kmem_reaping_idspace);
+	__atomic_store_n(flag, 0, __ATOMIC_RELEASE);
+	ASSERT3U(*flag, ==, 0);
 }
 
 static void
 kmem_reap_done(void *flag)
 {
-	(void) bsd_timeout(kmem_reap_timeout, flag, &kmem_reap_interval);
+	if (!shutting_down)
+		(void) bsd_timeout(kmem_reap_timeout, flag,
+		    &kmem_reap_interval);
 }
 
 static void
 kmem_reap_start(void *flag)
 {
-	ASSERT(flag == &kmem_reaping || flag == &kmem_reaping_idspace);
+	ASSERT(flag == (uint32_t *)&kmem_reaping ||
+	    (uint32_t *)flag == &kmem_reaping_idspace);
 
 	if (flag == &kmem_reaping) {
 		kmem_cache_applyall(kmem_cache_reap, kmem_taskq, TQ_NOSLEEP);
@@ -2820,19 +2919,27 @@ kmem_reap_common(void *flag_arg)
 {
 	uint32_t *flag = (uint32_t *)flag_arg;
 
+	ASSERT(flag == &kmem_reaping || flag == &kmem_reaping_idspace);
 
+	/* If conditions are met, try to set flag to 1 */
 	if (MUTEX_HELD(&kmem_cache_lock) || kmem_taskq == NULL ||
 	    atomic_cas_32(flag, 0, 1) != 0)
 		return;
+	/*
+	 * If we are here, the appropriate flag is 1.  It will be atomically
+	 * zeroed after the reaping has finished and the timeout has expired.
+	 */
 
 	/*
-	 * It may not be kosher to do memory allocation when a reap is called
+	 * It may not be safe to do memory allocation when a reap
 	 * is called (for example, if vmem_populate() is in the call chain).
 	 * So we start the reap going with a TQ_NOALLOC dispatch.  If the
 	 * dispatch fails, we reset the flag, and the next reap will try again.
 	 */
-	if (!taskq_dispatch(kmem_taskq, kmem_reap_start, flag, TQ_NOALLOC))
-		*flag = 0;
+	if (!taskq_dispatch(kmem_taskq, kmem_reap_start, flag, TQ_NOALLOC)) {
+		__atomic_store_n(flag, 0, __ATOMIC_RELEASE);
+		ASSERT3U(*flag, ==, 0);
+	}
 }
 
 /*
@@ -2946,21 +3053,36 @@ kmem_cache_magazine_disable(kmem_cache_t *cp)
 boolean_t
 kmem_cache_reap_active(void)
 {
-	return (!taskq_empty(kmem_taskq));
+	return (kmem_reaping.flag);
 }
 
 /*
- * Reap (almost) everything right now.
+ * Fire off a kmem_reap(); that will put a kmem_reap_start() into the taskq if
+ * conditions are favourable.
+ *
+ * This function can be frequently called by common code.  Arguably it is
+ * over-called.
+ *
+ * Previously, a kmem_depot_ws_zero(cp) would erase the working set
+ * information of the kmem cache; it is probably better to let other events
+ * evolve the magazine working set.
+ *
+ * Also previously, a kmem_depot_ws_reap(cp) was dispatched on the kmem taskq.
+ * This appears to have some unsafeness with respect to concurrency, and this
+ * unconditional start-a-reap-right-now approach was abandoned by the other
+ * openzfs ports.  On macOS there does not seem to be an advantage in stepping
+ * around the kmem_reap{,common,start,timeout}() concurrency-controlling
+ * mechanism (atomic compare-and-swap on kmem_reaping, with an atomic set to
+ * zero after a delay once the reaping task is done).  Moreover, skipping the
+ * kmem_reaping flag check may have led to double-frees of destroyed depots to
+ * qcache-equipped vmem arenas.
  */
 void
-kmem_cache_reap_now(kmem_cache_t *cp)
+kmem_cache_reap_now(kmem_cache_t *cp __maybe_unused)
 {
 	ASSERT(list_link_active(&cp->cache_link));
 
-	kmem_depot_ws_zero(cp);
-
-	(void) taskq_dispatch(kmem_taskq,
-	    (task_func_t *)kmem_depot_ws_reap, cp, TQ_SLEEP);
+	kmem_reap();
 }
 
 /*
@@ -3011,11 +3133,11 @@ kmem_hash_rescale(kmem_cache_t *cp)
 	if ((old_size >> 1) <= new_size && new_size <= (old_size << 1))
 		return;
 
-	new_table = vmem_alloc(kmem_hash_arena, new_size * sizeof (void *),
+	new_table = vmem_alloc_impl(kmem_hash_arena, new_size * sizeof (void *),
 	    VM_NOSLEEP);
 	if (new_table == NULL)
 		return;
-	bzero(new_table, new_size * sizeof (void *));
+	memset(new_table, 0, new_size * sizeof (void *));
 
 	mutex_enter(&cp->cache_lock);
 
@@ -3040,7 +3162,7 @@ kmem_hash_rescale(kmem_cache_t *cp)
 
 	mutex_exit(&cp->cache_lock);
 
-	vmem_free(kmem_hash_arena, old_table, old_size * sizeof (void *));
+	vmem_free_impl(kmem_hash_arena, old_table, old_size * sizeof (void *));
 }
 
 /*
@@ -3126,7 +3248,8 @@ static void kmem_update(void *);
 static void
 kmem_update_timeout(void *dummy)
 {
-	(void) bsd_timeout(kmem_update, dummy, &kmem_reap_interval);
+	if (!shutting_down)
+		(void) bsd_timeout(kmem_update, dummy, &kmem_reap_interval);
 }
 
 static void
@@ -3292,7 +3415,7 @@ kmem_cache_stat(kmem_cache_t *cp, char *name)
 
 // TRUE if we have more than a critical minimum of memory
 // used in arc_memory_throttle; if FALSE, we throttle
-bool
+static bool
 spl_minimal_physmem_p_logic()
 {
 	// do we have enough memory to avoid throttling?
@@ -3325,13 +3448,7 @@ spl_minimal_physmem_p(void)
 size_t
 kmem_maxavail(void)
 {
-#ifndef APPLE
-	//    spgcnt_t pmem = availrmem - tune.t_minarmem;
-	//    spgcnt_t vmem = btop(vmem_size(heap_arena, VMEM_FREE));
-	//
-	//    return ((size_t)ptob(MAX(MIN(pmem, vmem), 0)));
-#endif
-	return (physmem * PAGE_SIZE);
+	return (total_memory);
 }
 
 /*
@@ -3476,7 +3593,7 @@ kmem_cache_create(
 	    KMEM_CPU_CACHE_SIZE,
 	    P2NPHASE(csize, KMEM_CPU_CACHE_SIZE),
 	    0, NULL, NULL, VM_SLEEP);
-	bzero(cp, csize);
+	memset(cp, 0, csize);
 	list_link_init(&cp->cache_link);
 
 	if (align == 0)
@@ -3560,8 +3677,8 @@ kmem_cache_create(
 	/*
 	 * Set cache properties.
 	 */
-	(void) strncpy(cp->cache_name, name, KMEM_CACHE_NAMELEN);
-	strident_canon(cp->cache_name, KMEM_CACHE_NAMELEN + 1);
+	(void) strlcpy(cp->cache_name, name, sizeof (cp->cache_name));
+	strident_canon(cp->cache_name, sizeof (cp->cache_name));
 	cp->cache_bufsize = bufsize;
 	cp->cache_align = align;
 	cp->cache_constructor = constructor;
@@ -3631,7 +3748,7 @@ kmem_cache_create(
 		ASSERT(chunksize + sizeof (kmem_slab_t) <= cp->cache_slabsize);
 		ASSERT(!(cp->cache_flags & KMF_AUDIT));
 	} else {
-		size_t chunks, bestfit, waste, slabsize;
+		size_t chunks, bestfit = 0, waste, slabsize;
 		size_t minwaste = LONG_MAX;
 
 		for (chunks = 1; chunks <= KMEM_VOID_FRACTION; chunks++) {
@@ -3677,6 +3794,8 @@ kmem_cache_create(
 
 	cp->cache_color = cp->cache_mincolor;
 
+	mutex_init(&cp->cache_reap_lock, NULL, MUTEX_DEFAULT, NULL);
+
 	/*
 	 * Initialize the rest of the slab layer.
 	 */
@@ -3691,10 +3810,10 @@ kmem_cache_create(
 	    sizeof (kmem_slab_t), offsetof(kmem_slab_t, slab_link));
 
 	if (cp->cache_flags & KMF_HASH) {
-		cp->cache_hash_table = vmem_alloc(kmem_hash_arena,
+		cp->cache_hash_table = vmem_alloc_impl(kmem_hash_arena,
 		    KMEM_HASH_INITIAL * sizeof (void *),
 		    VM_SLEEP);
-		bzero(cp->cache_hash_table,
+		memset(cp->cache_hash_table, 0,
 		    KMEM_HASH_INITIAL * sizeof (void *));
 		cp->cache_hash_mask = KMEM_HASH_INITIAL - 1;
 		cp->cache_hash_shift = highbit((ulong_t)chunksize) - 1;
@@ -3831,7 +3950,7 @@ kmem_cache_set_move(kmem_cache_t *cp,
 
 			cp->cache_defrag = defrag;
 			defrag = NULL; /* nothing to free */
-			bzero(cp->cache_defrag, sizeof (kmem_defrag_t));
+			memset(cp->cache_defrag, 0, sizeof (kmem_defrag_t));
 			avl_create(&cp->cache_defrag->kmd_moves_pending,
 			    kmem_move_cmp, sizeof (kmem_move_t),
 			    offsetof(kmem_move_t, kmm_entry));
@@ -3899,6 +4018,13 @@ kmem_cache_destroy(kmem_cache_t *cp)
 
 	kmem_cache_magazine_purge(cp);
 
+	/*
+	 * make sure there isn't a reaper
+	 * since it would dereference cp
+	 */
+	mutex_enter(&cp->cache_reap_lock);
+	mutex_exit(&cp->cache_reap_lock);
+
 	mutex_enter(&cp->cache_lock);
 
 	if (cp->cache_buftotal != 0)
@@ -3933,7 +4059,7 @@ kmem_cache_destroy(kmem_cache_t *cp)
 	kstat_delete(cp->cache_kstat);
 
 	if (cp->cache_hash_table != NULL)
-		vmem_free(kmem_hash_arena, cp->cache_hash_table,
+		vmem_free_impl(kmem_hash_arena, cp->cache_hash_table,
 		    (cp->cache_hash_mask + 1) * sizeof (void *));
 
 	for (cpu_seqid = 0; cpu_seqid < max_ncpus; cpu_seqid++)
@@ -3941,8 +4067,9 @@ kmem_cache_destroy(kmem_cache_t *cp)
 
 	mutex_destroy(&cp->cache_depot_lock);
 	mutex_destroy(&cp->cache_lock);
+	mutex_destroy(&cp->cache_reap_lock);
 
-	vmem_free(kmem_cache_arena, cp, KMEM_CACHE_SIZE(max_ncpus));
+	vmem_free_impl(kmem_cache_arena, cp, KMEM_CACHE_SIZE(max_ncpus));
 }
 
 static void
@@ -4088,12 +4215,12 @@ kmem_cache_init(int pass, int use_large_pages)
 	if (pass == 2) {
 		kmem_va_arena = vmem_create(KMEM_VA_PREFIX,
 		    NULL, 0, PAGESIZE,
-		    vmem_alloc, vmem_free, heap_arena,
+		    vmem_alloc_impl, vmem_free_impl, heap_arena,
 		    2 * PAGESIZE, VM_SLEEP);
 
 		kmem_default_arena = vmem_create("kmem_default",
 		    NULL, 0, PAGESIZE,
-		    vmem_alloc, vmem_free, kmem_va_arena,
+		    vmem_alloc_impl, vmem_free_impl, kmem_va_arena,
 		    0, VMC_DUMPSAFE | VM_SLEEP);
 
 		/* Figure out what our maximum cache size is */
@@ -4122,7 +4249,7 @@ kmem_cache_init(int pass, int use_large_pages)
 		 * The big alloc table may not be completely overwritten, so
 		 * we clear out any stale cache pointers from the first pass.
 		 */
-		bzero(kmem_big_alloc_table, sizeof (kmem_big_alloc_table));
+		memset(kmem_big_alloc_table, 0, sizeof (kmem_big_alloc_table));
 	} else {
 		/*
 		 * During the first pass, the kmem_alloc_* caches
@@ -4146,7 +4273,15 @@ kmem_cache_init(int pass, int use_large_pages)
 	kmem_big_alloc_table_max = maxbuf >> KMEM_BIG_SHIFT;
 }
 
+/*
+ * At kext unload, kmem_cache_build_slablist() builds a list of free slabs
+ * from all kmem caches, so kmem_cache_fini() can report the leaks and the
+ * total number of leaks.
+ */
+
 struct free_slab {
+	char	vm_name[VMEM_NAMELEN];
+	char	cache_name[KMEM_CACHE_NAMELEN + 1];
 	vmem_t *vmp;
 	size_t slabsize;
 	void *slab;
@@ -4154,7 +4289,6 @@ struct free_slab {
 };
 
 static list_t freelist;
-
 
 void
 kmem_cache_build_slablist(kmem_cache_t *cp)
@@ -4170,6 +4304,9 @@ kmem_cache_build_slablist(kmem_cache_t *cp)
 
 		MALLOC(fs, struct free_slab *, sizeof (struct free_slab),
 		    M_TEMP, M_WAITOK);
+		strlcpy(fs->vm_name, vmp->vm_name, VMEM_NAMELEN);
+		strlcpy(fs->cache_name, cp->cache_name,
+		    KMEM_CACHE_NAMELEN);
 		fs->vmp = vmp;
 		fs->slabsize = cp->cache_slabsize;
 		fs->slab = (void *)P2ALIGN((uintptr_t)sp->slab_base,
@@ -4183,6 +4320,9 @@ kmem_cache_build_slablist(kmem_cache_t *cp)
 
 		MALLOC(fs, struct free_slab *, sizeof (struct free_slab),
 		    M_TEMP, M_WAITOK);
+		strlcpy(fs->vm_name, vmp->vm_name, VMEM_NAMELEN);
+		strlcpy(fs->cache_name, cp->cache_name,
+		    KMEM_CACHE_NAMELEN);
 		fs->vmp = vmp;
 		fs->slabsize = cp->cache_slabsize;
 		fs->slab = (void *)P2ALIGN((uintptr_t)sp->slab_base,
@@ -4195,7 +4335,7 @@ kmem_cache_build_slablist(kmem_cache_t *cp)
 	kstat_delete(cp->cache_kstat);
 
 	if (cp->cache_hash_table != NULL)
-		vmem_free(kmem_hash_arena, cp->cache_hash_table,
+		vmem_free_impl(kmem_hash_arena, cp->cache_hash_table,
 		    (cp->cache_hash_mask + 1) * sizeof (void *));
 
 	for (cpu_seqid = 0; cpu_seqid < max_ncpus; cpu_seqid++)
@@ -4204,7 +4344,7 @@ kmem_cache_build_slablist(kmem_cache_t *cp)
 	mutex_destroy(&cp->cache_depot_lock);
 	mutex_destroy(&cp->cache_lock);
 
-	vmem_free(kmem_cache_arena, cp, KMEM_CACHE_SIZE(max_ncpus));
+	vmem_free_impl(kmem_cache_arena, cp, KMEM_CACHE_SIZE(max_ncpus));
 }
 
 
@@ -4232,96 +4372,130 @@ kmem_cache_fini()
 	i = 0;
 	while ((fs = list_head(&freelist))) {
 		i++;
+		dprintf("SPL: %s:%d: released %lu from '%s' to '%s'\n",
+		    __func__, __LINE__,
+		    fs->slabsize,
+		    fs->cache_name,
+		    fs->vm_name);
 		list_remove(&freelist, fs);
-		vmem_free(fs->vmp, fs->slab, fs->slabsize);
+		vmem_free_impl(fs->vmp, fs->slab, fs->slabsize);
 		FREE(fs, M_TEMP);
 
 	}
-	xprintf("SPL: Released %u slabs\n", i);
+	dprintf("SPL: %s:%d: Released %u slabs TOTAL\n",
+	    __func__, __LINE__, i);
+
 	list_destroy(&freelist);
 }
 
-static int64_t
-abd_free_warm_bytes(void)
+/*
+ * Reduce dynamic memory cap by a set amount ("reduction"), unless the cap is
+ * already 1/8 of total_memory or lower.  unlike the logic in
+ * spl-vmem.c:xnu_alloc_throttled(), we likely have not observed xnu being
+ * ready to deny us memory, so we drop half the cap half as much.
+ *
+ * Inter-thread synchronization of spl_dynamic_memory_cap and spl_free here in
+ * the next two functions is important as there _will_ be multi-core bursts
+ * of spl_free_wrapper() calls.
+ */
+int64_t
+spl_reduce_dynamic_cap(void)
 {
-    extern vmem_t* abd_arena;
+	/*
+	 * take a snapshot of spl_dynamic_memory_cap, which
+	 * may drop while we are in this function
+	 */
+	const uint64_t cap_in = spl_dynamic_memory_cap;
 
-    /*
-     * During Phase 1 (prealloc allocating), mem_inuse ≈ mem_import
-     * so free_warm ≈ 0 anyway, but guard explicitly to be clear.
-     */
-    if (abd_arena == NULL ||
-	prealloc_phase == PREALLOC_PHASE_ALLOC ||
-	prealloc_phase == PREALLOC_PHASE_IDLE)
-	return (0);
+	const uint64_t reduce_amount = total_memory >> 8;
 
-    const int64_t mem_import =
-	(int64_t)abd_arena->vm_kstat.vk_mem_import.value.ui64;
-    const int64_t mem_inuse =
-	(int64_t)abd_arena->vm_kstat.vk_mem_inuse.value.ui64;
+	const int64_t thresh = total_memory >> 3;
 
-    return ((mem_import > mem_inuse) ? (mem_import - mem_inuse) : 0);
+	const int64_t reduction = (int64_t)(cap_in - reduce_amount);
+
+	const int64_t reduced = MAX(reduction, thresh);
+
+	/*
+	 * Adjust cap downwards if enough time has elapsed
+	 * for previous adjustments to shrink memory use.
+	 *
+	 * We will still tell ARC to shrink by thresh.
+	 */
+	mutex_enter(&spl_dynamic_memory_cap_lock);
+
+	const hrtime_t now = gethrtime();
+	if (now > spl_dynamic_memory_cap_last_downward_adjust +
+	    SEC2NSEC(60)) {
+
+		if (spl_dynamic_memory_cap == 0 ||
+		    spl_dynamic_memory_cap > total_memory) {
+			spl_dynamic_memory_cap_last_downward_adjust = now;
+			spl_dynamic_memory_cap = total_memory - reduce_amount;
+			atomic_inc_64(&spl_dynamic_memory_cap_reductions);
+		} else if (spl_dynamic_memory_cap > reduced) {
+			spl_dynamic_memory_cap_last_downward_adjust = now;
+			spl_dynamic_memory_cap = reduced;
+			atomic_inc_64(&spl_dynamic_memory_cap_reductions);
+		} else if (spl_dynamic_memory_cap <= thresh) {
+			spl_dynamic_memory_cap_last_downward_adjust = now;
+			spl_dynamic_memory_cap = thresh;
+			atomic_inc_64(&spl_dynamic_memory_cap_hit_floor);
+		} else {
+			atomic_inc_64(&spl_dynamic_memory_cap_skipped);
+		}
+	} else {
+		atomic_inc_64(&spl_dynamic_memory_cap_skipped);
+	}
+
+	mutex_exit(&spl_dynamic_memory_cap_lock);
+
+	const uint64_t cap_out = spl_dynamic_memory_cap;
+	const int64_t cap_diff = cap_out - cap_in;
+	const int64_t minusthresh = -(int64_t)thresh;
+
+	if (cap_diff > minusthresh) {
+		spl_free = minusthresh;
+		return (minusthresh);
+	} else {
+		spl_free = cap_diff;
+		return (cap_diff);
+	}
 }
 
-static bool
-critical_memory_state(int64_t bufferzone, int64_t *rem)
-{   
-    const int64_t remainder = (int64_t)total_memory - (int64_t)segkmem_total_mem_allocated;
-    if (rem != NULL) {
-	*rem = remainder;
-    }
-
-    return (remainder < bufferzone);
-}
-
-// this is intended to substitute for kmem_avail() in arc.c
+/*
+ * This substitutes for kmem_avail() in arc_os.c
+ *
+ * If we believe there is free memory but memory caps are active, enforce on
+ * them, decrementing the dynamic cap if necessary, returning a non-positive
+ * free memory to ARC if we have reached either enforced cap.
+ */
 int64_t
 spl_free_wrapper(void)
 {
-    if (zfs_prealloc_percent == 0)
+	if (spl_enforce_memory_caps != 0 && spl_free > 0) {
+		if (segkmem_total_mem_allocated >=
+		    spl_dynamic_memory_cap) {
+			atomic_inc_64(&spl_memory_cap_enforcements);
+			spl_set_arc_no_grow(B_TRUE);
+			return (spl_reduce_dynamic_cap());
+		} else if (spl_manual_memory_cap > 0 &&
+		    segkmem_total_mem_allocated >= spl_manual_memory_cap) {
+			spl_set_arc_no_grow(B_TRUE);
+			atomic_inc_64(&spl_memory_cap_enforcements);
+			const int64_t dec = spl_manual_memory_cap -
+			    segkmem_total_mem_allocated;
+			const int64_t giveback = -(total_memory >> 10);
+			if (dec > giveback) {
+				spl_free = giveback;
+				return (giveback);
+			} else {
+				spl_free = dec;
+				return (dec);
+			}
+		}
+	}
+
 	return (spl_free);
-
-    extern vmem_t* abd_arena;
-
-    if (abd_arena == NULL)
-	return (spl_free);
-
-    /*
-     * During prealloc Phase 1 (allocating), free_warm = 0 and
-     * segkmem_total_mem_allocated is artificially high.
-     * Fall back to spl_free to avoid negative available values
-     * that would trigger an immediate arc_evict storm.
-     */
-    if (prealloc_phase == PREALLOC_PHASE_ALLOC ||
-	prealloc_phase == PREALLOC_PHASE_IDLE)
-	return (spl_free);
-
-    const int64_t free_warm = abd_free_warm_bytes();
-
-    /*
-     * Effective OS pressure: discount free-warm slab memory.
-     * These bytes are already counted in segkmem_total_mem_allocated
-     * but cost ARC nothing to consume.
-     */
-    const int64_t effective_os_alloc =
-	MAX((int64_t)segkmem_total_mem_allocated - free_warm, 0);
-
-    /* 95% of physical RAM — ceiling before we start hurting the OS */
-    const int64_t memory_limit =
-	((int64_t)total_memory * 95) / 100;
-
-    const int64_t os_headroom = memory_limit - effective_os_alloc;
-    const int64_t arc_headroom =
-	(int64_t)zfs_arc_max - arc_target_size();
-
-    const int64_t available = MIN(os_headroom, arc_headroom);
-
-    /*
-     * Floor at spl_free: never return a value more pessimistic
-     * than what the base pressure path reports. This ensures
-     * the prealloc path is strictly an optimistic correction.
-     */
-    return (MAX(available, spl_free));
 }
 
 // this is intended to substitute for kmem_avail() in arc.c
@@ -4329,94 +4503,7 @@ spl_free_wrapper(void)
 int64_t
 spl_free_manual_pressure_wrapper(void)
 {
-    /*
-     * Persisted across calls.
-     *   last_shrink_time - when we last issued a non-zero reduction.
-     *   inflight_reduce  - bytes already requested but not yet seen reclaimed
-     *                      in the OS counters. This is what stops rapid repeat
-     *                      calls from stacking reductions on top of each other.
-     */
-    static hrtime_t last_shrink_time = 0;
-    static int64_t  inflight_reduce = 0;
-
-    const hrtime_t now = gethrtime();
-    const hrtime_t settle_ns = SEC2NSEC(1);   /* assumed reclaim latency */
-
-    const int64_t five_percent = ((int64_t)total_memory * 5) / 100;
-    const int64_t five_hundred_mb = 500LL * 1024 * 1024;
-    const int64_t buffer_zone = MIN(five_hundred_mb, five_percent);
-
-    /*
-     * Bleed off the in-flight estimate, modeled as draining linearly over
-     * settle_ns; anything older is treated as fully reclaimed. This single
-     * change is what makes the function safe to call at any frequency.
-     */
-    if (inflight_reduce > 0) {
-	const hrtime_t age = now - last_shrink_time;
-	if (age >= settle_ns)
-	    inflight_reduce = 0;
-	else
-	    inflight_reduce -= (inflight_reduce * age) / settle_ns;
-    }
-
-    int64_t rem = 0;
-
-    /* 1. Hard perimeter - true system emergency. Smooth proportional ramp on
-     *    how deep we are into the buffer zone, netted against what's pending. */
-    if (critical_memory_state(buffer_zone, &rem)) {
-	const int64_t crit_floor = 100LL * 1024 * 1024;
-	const int64_t crit_cap = 200LL * 1024 * 1024;
-
-	int64_t depth = buffer_zone - rem;          /* 0 at edge, == zone at wall */
-	if (depth < 0)           depth = 0;
-	if (depth > buffer_zone) depth = buffer_zone;
-
-	int64_t target = crit_floor +
-	    ((crit_cap - crit_floor) * depth) / buffer_zone;
-
-	int64_t net = target - inflight_reduce;     /* only what's not on its way */
-	if (net < crit_floor)
-	    return (0);                             /* already covered - let it land */
-	if (net > crit_cap)
-	    net = crit_cap;
-
-	last_shrink_time = now;
-	inflight_reduce += net;
-	return (net);
-    }
-
-    if (prealloc_phase == PREALLOC_PHASE_ALLOC ||
-	prealloc_phase == PREALLOC_PHASE_IDLE)
-	return (0);
-
-    /* 2. Proportional overshoot reclaim (steady state). */
-    if (now < last_shrink_time + settle_ns)
-	return (0);
-
-    const int64_t free_warm = abd_free_warm_bytes();
-    int64_t active_os_alloc = (int64_t)segkmem_total_mem_allocated - free_warm;
-    if (active_os_alloc < 0)
-	active_os_alloc = 0;
-
-    const int64_t safe_threshold = (int64_t)total_memory - buffer_zone;
-
-    if (active_os_alloc > safe_threshold) {
-	const int64_t reap_floor = 10LL * 1024 * 1024;
-	const int64_t reap_cap = 50LL * 1024 * 1024;
-	const int64_t overshoot = active_os_alloc - safe_threshold;
-
-	int64_t net = overshoot - inflight_reduce;
-	if (net < reap_floor)
-	    return (0);
-	if (net > reap_cap)
-	    net = reap_cap;
-
-	last_shrink_time = now;
-	inflight_reduce += net;
-	return (net);
-    }
-
-    return (0);
+	return (spl_free_manual_pressure);
 }
 
 uint64_t
@@ -4466,7 +4553,7 @@ spl_free_set_and_wait_pressure(int64_t new_p, boolean_t fast,
 			TraceEvent(TRACE_ERROR, "%s: ERROR: timed out "
 			    "after one minute!\n", __func__);
 			break;
-		} else if (now > double_again_at && !doubled_again) {
+		} else if (doubled && now > double_again_at && !doubled_again) {
 			doubled_again = true;
 			new_p *= 2;
 		} else if (now > double_at) {
@@ -4487,7 +4574,9 @@ spl_free_set_pressure(int64_t new_p)
 		spl_free_fast_pressure = FALSE;
 		// wake up both spl_free_thread() to recalculate spl_free
 		// and any spl_free_set_and_wait_pressure() threads
-		cv_broadcast(&spl_free_thread_cv);
+		mutex_enter(&spl_free_thread_lock);
+		cv_signal(&spl_free_thread_cv);
+		mutex_exit(&spl_free_thread_lock);
 	}
 	spl_free_last_pressure = zfs_lbolt();
 }
@@ -4600,17 +4689,15 @@ static void
 spl_free_thread()
 {
 	callb_cpr_t cpr;
-	uint64_t last_update = zfs_lbolt();
-	int64_t last_spl_free;
-	double ema_new = 0;
-	double ema_old = 0;
-	double alpha;
 
 	CALLB_CPR_INIT(&cpr, &spl_free_thread_lock, callb_generic_cpr, FTAG);
 
 	/* initialize with a reasonably large amount of memory */
 	spl_free = MAX(4*1024*1024*1024,
 	    total_memory * 75ULL / 100ULL);
+
+	if (spl_dynamic_memory_cap == 0)
+		spl_dynamic_memory_cap = total_memory;
 
 	mutex_enter(&spl_free_thread_lock);
 
@@ -4624,7 +4711,6 @@ spl_free_thread()
 		mutex_exit(&spl_free_thread_lock);
 		boolean_t lowmem = false;
 		boolean_t emergency_lowmem = false;
-		int64_t base;
 		int64_t new_spl_free = 0LL;
 
 		spl_stats.spl_free_wake_count.value.ui64++;
@@ -4639,10 +4725,13 @@ spl_free_thread()
 		if (time_now > hz)
 			time_now_seconds = time_now / hz;
 
-		last_spl_free = spl_free;
-
-		new_spl_free = total_memory -
-		    segkmem_total_mem_allocated;
+		if (segkmem_total_mem_allocated > total_memory)
+			spl_vm_pages_wanted =
+			    (segkmem_total_mem_allocated - total_memory)
+			    / PAGE_SIZE;
+		else
+			new_spl_free = total_memory -
+			    segkmem_total_mem_allocated;
 
 		/* Ask Mach about pressure */
 
@@ -4656,16 +4745,19 @@ spl_free_thread()
 		 *
 		 */
 
-		uint32_t pages_reclaimed = 0;
-		uint32_t pages_wanted = 0;
+		// uint32_t pages_reclaimed = 0;
+		// uint32_t pages_wanted = 0;
 
-/* get pressure here */
+		// XNU calls mach_vm_pressure_monitor() which
+		// fills in pages_reclaimed and pages_wanted.
+		// then assign them to spl_vm_pages_reclaimed and
+		// spl_vm_pages_wanted
+		// Windows event thread will set them for us.
 
 		if (spl_vm_pressure_level > 0 &&
 		    spl_vm_pressure_level != MAGIC_PRESSURE_UNAVAILABLE) {
 			/* there is pressure */
 			lowmem = true;
-			KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "spl_vm_pressure_level: %lu\n",spl_vm_pressure_level));
 			new_spl_free = -(2LL * PAGE_SIZE * spl_vm_pages_wanted);
 			if (spl_vm_pressure_level > 1) {
 				emergency_lowmem = true;
@@ -4720,10 +4812,37 @@ spl_free_thread()
 			int64_t old_pressure = spl_free_manual_pressure;
 			new_spl_free -= old_pressure * 2LL;
 			lowmem = true;
-			KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "spl_free_manual_pressure: %llu\n",spl_free_manual_pressure));
 			if (spl_free_fast_pressure) {
 				emergency_lowmem = true;
 				new_spl_free -= old_pressure * 4LL;
+			}
+		}
+
+		/*
+		 * Pressure and declare zero free memory if we are above
+		 * memory caps.  This is not the hardest enforcement
+		 * mechanism, so see also enforcement in spl_free_wrapper()
+		 */
+		if (spl_enforce_memory_caps) {
+			if (segkmem_total_mem_allocated >=
+			    spl_dynamic_memory_cap) {
+				lowmem = true;
+				emergency_lowmem = true;
+				if (new_spl_free >= 0)
+					new_spl_free =
+					    spl_dynamic_memory_cap -
+					    segkmem_total_mem_allocated;
+				atomic_inc_64(&spl_memory_cap_enforcements);
+			} else if (spl_manual_memory_cap > 0 &&
+			    segkmem_total_mem_allocated >=
+			    spl_manual_memory_cap) {
+				lowmem = true;
+				emergency_lowmem = true;
+				if (new_spl_free >= 0)
+					new_spl_free =
+					    spl_manual_memory_cap -
+					    segkmem_total_mem_allocated;
+				atomic_inc_64(&spl_memory_cap_enforcements);
 			}
 		}
 
@@ -4818,7 +4937,6 @@ spl_free_thread()
 			new_spl_free += bminus;
 			lowmem = true;
 			emergency_lowmem = true;
-			KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "spl_vm_pages_wanted %lu\n", spl_vm_pages_wanted));
 			// atomic swaps to set these variables used in arc.c
 			int64_t previous_highest_pressure = 0;
 			int64_t new_p = -bminus;
@@ -4839,7 +4957,6 @@ spl_free_thread()
 			new_spl_free -= bytes_wanted;
 			if (reserve_low && !early_lots_free) {
 				lowmem = true;
-				KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "spl_vm_pages_wanted: %lu reserve_low: %lu early_lots_free: %lu\n", spl_vm_pages_wanted, reserve_low, early_lots_free));
 				if (recent_lowmem == 0) {
 					recent_lowmem = time_now;
 				}
@@ -4916,8 +5033,6 @@ spl_free_thread()
 				recent_lowmem = 0;
 		}
 
-		base = new_spl_free;
-
 		// adjust for available memory in spl_heap_arena
 		// cf arc_available_memory()
 		if (!emergency_lowmem) {
@@ -4950,7 +5065,6 @@ spl_free_thread()
 			    real_total_memory) > 75) {
 				new_spl_free -= total_mem_used / 32;
 				lowmem = true;
-				KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "segkmem_total_mem_allocated: %llu real_total_memory: %llu\n", segkmem_total_mem_allocated, real_total_memory));
 			}
 		}
 
@@ -4972,8 +5086,6 @@ spl_free_thread()
 				new_spl_free = -1024LL;
 		}
 
-		double delta = (double)new_spl_free - (double)last_spl_free;
-
 		boolean_t spl_free_is_negative = false;
 
 		if (new_spl_free < 0LL) {
@@ -4990,6 +5102,20 @@ spl_free_thread()
 		    (total_memory - segkmem_total_mem_allocated)) {
 			if (new_spl_free > 2LL * spamaxblksz)
 				new_spl_free = 2LL * spamaxblksz;
+		}
+
+		if (spl_enforce_memory_caps != 0) {
+			if (spl_dynamic_memory_cap != 0) {
+				const int64_t m = spl_dynamic_memory_cap -
+				    segkmem_total_mem_allocated;
+				if (new_spl_free > m)
+					new_spl_free = m;
+			} else if (spl_manual_memory_cap != 0) {
+				const int64_t m = spl_manual_memory_cap -
+				    segkmem_total_mem_allocated;
+				if (new_spl_free > m)
+					new_spl_free = m;
+			}
 		}
 
 		// NOW set spl_free from calculated new_spl_free
@@ -5029,18 +5155,6 @@ spl_free_thread()
 		if (lowmem)
 			recent_lowmem = time_now;
 
-		// maintain an exponential moving average for the ema kstat
-		if (last_update > hz)
-			alpha = 1.0;
-		else {
-			double td_tick  = (double)(time_now - last_update);
-			alpha = td_tick / (double)(hz*50.0); // roughly 0.02
-		}
-
-		ema_new = (alpha * delta) + (1.0 - alpha)*ema_old;
-		spl_free_delta_ema = ema_new;
-		ema_old = ema_new;
-
 	justwait:
 		mutex_enter(&spl_free_thread_lock);
 		CALLB_CPR_SAFE_BEGIN(&cpr);
@@ -5058,12 +5172,20 @@ spl_free_thread()
 	thread_exit();
 }
 
+/*
+ * Windows specific pressure monitor
+ * We expect this function to set
+ * spl_vm_pages_reclaimed
+ * spl_vm_pages_wanted
+ * spl_vm_pressure_level
+ * (kVMPressureNormal=0, Warning=1, Urgent=2, Critical=3)
+ */
 static void
 spl_event_thread(void *notused)
 {
 	// callb_cpr_t cpr;
 	NTSTATUS Status;
-
+	LARGE_INTEGER timeout;
 	DECLARE_CONST_UNICODE_STRING(low_mem_name,
 	    L"\\KernelObjects\\LowMemoryCondition");
 	HANDLE low_mem_handle;
@@ -5080,78 +5202,48 @@ spl_event_thread(void *notused)
 
 	dprintf("SPL: beginning spl_event_thread() loop\n");
 
+	timeout.QuadPart = -SEC2NSEC100(30); // 30 seconds.
+
 	while (!spl_event_thread_exit) {
 
 		/* Don't busy loop */
 		delay(hz);
 
-		/* Sleep forever waiting for event */
+		/*
+		 * Sleep up to 30s waiting for event, if timeout
+		 * we assume the system is not "low memory".
+		 */
 		Status = KeWaitForSingleObject(low_mem_event, Executive,
-		    KernelMode, FALSE, NULL);
+		    KernelMode, FALSE, &timeout);
 		KeClearEvent(low_mem_event);
 
-		dprintf("%s: LOWMEMORY EVENT *** 0x%x (memusage: %llu)\n",
-		    __func__, Status, segkmem_total_mem_allocated);
-		/* We were signalled */
-		// vm_page_free_wanted = vm_page_free_min;
-		spl_free_set_pressure(spl_vm_page_free_min);
-		cv_broadcast(&spl_free_thread_cv);
-	}
+		if (Status == STATUS_TIMEOUT) {
 
+			spl_vm_pages_reclaimed = 0;
+
+			if (spl_vm_pressure_level > 0)
+				spl_vm_pressure_level--;
+			else
+				spl_vm_pages_wanted = 0;
+
+		} else {
+			dprintf(
+			    "%s: LOWMEMORY EVENT *** 0x%x (memusage: %llu)\n",
+			    __func__, Status, segkmem_total_mem_allocated);
+			/* We were signalled */
+			// vm_page_free_wanted = vm_page_free_min;
+			// spl_free_set_pressure(spl_vm_page_free_min);
+			spl_vm_pages_reclaimed = 0;
+			spl_vm_pages_wanted += spl_vm_page_free_min;
+			if (spl_vm_pressure_level < 3)
+				spl_vm_pressure_level++;
+			cv_broadcast(&spl_free_thread_cv);
+		}
+	}
 	ZwClose(low_mem_handle);
 
 	spl_event_thread_exit = FALSE;
 	dprintf("SPL: %s thread_exit\n", __func__);
-	thread_exit();
-}
-
-static void
-spl_abd_prealloc_thread(void *notused)
-{
-	NTSTATUS Status;
-
-	typedef struct abd_prealloc_node {
-		list_node_t node;
-	} abd_prealloc_node_t;
-
-	abd_prealloc_node_t *node;
-	list_t abd_prealloc_list;
-
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "SPL: abd prealloc start segkmem_total_mem_allocated: %lld total_memory: %lld\n",
-	    segkmem_total_mem_allocated, total_memory));
-
-	dprintf("SPL: beginning spl_abd_prealloc_thread() loop\n");
-	prealloc_phase = PREALLOC_PHASE_ALLOC;
-
-	list_create(&abd_prealloc_list, sizeof (abd_prealloc_node_t), offsetof(abd_prealloc_node_t, node));
-
-	while (!spl_abd_prealloc_thread_exit) {
-
-		if (!abd_chunk_cache || !zfs_arc_max) {
-			delay(hz);
-			continue;
-		}
-
-		if (segkmem_total_mem_allocated >=
-                    (zfs_arc_max * zfs_prealloc_percent) / 100) {
-                        break;
-                }
-
-		node = (abd_prealloc_node_t *)kmem_cache_alloc(abd_chunk_cache, KM_SLEEP);
-		list_insert_tail(&abd_prealloc_list, node);
-	}
-
-	prealloc_phase = PREALLOC_PHASE_FREE;
-	while ((node = list_remove_head(&abd_prealloc_list)) != NULL) {
-		kmem_cache_free(abd_chunk_cache, node);
-	}
-
-	spl_abd_prealloc_thread_exit = FALSE;
-	dprintf("SPL: %s thread_exit\n", __func__);
-	prealloc_phase = PREALLOC_PHASE_DONE;
-
-	KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "SPL: abd prealloc done segkmem_total_mem_allocated: %lld total_memory: %lld zfs_arc_max: %llu zfs_prealloc_percent: %d%\n",
-	    segkmem_total_mem_allocated, total_memory, zfs_arc_max, zfs_prealloc_percent));
 	thread_exit();
 }
 
@@ -5202,6 +5294,43 @@ spl_kstat_update(kstat_t *ksp, int rw)
 			    ks->kmem_free_to_slab_when_fragmented.value.ui64;
 		}
 
+		if ((unsigned int) ks->spl_split_stack_below.value.ui64 !=
+		    spl_split_stack_below) {
+			spl_split_stack_below =
+			    (unsigned int)
+			    ks->spl_split_stack_below.value.ui64;
+		}
+
+		if (ks->spl_enforce_memory_caps.value.ui64 !=
+		    spl_enforce_memory_caps) {
+			spl_enforce_memory_caps =
+			    ks->spl_enforce_memory_caps.value.ui64;
+		}
+
+		if (ks->spl_manual_memory_cap.value.ui64 !=
+		    spl_manual_memory_cap) {
+			uint64_t v =
+			    ks->spl_manual_memory_cap.value.ui64;
+			if (v < total_memory >> 3)
+				v = total_memory >> 3;
+			else if (v > total_memory)
+				v = 0;
+			spl_manual_memory_cap = v;
+		}
+
+		if (ks->spl_dynamic_memory_cap.value.ui64 !=
+		    spl_dynamic_memory_cap) {
+			uint64_t v =
+			    ks->spl_dynamic_memory_cap.value.ui64;
+			if (v == 0)
+				v = total_memory;
+			else if (v < total_memory >> 3)
+				v = total_memory >> 3;
+			else if (v > total_memory)
+				v = total_memory;
+			spl_dynamic_memory_cap = v;
+		}
+
 	} else {
 		ks->spl_os_alloc.value.ui64 = segkmem_total_mem_allocated;
 		ks->spl_active_threads.value.ui64 = zfs_threads;
@@ -5213,12 +5342,40 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		    spl_free_manual_pressure;
 		ks->spl_spl_free_fast_pressure.value.i64 =
 		    spl_free_fast_pressure;
-		ks->spl_spl_free_delta_ema.value.i64 = spl_free_delta_ema;
 		ks->spl_osif_malloc_success.value.ui64 =
 		    stat_osif_malloc_success;
+		ks->spl_osif_malloc_fail.value.ui64 =
+		    stat_osif_malloc_fail;
 		ks->spl_osif_malloc_bytes.value.ui64 = stat_osif_malloc_bytes;
 		ks->spl_osif_free.value.ui64 = stat_osif_free;
 		ks->spl_osif_free_bytes.value.ui64 = stat_osif_free_bytes;
+
+		ks->spl_enforce_memory_caps.value.ui64 =
+		    spl_enforce_memory_caps;
+		ks->spl_dynamic_memory_cap.value.ui64 =
+		    spl_dynamic_memory_cap;
+		ks->spl_dynamic_memory_cap_skipped.value.ui64 =
+		    spl_dynamic_memory_cap_skipped;
+		ks->spl_dynamic_memory_cap_reductions.value.ui64 =
+		    spl_dynamic_memory_cap_reductions;
+		ks->spl_dynamic_memory_cap_hit_floor.value.ui64 =
+		    spl_dynamic_memory_cap_hit_floor;
+		ks->spl_manual_memory_cap.value.ui64 =
+		    spl_manual_memory_cap;
+		ks->spl_memory_cap_enforcements.value.ui64 =
+		    spl_memory_cap_enforcements;
+
+		ks->spl_osif_malloc_sub128k.value.ui64 =
+		    stat_osif_malloc_sub128k;
+		ks->spl_osif_malloc_sub64k.value.ui64 =
+		    stat_osif_malloc_sub64k;
+		ks->spl_osif_malloc_sub32k.value.ui64 =
+		    stat_osif_malloc_sub32k;
+		ks->spl_osif_malloc_page.value.ui64 =
+		    stat_osif_malloc_page;
+		ks->spl_osif_malloc_subpage.value.ui64 =
+		    stat_osif_malloc_subpage;
+
 		ks->spl_bucket_non_pow2_allocs.value.ui64 =
 		    spl_bucket_non_pow2_allocs;
 
@@ -5235,22 +5392,17 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_vmem_conditional_alloc_deny_bytes.value.ui64 =
 		    spl_vmem_conditional_alloc_deny_bytes;
 
-		ks->spl_xat_success.value.ui64 = spl_xat_success;
-		ks->spl_xat_late_success.value.ui64 = spl_xat_late_success;
-		ks->spl_xat_late_success_nosleep.value.ui64 =
-		    spl_xat_late_success_nosleep;
 		ks->spl_xat_pressured.value.ui64 = spl_xat_pressured;
-		ks->spl_xat_bailed.value.ui64 = spl_xat_bailed;
-		ks->spl_xat_bailed_contended.value.ui64 =
-		    spl_xat_bailed_contended;
 		ks->spl_xat_lastalloc.value.ui64 = spl_xat_lastalloc;
 		ks->spl_xat_lastfree.value.ui64 = spl_xat_lastfree;
-		ks->spl_xat_forced.value.ui64 = spl_xat_forced;
 		ks->spl_xat_sleep.value.ui64 = spl_xat_sleep;
-		ks->spl_xat_late_deny.value.ui64 = spl_xat_late_deny;
-		ks->spl_xat_no_waiters.value.ui64 = spl_xat_no_waiters;
-		ks->spl_xft_wait.value.ui64 = spl_xft_wait;
 
+		ks->spl_vba_fastpath.value.ui64 =
+		    spl_vba_fastpath;
+		ks->spl_vba_fastexit.value.ui64 =
+		    spl_vba_fastexit;
+		ks->spl_vba_slowpath.value.ui64 =
+		    spl_vba_slowpath;
 		ks->spl_vba_parent_memory_appeared.value.ui64 =
 		    spl_vba_parent_memory_appeared;
 		ks->spl_vba_parent_memory_blocked.value.ui64 =
@@ -5291,6 +5443,14 @@ spl_kstat_update(kstat_t *ksp, int rw)
 		ks->spl_vm_pressure_level.value.ui64 =
 		    spl_vm_pressure_level;
 
+		ks->spl_lowest_alloc_stack_remaining.value.ui64 =
+		    spl_lowest_alloc_stack_remaining;
+		ks->spl_lowest_vdev_disk_stack_remaining.value.ui64 =
+		    spl_lowest_vdev_disk_stack_remaining;
+		ks->spl_lowest_zvol_stack_remaining.value.ui64 =
+		    spl_lowest_zvol_stack_remaining;
+		ks->spl_split_stack_below.value.ui64 =
+		    spl_split_stack_below;
 	}
 
 	return (0);
@@ -5338,25 +5498,25 @@ spl_kmem_init(uint64_t xtotal_memory)
 	kernelheap_init();
 
 	kmem_metadata_arena = vmem_create("kmem_metadata", NULL, 0, PAGESIZE,
-	    vmem_alloc, vmem_free, heap_arena, 8 * PAGESIZE,
+	    vmem_alloc_impl, vmem_free_impl, heap_arena, 8 * PAGESIZE,
 	    VM_SLEEP | VMC_NO_QCACHE);
 
 	kmem_msb_arena = vmem_create("kmem_msb", NULL, 0,
-	    PAGESIZE, vmem_alloc, vmem_free, kmem_metadata_arena, 0,
+	    PAGESIZE, vmem_alloc_impl, vmem_free_impl, kmem_metadata_arena, 0,
 	    VMC_DUMPSAFE | VM_SLEEP);
 
 	kmem_cache_arena = vmem_create("kmem_cache", NULL, 0, KMEM_ALIGN,
-	    vmem_alloc, vmem_free, kmem_metadata_arena, 0, VM_SLEEP);
+	    vmem_alloc_impl, vmem_free_impl, kmem_metadata_arena, 0, VM_SLEEP);
 
 	kmem_hash_arena = vmem_create("kmem_hash", NULL, 0, KMEM_ALIGN,
-	    vmem_alloc, vmem_free, kmem_metadata_arena, 0, VM_SLEEP);
+	    vmem_alloc_impl, vmem_free_impl, kmem_metadata_arena, 0, VM_SLEEP);
 
 	kmem_log_arena = vmem_create("kmem_log", NULL, 0, KMEM_ALIGN,
-	    vmem_alloc, vmem_free, kmem_metadata_arena, 0, VM_SLEEP);
+	    vmem_alloc_impl, vmem_free_impl, kmem_metadata_arena, 0, VM_SLEEP);
 
 	/* temporary oversize arena for mod_read_system_file */
 	kmem_oversize_arena = vmem_create("kmem_oversize", NULL, 0, PAGESIZE,
-	    vmem_alloc, vmem_free, heap_arena, 0, VM_SLEEP);
+	    vmem_alloc_impl, vmem_free_impl, heap_arena, 0, VM_SLEEP);
 
 	// statically declared above kmem_reap_interval = 15 * hz;
 
@@ -5574,22 +5734,20 @@ spl_kmem_thread_init(void)
 	// Initialize the spl_free locks
 	mutex_init(&spl_free_thread_lock, "spl_free_thead_lock", MUTEX_DEFAULT,
 	    NULL);
+	mutex_init(&spl_dynamic_memory_cap_lock, "spl_dynamic_memory_cap_lock",
+	    MUTEX_DEFAULT, NULL);
 
 	kmem_taskq = taskq_create("kmem_taskq", 1, minclsyspri,
 	    600, INT_MAX, TASKQ_PREPOPULATE);
 
 	spl_free_thread_exit = FALSE;
 	(void) cv_init(&spl_free_thread_cv, NULL, CV_DEFAULT, NULL);
-	(void) thread_create(NULL, 0, spl_free_thread, 0, 0, 0, 0, 92);
-	spl_free_thread_running = TRUE;
+	(void) thread_create(NULL, 0, spl_free_thread, 0, 0, 0, 0,
+	    defclsyspri);
 
-	if (zfs_prealloc_percent) {
-		spl_abd_prealloc_thread_exit = FALSE;
-		(void) thread_create(NULL, 0, spl_abd_prealloc_thread, 0, 0, 0, 0, 92);
-	} else {
-		spl_event_thread_exit = FALSE;
-		(void) thread_create(NULL, 0, spl_event_thread, 0, 0, 0, 0, 92);
-	}
+	spl_event_thread_exit = FALSE;
+	(void) thread_create(NULL, 0, spl_event_thread, 0, 0, 0, 0,
+	    defclsyspri);
 }
 
 void
@@ -5597,7 +5755,6 @@ spl_kmem_thread_fini(void)
 {
 	shutting_down = 1;
 
-	spl_abd_prealloc_thread_exit = TRUE;
 	if (low_mem_event != NULL) {
 		dprintf("SPL: stopping spl_event_thread\n");
 		spl_event_thread_exit = TRUE;
@@ -5614,10 +5771,11 @@ spl_kmem_thread_fini(void)
 		cv_signal(&spl_free_thread_cv);
 		cv_wait(&spl_free_thread_cv, &spl_free_thread_lock);
 	}
-	spl_free_thread_running = FALSE;
 	mutex_exit(&spl_free_thread_lock);
 	cv_destroy(&spl_free_thread_cv);
 	mutex_destroy(&spl_free_thread_lock);
+
+	mutex_destroy(&spl_dynamic_memory_cap_lock);
 
 	bsd_untimeout(kmem_update, &kmem_update_timer);
 	bsd_untimeout(kmem_reap_timeout, &kmem_reaping);
@@ -6579,6 +6737,36 @@ kmem_strfree(char *str)
 	zfs_kmem_free(str, strlen(str) + 1);
 }
 
+/*
+ * kmem_scnprintf() will return the number of characters that it would have
+ * printed whenever it is limited by value of the size variable, rather than
+ * the number of characters that it did print. This can cause misbehavior on
+ * subsequent uses of the return value, so we define a safe version that will
+ * return the number of characters actually printed, minus the NULL format
+ * character.  Subsequent use of this by the safe string functions is safe
+ * whether it is snprintf(), strlcat() or strlcpy().
+ */
+
+int
+kmem_scnprintf(char *restrict str, size_t size, const char *restrict fmt, ...)
+{
+	int n;
+	va_list ap;
+
+	/* Make the 0 case a no-op so that we do not return -1 */
+	if (size == 0)
+		return (0);
+
+	va_start(ap, fmt);
+	n = vsnprintf(str, size, fmt, ap);
+	va_end(ap);
+
+	if (n >= size)
+		n = size - 1;
+
+	return (n);
+}
+
 char *
 kvasdprintf(const char *fmt, va_list ap)
 {
@@ -6803,18 +6991,25 @@ kmem_cache_buf_in_cache(kmem_cache_t *cparg, void *bufarg)
 	}
 
 	if (sp == NULL) {
+		dprintf("SPL: %s: KMERR_BADADDR orig cache = %s\n",
+		    __func__, cparg->cache_name);
 		TraceEvent(TRACE_ERROR, "SPL: %s: KMERR_BADADDR orig cache ="
 		    " %s\n", __func__, cparg->cache_name);
 		return (NULL);
 	}
 
 	if (cp == NULL) {
+		dprintf("SPL: %s: ERROR cp == NULL; cparg == %s",
+		    __func__, cparg->cache_name);
 		TraceEvent(TRACE_ERROR, "SPL: %s: ERROR cp == NULL; cparg =="
 		    " %s", __func__, cparg->cache_name);
 		return (NULL);
 	}
 
 	if (cp != cparg) {
+		dprintf("SPL: %s: KMERR_BADCACHE arg cache = %s but found "
+		    "in %s instead\n",
+		    __func__, cparg->cache_name, cp->cache_name);
 		TraceEvent(TRACE_ERROR, "SPL: %s: KMERR_BADCACHE arg cache ="
 		    " %s but found in %s instead\n",
 		    __func__, cparg->cache_name, cp->cache_name);

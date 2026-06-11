@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -28,6 +29,7 @@
 #include <string.h>
 #include <sys/nvpair.h>
 #include <sys/fs/zfs.h>
+#include <math.h>
 
 #include <libzutil.h>
 
@@ -120,8 +122,9 @@ zpool_history_unpack(char *buf, uint64_t bytes_read, uint64_t *leftover,
 			break;
 
 		/* unpack record */
-		if (nvlist_unpack(buf + sizeof (reclen), reclen, &nv, 0) != 0)
-			return (ENOMEM);
+		int err = nvlist_unpack(buf + sizeof (reclen), reclen, &nv, 0);
+		if (err != 0)
+			return (err);
 		bytes_read -= sizeof (reclen) + reclen;
 		buf += sizeof (reclen) + reclen;
 
@@ -142,4 +145,34 @@ zpool_history_unpack(char *buf, uint64_t bytes_read, uint64_t *leftover,
 
 	*leftover = bytes_read;
 	return (0);
+}
+
+/*
+ * Floating point sleep().  Allows you to pass in a floating point value for
+ * seconds.
+ */
+void
+fsleep(float sec)
+{
+	struct timespec req;
+	req.tv_sec = floor(sec);
+	req.tv_nsec = (sec - (float)req.tv_sec) * NANOSEC;
+	nanosleep(&req, NULL);
+}
+
+/*
+ * Get environment variable 'env' and return it as an integer.
+ * If 'env' is not set, then return 'default_val' instead.
+ */
+int
+zpool_getenv_int(const char *env, int default_val)
+{
+	char *str;
+	int val;
+	str = getenv(env);
+	if ((str == NULL) || sscanf(str, "%d", &val) != 1 ||
+	    val < 0) {
+		val = default_val;
+	}
+	return (val);
 }

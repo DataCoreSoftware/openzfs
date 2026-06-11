@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -7,7 +8,7 @@
  * with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -20,10 +21,16 @@
  * CDDL HEADER END
  */
 /*
- * Copyright (c) 2008 by Sun Microsystems, Inc.
+ * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
+ * Copyright (c) 2012, 2018 by Delphix. All rights reserved.
+ * Copyright (c) 2012, Joyent, Inc. All rights reserved.
  */
 
 #ifndef	_SYS_SUNDDI_H
 #define	_SYS_SUNDDI_H
+
+extern int ddi_strtoull(const char *str, char **nptr, int base,
+    u_longlong_t *result);
 
 #endif	/* _SYS_SUNDDI_H */

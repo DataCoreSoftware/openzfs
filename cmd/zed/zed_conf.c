@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * This file is part of the ZFS Event Daemon (ZED).
  *
@@ -22,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -47,6 +49,7 @@ zed_conf_init(struct zed_conf *zcp)
 	zcp->zevent_fd = -1;		/* opened in zed_event_init() */
 
 	zcp->max_jobs = 16;
+	zcp->max_zevent_buf_len = 1 << 20;
 
 	if (!(zcp->pid_file = strdup(ZED_PID_FILE)) ||
 	    !(zcp->zedlet_dir = strdup(ZED_ZEDLET_DIR)) ||
@@ -140,6 +143,8 @@ _zed_conf_display_help(const char *prog, boolean_t got_err)
 		    .v = ZED_STATE_FILE },
 		{ .o = "-j JOBS", .d = "Start at most JOBS at once.",
 		    .v = "16" },
+		{ .o = "-b LEN", .d = "Cap kernel event buffer at LEN entries.",
+		    .v = "1048576" },
 		{},
 	};
 
@@ -229,7 +234,7 @@ _zed_conf_parse_path(char **resultp, const char *path)
 void
 zed_conf_parse_opts(struct zed_conf *zcp, int argc, char **argv)
 {
-	const char * const opts = ":hLVd:p:P:s:vfFMZIj:";
+	const char * const opts = ":hLVd:p:P:s:vfFMZIj:b:";
 	int opt;
 	unsigned long raw;
 
@@ -288,6 +293,17 @@ zed_conf_parse_opts(struct zed_conf *zcp, int argc, char **argv)
 				zed_log_die("0 jobs makes no sense");
 			} else {
 				zcp->max_jobs = raw;
+			}
+			break;
+		case 'b':
+			errno = 0;
+			raw = strtoul(optarg, NULL, 0);
+			if (errno == ERANGE || raw > INT32_MAX) {
+				zed_log_die("%lu is too large", raw);
+			} if (raw == 0) {
+				zcp->max_zevent_buf_len = INT32_MAX;
+			} else {
+				zcp->max_zevent_buf_len = raw;
 			}
 			break;
 		case '?':
@@ -371,12 +387,14 @@ zed_conf_scan_dir(struct zed_conf *zcp)
 			    direntp->d_name);
 			continue;
 		}
+#ifndef _WIN32
 		if (!(st.st_mode & S_IXUSR)) {
 			zed_log_msg(LOG_INFO,
 			    "Ignoring \"%s\": not executable by user",
 			    direntp->d_name);
 			continue;
 		}
+#endif
 		if ((st.st_mode & S_IWGRP) && !zcp->do_force) {
 			zed_log_msg(LOG_NOTICE,
 			    "Ignoring \"%s\": writable by group",
@@ -642,7 +660,7 @@ zed_conf_read_state(struct zed_conf *zcp, uint64_t *eidp, int64_t etime[])
 	} else if (n != len) {
 		errno = EIO;
 		zed_log_msg(LOG_WARNING,
-		    "Failed to read state file \"%s\": Read %d of %d bytes",
+		    "Failed to read state file \"%s\": Read %zd of %zd bytes",
 		    zcp->state_file, n, len);
 		return (-1);
 	}
@@ -691,7 +709,7 @@ zed_conf_write_state(struct zed_conf *zcp, uint64_t eid, int64_t etime[])
 	if (n != len) {
 		errno = EIO;
 		zed_log_msg(LOG_WARNING,
-		    "Failed to write state file \"%s\": Wrote %d of %d bytes",
+		    "Failed to write state file \"%s\": Wrote %zd of %zd bytes",
 		    zcp->state_file, n, len);
 		return (-1);
 	}

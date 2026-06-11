@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -6,7 +7,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -84,12 +85,12 @@ typedef struct livelist_condense_entry {
 	boolean_t cancelled;
 } livelist_condense_entry_t;
 
-extern unsigned long zfs_livelist_max_entries;
+extern uint64_t zfs_livelist_max_entries;
 extern int zfs_livelist_min_percent_shared;
 
 typedef int deadlist_iter_t(void *args, dsl_deadlist_entry_t *dle);
 
-void dsl_deadlist_open(dsl_deadlist_t *dl, objset_t *os, uint64_t object);
+int dsl_deadlist_open(dsl_deadlist_t *dl, objset_t *os, uint64_t object);
 void dsl_deadlist_close(dsl_deadlist_t *dl);
 void dsl_deadlist_iterate(dsl_deadlist_t *dl, deadlist_iter_t func, void *arg);
 uint64_t dsl_deadlist_alloc(objset_t *os, dmu_tx_t *tx);

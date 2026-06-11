@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -64,7 +65,7 @@ typedef enum device_type {
 typedef struct guid_search {
 	uint64_t	gs_pool_guid;
 	uint64_t	gs_vdev_guid;
-	char		*gs_devid;
+	const char	*gs_devid;
 	device_type_t	gs_vdev_type;
 	uint64_t	gs_vdev_expandtime;	/* vdev expansion time */
 } guid_search_t;
@@ -77,9 +78,10 @@ static boolean_t
 zfs_agent_iter_vdev(zpool_handle_t *zhp, nvlist_t *nvl, void *arg)
 {
 	guid_search_t *gsp = arg;
-	char *path = NULL;
+	const char *path = NULL;
 	uint_t c, children;
 	nvlist_t **child;
+	uint64_t vdev_guid;
 
 	/*
 	 * First iterate over any children.
@@ -100,7 +102,7 @@ zfs_agent_iter_vdev(zpool_handle_t *zhp, nvlist_t *nvl, void *arg)
 	    &child, &children) == 0) {
 		for (c = 0; c < children; c++) {
 			if (zfs_agent_iter_vdev(zhp, child[c], gsp)) {
-				gsp->gs_vdev_type = DEVICE_TYPE_L2ARC;
+				gsp->gs_vdev_type = DEVICE_TYPE_SPARE;
 				return (B_TRUE);
 			}
 		}
@@ -109,7 +111,7 @@ zfs_agent_iter_vdev(zpool_handle_t *zhp, nvlist_t *nvl, void *arg)
 	    &child, &children) == 0) {
 		for (c = 0; c < children; c++) {
 			if (zfs_agent_iter_vdev(zhp, child[c], gsp)) {
-				gsp->gs_vdev_type = DEVICE_TYPE_SPARE;
+				gsp->gs_vdev_type = DEVICE_TYPE_L2ARC;
 				return (B_TRUE);
 			}
 		}
@@ -122,6 +124,23 @@ zfs_agent_iter_vdev(zpool_handle_t *zhp, nvlist_t *nvl, void *arg)
 	    (strcmp(gsp->gs_devid, path) == 0)) {
 		(void) nvlist_lookup_uint64(nvl, ZPOOL_CONFIG_GUID,
 		    &gsp->gs_vdev_guid);
+		(void) nvlist_lookup_uint64(nvl, ZPOOL_CONFIG_EXPANSION_TIME,
+		    &gsp->gs_vdev_expandtime);
+		return (B_TRUE);
+	}
+	/*
+	 * Otherwise, on a vdev guid match, grab the devid and expansion
+	 * time. The devid might be missing on removal since its not part
+	 * of blkid cache and L2ARC VDEV does not contain pool guid in its
+	 * blkid, so this is a special case for L2ARC VDEV.
+	 */
+	else if (gsp->gs_vdev_guid != 0 &&
+	    nvlist_lookup_uint64(nvl, ZPOOL_CONFIG_GUID, &vdev_guid) == 0 &&
+	    gsp->gs_vdev_guid == vdev_guid) {
+		if (gsp->gs_devid == NULL) {
+			(void) nvlist_lookup_string(nvl, ZPOOL_CONFIG_DEVID,
+			    &gsp->gs_devid);
+		}
 		(void) nvlist_lookup_uint64(nvl, ZPOOL_CONFIG_EXPANSION_TIME,
 		    &gsp->gs_vdev_expandtime);
 		return (B_TRUE);
@@ -139,22 +158,28 @@ zfs_agent_iter_pool(zpool_handle_t *zhp, void *arg)
 	/*
 	 * For each vdev in this pool, look for a match by devid
 	 */
-	if ((config = zpool_get_config(zhp, NULL)) != NULL) {
-		if (nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE,
-		    &nvl) == 0) {
-			(void) zfs_agent_iter_vdev(zhp, nvl, gsp);
-		}
-	}
-	/*
-	 * if a match was found then grab the pool guid
-	 */
-	if (gsp->gs_vdev_guid) {
-		(void) nvlist_lookup_uint64(config, ZPOOL_CONFIG_POOL_GUID,
-		    &gsp->gs_pool_guid);
-	}
+	boolean_t found = B_FALSE;
+	uint64_t pool_guid;
 
+	/* Get pool configuration and extract pool GUID */
+	if ((config = zpool_get_config(zhp, NULL)) == NULL ||
+	    nvlist_lookup_uint64(config, ZPOOL_CONFIG_POOL_GUID,
+	    &pool_guid) != 0)
+		goto out;
+
+	/* Skip this pool if we're looking for a specific pool */
+	if (gsp->gs_pool_guid != 0 && pool_guid != gsp->gs_pool_guid)
+		goto out;
+
+	if (nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE, &nvl) == 0)
+		found = zfs_agent_iter_vdev(zhp, nvl, gsp);
+
+	if (found && gsp->gs_pool_guid == 0)
+		gsp->gs_pool_guid = pool_guid;
+
+out:
 	zpool_close(zhp);
-	return (gsp->gs_vdev_guid != 0);
+	return (found);
 }
 
 void
@@ -195,11 +220,13 @@ zfs_agent_post_event(const char *class, const char *subclass, nvlist_t *nvl)
 		uint64_t pool_guid = 0, vdev_guid = 0;
 		guid_search_t search = { 0 };
 		device_type_t devtype = DEVICE_TYPE_PRIMARY;
+		const char *devid = NULL;
 
 		class = "resource.fs.zfs.removed";
 		subclass = "";
 
 		(void) nvlist_add_string(payload, FM_CLASS, class);
+		(void) nvlist_lookup_string(nvl, DEV_IDENTIFIER, &devid);
 		(void) nvlist_lookup_uint64(nvl, ZFS_EV_POOL_GUID, &pool_guid);
 		(void) nvlist_lookup_uint64(nvl, ZFS_EV_VDEV_GUID, &vdev_guid);
 
@@ -209,21 +236,22 @@ zfs_agent_post_event(const char *class, const char *subclass, nvlist_t *nvl)
 		(void) nvlist_add_int64_array(payload, FM_EREPORT_TIME, tod, 2);
 
 		/*
+		 * If devid is missing but vdev_guid is available, find devid
+		 * and pool_guid from vdev_guid.
 		 * For multipath, spare and l2arc devices ZFS_EV_VDEV_GUID or
 		 * ZFS_EV_POOL_GUID may be missing so find them.
 		 */
-		if (pool_guid == 0 || vdev_guid == 0) {
-			if ((nvlist_lookup_string(nvl, DEV_IDENTIFIER,
-			    &search.gs_devid) == 0) &&
-			    (zpool_iter(g_zfs_hdl, zfs_agent_iter_pool, &search)
-			    == 1)) {
-				if (pool_guid == 0)
-					pool_guid = search.gs_pool_guid;
-				if (vdev_guid == 0)
-					vdev_guid = search.gs_vdev_guid;
-				devtype = search.gs_vdev_type;
-			}
-		}
+		search.gs_devid = devid;
+		search.gs_vdev_guid = vdev_guid;
+		search.gs_pool_guid = pool_guid;
+		zpool_iter(g_zfs_hdl, zfs_agent_iter_pool, &search);
+		if (devid == NULL)
+			devid = search.gs_devid;
+		if (pool_guid == 0)
+			pool_guid = search.gs_pool_guid;
+		if (vdev_guid == 0)
+			vdev_guid = search.gs_vdev_guid;
+		devtype = search.gs_vdev_type;
 
 		/*
 		 * We want to avoid reporting "remove" events coming from
@@ -235,7 +263,9 @@ zfs_agent_post_event(const char *class, const char *subclass, nvlist_t *nvl)
 		    search.gs_vdev_expandtime + 10 > tv.tv_sec) {
 			zed_log_msg(LOG_INFO, "agent post event: ignoring '%s' "
 			    "for recently expanded device '%s'", EC_DEV_REMOVE,
-			    search.gs_devid);
+			    devid);
+			fnvlist_free(payload);
+			free(event);
 			goto out;
 		}
 
@@ -327,6 +357,8 @@ zfs_agent_dispatch(const char *class, const char *subclass, nvlist_t *nvl)
 static void *
 zfs_agent_consumer_thread(void *arg)
 {
+	(void) arg;
+
 	for (;;) {
 		agent_event_t *event;
 
@@ -343,9 +375,7 @@ zfs_agent_consumer_thread(void *arg)
 			return (NULL);
 		}
 
-		if ((event = (list_head(&agent_events))) != NULL) {
-			list_remove(&agent_events, event);
-
+		if ((event = list_remove_head(&agent_events)) != NULL) {
 			(void) pthread_mutex_unlock(&agent_lock);
 
 			/* dispatch to all event subscribers */
@@ -408,8 +438,7 @@ zfs_agent_fini(void)
 	(void) pthread_join(g_agents_tid, NULL);
 
 	/* drain any pending events */
-	while ((event = (list_head(&agent_events))) != NULL) {
-		list_remove(&agent_events, event);
+	while ((event = list_remove_head(&agent_events)) != NULL) {
 		nvlist_free(event->ae_nvl);
 		free(event);
 	}

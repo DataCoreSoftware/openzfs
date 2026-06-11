@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -59,7 +60,7 @@ log_onexit cleanup
 
 log_assert "Check changing project ID with directory-based extended attributes"
 
-log_must zfs set xattr=on $QFS
+log_must zfs set xattr=dir $QFS
 
 log_must touch $PRJGUARD
 log_must chattr -p $PRJID1 $PRJGUARD
@@ -76,6 +77,6 @@ sync_pool
 typeset prj_aft=$(project_obj_count $QFS $PRJID1)
 
 [[ $prj_aft -ge $((prj_bef + 5)) ]] ||
-	log_fail "new value ($prj_aft) is NOT 5 largr than old one ($prj_bef)"
+	log_fail "new value ($prj_aft) is NOT 5 larger than old one ($prj_bef)"
 
 log_pass "Changing project ID with directory-based extended attributes pass"

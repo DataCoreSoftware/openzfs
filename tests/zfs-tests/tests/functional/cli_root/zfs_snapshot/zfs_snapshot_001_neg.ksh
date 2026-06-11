@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # CDDL HEADER START
 #
@@ -7,7 +8,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -89,7 +90,7 @@ function cleanup_all
 
 	while (( i < ${#args[*]} )); do
 		for snap in ${args[i]}; do
-			snapexists $snap && log_must zfs destroy -f $snap
+			snapexists $snap && destroy_dataset $snap -f
 		done
 		(( i = i + 1 ))
 	done

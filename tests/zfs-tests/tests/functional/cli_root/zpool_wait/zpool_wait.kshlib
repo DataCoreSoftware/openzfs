@@ -1,4 +1,5 @@
 #!/bin/ksh
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -120,5 +121,5 @@ function check_while_waiting
 # Whether any vdev in the given pool is initializing
 function is_vdev_initializing # pool
 {
-	zpool status -i "$1" | grep 'initialized, started' >/dev/null
+	zpool status -i "$1" | grep -q 'initialized, started'
 }

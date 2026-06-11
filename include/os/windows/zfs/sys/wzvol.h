@@ -70,7 +70,7 @@
 #define	DEFAULT_NbrVirtDisks		1
 #define	DEFAULT_NbrLUNsperHBA		400
 #define	DEFAULT_NbrLUNsperTarget	32
-#define	DEFAULT_bCombineVirtDisks	FALSE
+#define	DEFAULT_bCombineVirtDisks	0
 
 #define	GET_FLAG(Flags, Bit)		((Flags) & (Bit))
 #define	SET_FLAG(Flags, Bit)		((Flags) |= (Bit))
@@ -100,7 +100,7 @@ typedef struct _MP_REG_INFO {
 	// really is the amount of zvols we can present through StorPort
 
 	ULONG		NbrLUNsperTarget;  // Number of LUNs per Target.
-	ULONG		bCombineVirtDisks; // 0 => do not combine virtual/MPIO
+	ULONG		bCombineVirtDisks; // MPIO: combine LUNs across adapters
 } WZVOL_REG_INFO, *pWZVOL_REG_INFO;
 
 typedef struct _wzvolContext {
@@ -176,6 +176,7 @@ typedef struct _HW_HBA_EXT {
 
 	BOOLEAN		bDontReport;	// TRUE => no Report LUNs.
 	BOOLEAN		bReportAdapterDone;
+	BOOLEAN		bInitialised;
 	// To be set only by a kernel debugger.
 	LUNInfo		LUNInfoArray[LUNInfoMax];
 } HW_HBA_EXT, *pHW_HBA_EXT;
@@ -183,12 +184,12 @@ typedef struct _HW_HBA_EXT {
 // Collector for LUNs that are represented by MPIO as 1 pseudo-LUN.
 typedef struct _HW_LU_EXTENSION_MPIO {
 	LIST_ENTRY	List;		// Ptrs next&prev HW_LU_EXTENSION_MPIO
-	LIST_ENTRY	LUExtList;	// Header of list of HW_LU_EXTENSION.
-	KSPIN_LOCK	LUExtMPIOLock;
 	ULONG		NbrRealLUNs;
 	SCSI_ADDRESS	ScsiAddr;
 	PUCHAR		pDiskBuf;
 	USHORT		MaxBlocks;
+	KSPIN_LOCK	LUExtMPIOLock;	// Lock for LUExtList
+	LIST_ENTRY	LUExtList;	// List of real LUNs for this MPIO LUN
 	// At present, this is set only by a kernel debugger, for testing.
 	BOOLEAN		bIsMissingOnAnyPath;
 } HW_LU_EXTENSION_MPIO, *pHW_LU_EXTENSION_MPIO;

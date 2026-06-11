@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -11,13 +12,14 @@
 
 #
 # Copyright (c) 2012, 2016, Delphix. All rights reserved.
+# Copyright (c) 2022 Hewlett Packard Enterprise Development LP.
 #
 
 . $STF_SUITE/include/libtest.shlib
 
 typeset -a compress_prop_vals=('off' 'lzjb' 'lz4' 'gzip' 'zle' 'zstd')
 typeset -a checksum_prop_vals=('on' 'off' 'fletcher2' 'fletcher4' 'sha256'
-    'noparity' 'sha512' 'skein')
+    'noparity' 'sha512' 'skein' 'blake3')
 if ! is_freebsd; then
 	checksum_prop_vals+=('edonr')
 fi
@@ -27,9 +29,9 @@ typeset -a canmount_prop_vals=('on' 'off' 'noauto')
 typeset -a copies_prop_vals=('1' '2' '3')
 typeset -a logbias_prop_vals=('latency' 'throughput')
 typeset -a primarycache_prop_vals=('all' 'none' 'metadata')
-typeset -a redundant_metadata_prop_vals=('all' 'most')
+typeset -a redundant_metadata_prop_vals=('all' 'most' 'some' 'none')
 typeset -a secondarycache_prop_vals=('all' 'none' 'metadata')
-typeset -a snapdir_prop_vals=('hidden' 'visible')
+typeset -a snapdir_prop_vals=('disabled' 'hidden' 'visible')
 typeset -a sync_prop_vals=('standard' 'always' 'disabled')
 
 typeset -a fs_props=('compress' 'checksum' 'recsize'
@@ -69,26 +71,6 @@ function get_rand_prop_vals
 	echo $retstr
 }
 
-function get_rand_checksum
-{
-	get_rand_prop_vals checksum $1 2
-}
-
-function get_rand_checksum_any
-{
-	get_rand_prop_vals checksum $1 0
-}
-
-function get_rand_recsize
-{
-	get_rand_prop_vals recsize $1 0
-}
-
-function get_rand_large_recsize
-{
-	get_rand_prop_vals recsize $1 9
-}
-
 #
 # Functions to toggle on/off properties
 #
@@ -100,12 +82,8 @@ else
 	binary_props+=('zoned')
 fi
 
-if is_linux; then
-	# Only older kernels support non-blocking mandatory locks
-	if [[ $(linux_version) -lt $(linux_version "4.4") ]]; then
-		binary_props+=('nbmand')
-	fi
-else
+# Newer Linuxes dropped non-blocking mandatory locks
+if ! is_linux || [ $(linux_version) -lt $(linux_version "4.4") ]; then
 	binary_props+=('nbmand')
 fi
 
@@ -114,7 +92,6 @@ function toggle_prop
 	typeset ds=$1
 	typeset prop=$2
 
-	datasetexists $ds || log_fail "$ds does not exist"
 	typeset val=$(get_prop $prop $ds)
 	typeset newval='off'
 
@@ -137,7 +114,6 @@ function randomize_ds_props
 	typeset ds=$1
 	typeset prop proplist val
 
-	datasetexists $ds || log_fail "$ds does not exist"
 	if ds_is_volume $ds; then
 		toggle_prop $ds readonly
 		proplist="${vol_props[@]}"

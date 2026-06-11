@@ -1,4 +1,5 @@
 #!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
 #
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
@@ -32,9 +33,7 @@ set -A args "1.0" \
 
 typeset -i i=0
 while (( i < ${#args[*]} )); do
-	log_mustnot_checkerror_program "malformed number" $TESTPOOL - <<-EOF
-		return ${args[i]}
-	EOF
+	log_mustnot_checkerror_program "malformed number" $TESTPOOL - <<<"return ${args[i]}"
 	((i = i + 1))
 done
 
