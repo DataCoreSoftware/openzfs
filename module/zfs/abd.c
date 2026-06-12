@@ -1016,6 +1016,27 @@ abd_cmp(abd_t *dabd, abd_t *sabd)
 	    abd_cmp_cb, NULL));
 }
 
+static int
+abd_cmp_zero_cb(void *buf, size_t size, void *private)
+{
+	(void) private;
+	const uint64_t *p = buf;
+	const uint64_t *end = (uint64_t *)((char *)buf + size);
+	for (; p < end; p++)
+		if (*p != 0)
+			return (1);
+	return (0);
+}
+
+/*
+ * Return 0 if the first 'size' bytes of abd are all zero, non-zero otherwise.
+ */
+int
+abd_cmp_zero(abd_t *abd, size_t size)
+{
+	return (abd_iterate_func(abd, 0, size, abd_cmp_zero_cb, NULL));
+}
+
 /*
  * Iterate over code ABDs and a data ABD and call @func_raidz_gen.
  *

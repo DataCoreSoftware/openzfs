@@ -1219,6 +1219,28 @@ spa_taskq_dispatch_ent(spa_t *spa, zio_type_t t, zio_taskq_type_t q,
 }
 
 /*
+ * Windows compat: newer OpenZFS uses spa_taskq_dispatch(6 args) instead of
+ * spa_taskq_dispatch_ent(7 args). Map to the old version using io_tqent.
+ */
+void
+spa_taskq_dispatch(spa_t *spa, zio_type_t t, zio_taskq_type_t q,
+    task_func_t *func, void *arg, boolean_t cutinline)
+{
+	(void) cutinline;
+	zio_t *zio = (zio_t *)arg;
+	spa_taskq_dispatch_ent(spa, t, q, func, arg, 0, &zio->io_tqent);
+}
+
+/*
+ * Windows compat: no multi-allocator in this branch; just assign allocator 0.
+ */
+void
+spa_select_allocator(zio_t *zio)
+{
+	zio->io_allocator = 0;
+}
+
+/*
  * Same as spa_taskq_dispatch_ent() but block on the task until completion.
  */
 void

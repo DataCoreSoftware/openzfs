@@ -490,15 +490,6 @@ ddt_object_prefetch(ddt_t *ddt, ddt_type_t type, ddt_class_t class,
 	    ddt->ddt_object[type][class], ddk);
 }
 
-static void
-ddt_object_prefetch_all(ddt_t *ddt, ddt_type_t type, ddt_class_t class)
-{
-	if (!ddt_object_exists(ddt, type, class))
-		return;
-
-	ddt_ops[type]->ddt_op_prefetch_all(ddt->ddt_os,
-	    ddt->ddt_object[type][class]);
-}
 
 static int
 ddt_object_update(ddt_t *ddt, ddt_type_t type, ddt_class_t class,
@@ -853,6 +844,13 @@ ddt_fini(void)
 	kmem_cache_destroy(ddt_cache);
 }
 
+/* Stub: prefetch PR (#15890) excluded from this backport */
+void
+ddt_prefetch_all(spa_t *spa)
+{
+	(void) spa;
+}
+
 static ddt_entry_t *
 ddt_alloc(const ddt_t *ddt, const ddt_key_t *ddk)
 {
@@ -917,27 +915,6 @@ ddt_remove(ddt_t *ddt, ddt_entry_t *dde)
 }
 
 
-void
-ddt_prefetch_all(spa_t *spa)
-{
-	/*
-	 * Load all DDT entries for each type/class combination. This is
-	 * indended to perform a prefetch on all such blocks. For the same
-	 * reason that ddt_prefetch isn't locked, this is also not locked.
-	 */
-	for (enum zio_checksum c = 0; c < ZIO_CHECKSUM_FUNCTIONS; c++) {
-		ddt_t *ddt = spa->spa_ddt[c];
-		if (!ddt)
-			continue;
-
-		for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
-			for (ddt_class_t class = 0; class < DDT_CLASSES;
-			    class++) {
-				ddt_object_prefetch_all(ddt, type, class);
-			}
-		}
-	}
-}
 
 static int ddt_configure(ddt_t *ddt, boolean_t new);
 
@@ -1439,7 +1416,6 @@ ddt_load(spa_t *spa)
 	}
 
 	spa->spa_dedup_dspace = ~0ULL;
-	spa->spa_dedup_dsize = ~0ULL;
 
 	return (0);
 }
@@ -1654,7 +1630,6 @@ ddt_sync_update_stats(ddt_t *ddt, dmu_tx_t *tx)
 	memcpy(&ddt->ddt_histogram_cache, ddt->ddt_histogram,
 	    sizeof (ddt->ddt_histogram));
 	ddt->ddt_spa->spa_dedup_dspace = ~0ULL;
-	ddt->ddt_spa->spa_dedup_dsize = ~0ULL;
 }
 
 static void
@@ -2037,7 +2012,6 @@ ddt_sync_table_log(ddt_t *ddt, dmu_tx_t *tx)
 		memcpy(&ddt->ddt_histogram_cache, ddt->ddt_histogram,
 		    sizeof (ddt->ddt_histogram));
 		ddt->ddt_spa->spa_dedup_dspace = ~0ULL;
-		ddt->ddt_spa->spa_dedup_dsize = ~0ULL;
 	}
 
 	if (spa_sync_pass(ddt->ddt_spa) == 1) {
@@ -2078,7 +2052,6 @@ ddt_sync_table_flush(ddt_t *ddt, dmu_tx_t *tx)
 	memcpy(&ddt->ddt_histogram_cache, ddt->ddt_histogram,
 	    sizeof (ddt->ddt_histogram));
 	ddt->ddt_spa->spa_dedup_dspace = ~0ULL;
-	ddt->ddt_spa->spa_dedup_dsize = ~0ULL;
 	ddt_sync_update_stats(ddt, tx);
 }
 

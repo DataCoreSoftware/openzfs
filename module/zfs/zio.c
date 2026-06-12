@@ -52,6 +52,17 @@
 #include <sys/abd.h>
 #include <sys/dsl_crypt.h>
 #include <cityhash.h>
+#include <sys/cmn_err.h>
+
+/* Windows compat: newer OpenZFS uses PANIC() variadic macro */
+#ifndef PANIC
+#define	PANIC(...) cmn_err(CE_PANIC, __VA_ARGS__)
+#endif
+
+/* Windows compat: no multi-allocator in this branch */
+#ifndef ZIO_HAS_ALLOCATOR
+#define	ZIO_HAS_ALLOCATOR(zio) (1)
+#endif
 
 /*
  * ==========================================================================
@@ -194,10 +205,7 @@ zio_init(void)
 		cflags = (zio_exclude_metadata || size > zio_buf_debug_limit) ?
 		    KMC_NODEBUG : 0;
 		data_cflags = KMC_NODEBUG;
-		if (abd_size_alloc_linear(size)) {
-			cflags |= KMC_RECLAIMABLE;
-			data_cflags |= KMC_RECLAIMABLE;
-		}
+		(void) abd_size_alloc_linear(size);
 		if (cflags == data_cflags) {
 			/*
 			 * Resulting kmem caches would be identical.
@@ -958,7 +966,7 @@ zio_create(zio_t *pio, spa_t *spa, uint64_t txg, const blkptr_t *bp,
 	zio->io_orig_stage = zio->io_stage = stage;
 	zio->io_orig_pipeline = zio->io_pipeline = pipeline;
 	zio->io_pipeline_trace = ZIO_STAGE_OPEN;
-	zio->io_allocator = ZIO_ALLOCATOR_NONE;
+	zio->io_allocator = 0;
 
 	zio->io_state[ZIO_WAIT_READY] = (stage >= ZIO_STAGE_READY) ||
 	    (pipeline & ZIO_STAGE_READY) == 0;
@@ -1022,7 +1030,7 @@ zio_root(spa_t *spa, zio_done_func_t *done, void *private, zio_flag_t flags)
 
 	zio = zio_create(NULL, spa, 0, NULL, NULL, 0, 0, done, private,
 	    ZIO_TYPE_NULL, ZIO_PRIORITY_NOW, flags, NULL, 0, NULL,
-	    ZIO_STAGE_OPEN, ZIO_ROOT_PIPELINE);
+	    ZIO_STAGE_OPEN, ZIO_INTERLOCK_PIPELINE);
 
 	return (zio);
 }
@@ -1643,8 +1651,8 @@ zio_flush(zio_t *pio, vdev_t *vd)
 
 	if (vd->vdev_children == 0) {
 		zio_nowait(zio_create(pio, vd->vdev_spa, 0, NULL, NULL, 0, 0,
-		    NULL, NULL, ZIO_TYPE_FLUSH, ZIO_PRIORITY_NOW, flags, vd, 0,
-		    NULL, ZIO_STAGE_OPEN, ZIO_FLUSH_PIPELINE));
+		    NULL, NULL, ZIO_TYPE_IOCTL, ZIO_PRIORITY_NOW, flags, vd, 0,
+		    NULL, ZIO_STAGE_OPEN, ZIO_IOCTL_PIPELINE));
 	} else {
 		for (uint64_t c = 0; c < vd->vdev_children; c++)
 			zio_flush(pio, vd->vdev_child[c]);
@@ -1680,7 +1688,7 @@ static uint64_t
 zio_roundup_alloc_size(spa_t *spa, uint64_t size)
 {
 	if (size > spa->spa_min_alloc)
-		return (roundup(size, spa->spa_gcd_alloc));
+		return (roundup(size, spa->spa_min_alloc));
 	return (spa->spa_min_alloc);
 }
 
@@ -3996,26 +4004,6 @@ zio_dva_allocate(zio_t *zio)
 	 */
 	if (error == ENOSPC && mc != spa_normal_class(spa)) {
 		/*
-		 * When the dedup or special class is spilling into the  normal
-		 * class, there can still be significant space available due
-		 * to deferred frees that are in-flight.  We track the txg when
-		 * this occurred and back off adding new DDT entries for a few
-		 * txgs to allow the free blocks to be processed.
-		 */
-		if ((mc == spa_dedup_class(spa) || (spa_special_has_ddt(spa) &&
-		    mc == spa_special_class(spa))) &&
-		    spa->spa_dedup_class_full_txg != zio->io_txg) {
-			spa->spa_dedup_class_full_txg = zio->io_txg;
-			zfs_dbgmsg("%s[%d]: %s class spilling, req size %d, "
-			    "%llu allocated of %llu",
-			    spa_name(spa), (int)zio->io_txg,
-			    mc == spa_dedup_class(spa) ? "dedup" : "special",
-			    (int)zio->io_size,
-			    (u_longlong_t)metaslab_class_get_alloc(mc),
-			    (u_longlong_t)metaslab_class_get_space(mc));
-		}
-
-		/*
 		 * If throttling, transfer reservation over to normal class.
 		 * The io_allocator slot can remain the same even though we
 		 * are switching classes.
@@ -4381,7 +4369,7 @@ zio_vdev_io_done(zio_t *zio)
 
 	ASSERT(zio->io_type == ZIO_TYPE_READ ||
 	    zio->io_type == ZIO_TYPE_WRITE ||
-	    zio->io_type == ZIO_TYPE_FLUSH ||
+	    zio->io_type == ZIO_TYPE_IOCTL ||
 	    zio->io_type == ZIO_TYPE_TRIM);
 
 	if (zio->io_delay)
@@ -4389,7 +4377,7 @@ zio_vdev_io_done(zio_t *zio)
 
 	if (vd != NULL && vd->vdev_ops->vdev_op_leaf &&
 	    vd->vdev_ops != &vdev_draid_spare_ops) {
-		if (zio->io_type != ZIO_TYPE_FLUSH)
+		if (zio->io_type != ZIO_TYPE_IOCTL)
 			vdev_queue_io_done(zio);
 
 		if (zio_injection_enabled && zio->io_error == 0)
@@ -4399,7 +4387,7 @@ zio_vdev_io_done(zio_t *zio)
 		if (zio_injection_enabled && zio->io_error == 0)
 			zio->io_error = zio_handle_label_injection(zio, EIO);
 
-		if (zio->io_error && zio->io_type != ZIO_TYPE_FLUSH &&
+		if (zio->io_error && zio->io_type != ZIO_TYPE_IOCTL &&
 		    zio->io_type != ZIO_TYPE_TRIM) {
 			if (!vdev_accessible(vd, zio)) {
 				zio->io_error = SET_ERROR(ENXIO);
@@ -4535,7 +4523,7 @@ zio_vdev_io_assess(zio_t *zio)
 	 * boolean flag so that we don't bother with it in the future.
 	 */
 	if ((zio->io_error == ENOTSUP || zio->io_error == ENOTTY) &&
-	    zio->io_type == ZIO_TYPE_FLUSH && vd != NULL)
+	    zio->io_type == ZIO_TYPE_IOCTL && vd != NULL)
 		vd->vdev_nowritecache = B_TRUE;
 
 	if (zio->io_error)

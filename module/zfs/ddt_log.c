@@ -276,7 +276,7 @@ ddt_log_entry(ddt_t *ddt, ddt_lightweight_entry_t *ddlwe, ddt_log_update_t *dlu)
 	 */
 	if (db->db_size < (dlu->dlu_offset + dlu->dlu_reclen)) {
 		ASSERT3U(dlu->dlu_offset, >, 0);
-		dmu_buf_fill_done(db, dlu->dlu_tx, B_FALSE);
+		dmu_buf_fill_done(db, dlu->dlu_tx);
 		dlu->dlu_block++;
 		dlu->dlu_offset = 0;
 		ASSERT3U(dlu->dlu_block, <, dlu->dlu_ndbp);
@@ -288,7 +288,7 @@ ddt_log_entry(ddt_t *ddt, ddt_lightweight_entry_t *ddlwe, ddt_log_update_t *dlu)
 	 * we will fill it, and zero it out.
 	 */
 	if (dlu->dlu_offset == 0) {
-		dmu_buf_will_fill(db, dlu->dlu_tx, B_FALSE);
+		dmu_buf_will_fill(db, dlu->dlu_tx);
 		memset(db->db_data, 0, db->db_size);
 	}
 
@@ -319,7 +319,7 @@ ddt_log_commit(ddt_t *ddt, ddt_log_update_t *dlu)
 	 * Close out the last block. Whatever we haven't used will be zeroed,
 	 * which matches DLR_INVALID, so we can detect this during load.
 	 */
-	dmu_buf_fill_done(dlu->dlu_dbp[dlu->dlu_block], dlu->dlu_tx, B_FALSE);
+	dmu_buf_fill_done(dlu->dlu_dbp[dlu->dlu_block], dlu->dlu_tx);
 
 	dmu_buf_rele_array(dlu->dlu_dbp, dlu->dlu_ndbp, FTAG);
 
@@ -570,9 +570,6 @@ ddt_log_load_one(ddt_t *ddt, uint_t n)
 	}
 
 	if (hdr.dlh_length > 0) {
-		dmu_prefetch_by_dnode(dn, 0, 0, hdr.dlh_length,
-		    ZIO_PRIORITY_SYNC_READ);
-
 		for (uint64_t offset = 0; offset < hdr.dlh_length;
 		    offset += dn->dn_datablksz) {
 			err = dmu_buf_hold_by_dnode(dn, offset, FTAG, &db,

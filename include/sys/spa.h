@@ -484,6 +484,12 @@ typedef struct blkptr {
 	(BP_IS_EMBEDDED(bp) ? 0 : \
 	(bp)->blk_phys_birth ? (bp)->blk_phys_birth : (bp)->blk_birth)
 
+/* Aliases used by newer OpenZFS code */
+#define	BP_GET_PHYSICAL_BIRTH(bp)	BP_PHYSICAL_BIRTH(bp)
+#define	BP_GET_LOGICAL_BIRTH(bp)	((bp)->blk_birth)
+#define	BP_GET_BIRTH(bp)		BP_PHYSICAL_BIRTH(bp)
+#define	BP_SET_LOGICAL_BIRTH(bp, x)	((bp)->blk_birth = (x))
+
 #define	BP_SET_BIRTH(bp, logical, physical)	\
 {						\
 	ASSERT(!BP_IS_EMBEDDED(bp));		\

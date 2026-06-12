@@ -455,6 +455,9 @@ extern const char *zfs_deadman_failmode;
 extern uint_t spa_slop_shift;
 extern void spa_taskq_dispatch_ent(spa_t *spa, zio_type_t t, zio_taskq_type_t q,
     task_func_t *func, void *arg, uint_t flags, taskq_ent_t *ent);
+extern void spa_taskq_dispatch(spa_t *spa, zio_type_t t, zio_taskq_type_t q,
+    task_func_t *func, void *arg, boolean_t cutinline);
+extern void spa_select_allocator(zio_t *zio);
 extern void spa_taskq_dispatch_sync(spa_t *, zio_type_t t, zio_taskq_type_t q,
     task_func_t *func, void *arg, uint_t flags);
 extern void spa_load_spares(spa_t *spa);

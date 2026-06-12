@@ -86,16 +86,67 @@
 #include <sys/brt_impl.h>
 #include <zfs_comutil.h>
 #include <sys/zstd/zstd.h>
+#ifdef HAVE_LIBSPL_BACKTRACE
 #include <sys/backtrace.h>
+#endif
 
 #include <libnvpair.h>
 #include <libzutil.h>
 #include <libzfs_core.h>
 
-#include <libzdb.h>
 
 #include "zdb.h"
 
+/* Windows compat: symbols that were in the dropped libzdb.h */
+#define	ZDB_CHECKSUM_NAME(x) \
+	zio_checksum_table[(x) < ZIO_CHECKSUM_FUNCTIONS ? (x) : 0].ci_name
+#define	ZDB_COMPRESS_NAME(x) \
+	zio_compress_table[(x) < ZIO_COMPRESS_FUNCTIONS ? (x) : 0].ci_name
+#define	ZDB_OT_TYPE(idx) \
+	((idx) < DMU_OT_NUMTYPES ? (idx) : DMU_OT_NUMTYPES)
+#define	ZDB_MAP_OBJECT_ID(x)	(x)
+
+/* RAIDZ reflow scrub state — not present in this branch */
+#define	RRSS_GET_STATE(ub)	(0)
+#define	RRSS_GET_OFFSET(ub)	(0ULL)
+
+static const char *
+zdb_ot_name(dmu_object_type_t type)
+{
+	return (type < DMU_OT_NUMTYPES ? dmu_ot[type].ot_name : "unknown");
+}
+
+/* livelist_compare is static in dsl_deadlist.c — inline equivalent */
+static int
+livelist_compare(const void *larg, const void *rarg)
+{
+	const blkptr_t *l = larg, *r = rarg;
+	const dva_t *ldva = &l->blk_dva[0];
+	const dva_t *rdva = &r->blk_dva[0];
+	uint64_t loff = DVA_GET_OFFSET(ldva);
+	uint64_t roff = DVA_GET_OFFSET(rdva);
+	if (DVA_GET_VDEV(ldva) != DVA_GET_VDEV(rdva))
+		return (DVA_GET_VDEV(ldva) < DVA_GET_VDEV(rdva) ? -1 : 1);
+	if (loff != roff)
+		return (loff < roff ? -1 : 1);
+	return (0);
+}
+
+/* brt_entry_get_refcount — not in this branch, return 0 */
+static uint64_t
+brt_entry_get_refcount(spa_t *spa, const blkptr_t *bp)
+{
+	(void) spa; (void) bp;
+	return (0);
+}
+
+/* lzc_get_props — not in this branch's libzfs_core */
+static int
+lzc_get_props(const char *fsname, nvlist_t **nvp)
+{
+	(void) fsname; (void) nvp;
+	return (ENOTSUP);
+}
 
 extern int reference_tracking_enable;
 extern int zfs_recover;
@@ -113,6 +164,22 @@ typedef void object_viewer_t(objset_t *, uint64_t, void *data, size_t size);
 static uint64_t *zopt_metaslab = NULL;
 static unsigned zopt_metaslab_args = 0;
 
+
+typedef struct zopt_object_range {
+	uint64_t zor_obj_start;
+	uint64_t zor_obj_end;
+	uint64_t zor_flags;
+} zopt_object_range_t;
+
+#define	ZOR_FLAG_PLAIN_FILE	0x0001
+#define	ZOR_FLAG_DIRECTORY	0x0002
+#define	ZOR_FLAG_SPACE_MAP	0x0004
+#define	ZOR_FLAG_ZAP		0x0008
+#define	ZOR_FLAG_ALL_TYPES	-1
+#define	ZOR_SUPPORTED_FLAGS	(ZOR_FLAG_PLAIN_FILE | \
+				ZOR_FLAG_DIRECTORY   | \
+				ZOR_FLAG_SPACE_MAP   | \
+				ZOR_FLAG_ZAP)
 
 static zopt_object_range_t *zopt_object_ranges = NULL;
 static unsigned zopt_object_args = 0;
@@ -138,6 +205,25 @@ static int dump_bpobj_cb(void *arg, const blkptr_t *bp, boolean_t free,
 
 static void zdb_print_blkptr(const blkptr_t *bp, int flags);
 static void zdb_exit(int reason);
+
+typedef struct sublivelist_verify {
+	/* FREE's that haven't yet matched to an ALLOC, in one sub-livelist */
+	zfs_btree_t sv_pair;
+
+	/* ALLOC's without a matching FREE, accumulates across sub-livelists */
+	zfs_btree_t sv_leftover;
+} sublivelist_verify_t;
+
+typedef struct sublivelist_verify_block {
+	dva_t svb_dva;
+
+	/*
+	 * We need this to check if the block marked as allocated
+	 * in the livelist was freed (and potentially reallocated)
+	 * in the metaslab spacemaps at a later TXG.
+	 */
+	uint64_t svb_allocated_txg;
+} sublivelist_verify_block_t;
 
 typedef struct sublivelist_verify_block_refcnt {
 	/* block pointer entry in livelist being verified */
@@ -840,14 +926,16 @@ dump_debug_buffer(void)
 	 * is safe to call from a signal handler.
 	 */
 	ret = write(STDERR_FILENO, "\n", 1);
-	zfs_dbgmsg_print(STDERR_FILENO, "zdb");
+	zfs_dbgmsg_print("zdb");
 }
 
 static void sig_handler(int signo)
 {
 	struct sigaction action;
 
+#ifdef HAVE_LIBSPL_BACKTRACE
 	libspl_backtrace(STDERR_FILENO);
+#endif
 	dump_debug_buffer();
 
 	/*
