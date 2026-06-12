@@ -21,12 +21,16 @@ find_package(OpenSSL REQUIRED)
 #get_filename_component(rootPath "${OPENSSL_CRYPTO_LIBRARY}" DIRECTORY)
 #message(STATUS "OpenSSL root: " ${rootPath})
 
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+	find_library(ISAL isa-l_crypto_static HINTS "${CMAKE_SOURCE_DIR}/lib/ISA-L/Debug" REQUIRED)
+elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+	find_library(ISAL isa-l_crypto_static HINTS "${CMAKE_SOURCE_DIR}/lib/ISA-L/Release" REQUIRED)
+endif()
 
 # Attempt to simulate scripts/make-gitrev.h and zfs_gitrev.h
 include(GetGitRevisionDescription)
-include(GetGitRevisionDescription)
 git_describe_working_tree(GIT_GITREV)
-configure_file("${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h.win" "${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h" @ONLY)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h.in" "${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h" @ONLY)
 #
 
 function(use_clang)
@@ -49,7 +53,7 @@ add_compile_options(
 	-Wno-microsoft-enum-forward-reference
 	-Wno-visibility
 	-Wno-microsoft-anon-tag
-	# -Wno-ignored-attributes
+	-Wno-ignored-attributes
 	-Wno-unused-command-line-argument
 	-Wno-unused-local-typedef
 	-Wno-int-to-void-pointer-cast
@@ -60,8 +64,6 @@ add_compile_options(
 	#-fms-extensions
 	-Wno-unused-function
 	-Wno-unused-label
-	#Visual Studio 2022 update 2022114 started breaking builds with errors
-	-Wno-int-conversion
 )
 endfunction()
 
@@ -75,11 +77,14 @@ endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_definitions(-DDBG -DZFS_DEBUG)
+    SET(CMAKE_INSTALL_BINDIR "Debug")
+else()
+    SET(CMAKE_INSTALL_BINDIR "Release")
 endif()
 
 # Avoid dependency add_compile_definitions vcruntime140.dll
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MT")
-set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /MTd")
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MT")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd")
 
@@ -87,6 +92,53 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd")
 #find_path(BASH_DIR NAMES bash.exe git-bash.exe PATHS "/c/Program Files (x86)/Git/")
 #execute_process(COMMAND $BASH_DIR -c "scripts/make_gitrev.h include/zfs_gitrev.h" )
 
+
+set(WPP_DIR "${WDK_ROOT}/bin/${WDK_VERSION}")
+set(TRACE "TraceEvent{FLAGS=MYDRIVER_ALL_INFO}(LEVEL, MSG, ...)")
+set(DPRINT "dprintf{FLAGS=MYDRIVER_ALL_INFO, LEVEL=TRACE_INFO}(MSG, ...)")
+set(CFGDIR "${WPP_DIR}/wppconfig/rev1")
+set(SCAN "${WDK_ROOT}/Include/wdf/kmdf/1.9/WdfTraceEnums.h")
+set(WPP_MACRO "WPP_INLINE __inline")
+
+
+function(tmh_generation CSOURCES TMH_FILE_LIST)
+	foreach (C_FILE ${CSOURCES})
+		get_filename_component(OUTPUT_FILE_WE ${C_FILE} NAME_WE)
+		set(TMH_FILE  ${CMAKE_SOURCE_DIR}/out/build/${OUTPUT_FILE_WE}.tmh)
+		set_source_files_properties(${C_FILE} PROPERTIES COMPILE_FLAGS -DWPPFILE=${TMH_FILE})
+		set(LOCAL_TMH_FILE_LIST ${LOCAL_TMH_FILE_LIST} ${TMH_FILE})
+
+		add_custom_command(OUTPUT ${TMH_FILE}
+		COMMAND         "${WPP_DIR}/${WDK_PLATFORM}/tracewpp.exe"
+		-scan:${SCAN} /D${WPP_MACRO}
+		-cfgdir:${CFGDIR} -I${CMAKE_CURRENT_BINARY_DIR} -odir:"${CMAKE_SOURCE_DIR}/out/build" -km -func:${TRACE}
+		-func:${DPRINT} -gen:{km-default.tpl}*.tmh ${C_FILE}
+		WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" DEPENDS ${C_FILE})
+
+		message(STATUS "Kernel Mode FILES_IN ======: ${CMAKE_SOURCE_DIR}/out/build/${OUTPUT_FILE_WE}.tmh")
+	endforeach()
+	set(TMH_FILE_LIST ${LOCAL_TMH_FILE_LIST} PARENT_SCOPE)
+endfunction()
+
+function(tmh_generation_for_usermode CSOURCES TMH_FILE_LIST)
+	foreach (C_FILE ${CSOURCES})
+		get_filename_component(OUTPUT_FILE_WE ${C_FILE} NAME_WE)
+		get_filename_component(WORK_DIRECTORY ${C_FILE} DIRECTORY)
+		set(TMH_FILE  ${CMAKE_SOURCE_DIR}/out/build/${OUTPUT_FILE_WE}.tmh)
+		set_source_files_properties(${C_FILE} PROPERTIES COMPILE_FLAGS -DWPPFILE=${TMH_FILE})
+		set(LOCAL_TMH_FILE_LIST ${LOCAL_TMH_FILE_LIST} ${TMH_FILE})
+
+		add_custom_command(OUTPUT ${TMH_FILE}
+		COMMAND         "${WPP_DIR}/${WDK_PLATFORM}/tracewpp.exe"
+		-scan:${SCAN} /D${WPP_MACRO}
+		-cfgdir:${CFGDIR} -I${CMAKE_CURRENT_BINARY_DIR} -odir:"${CMAKE_SOURCE_DIR}/out/build" -p:usermode -func:${TRACE}
+		-func:${DPRINT} ${C_FILE}
+		WORKING_DIRECTORY "${WORK_DIRECTORY}" DEPENDS ${C_FILE})
+
+		message(STATUS "User Mode FILES_IN ======: ${CMAKE_SOURCE_DIR}/out/build/${OUTPUT_FILE_WE}.tmh")
+	endforeach()
+	set(TMH_FILE_LIST ${LOCAL_TMH_FILE_LIST} PARENT_SCOPE)
+endfunction()
 
 add_subdirectory(module)
 #add_subdirectory(module/zfs)
