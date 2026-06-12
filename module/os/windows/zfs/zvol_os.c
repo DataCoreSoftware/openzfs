@@ -45,7 +45,7 @@ static uint32_t zvol_major = ZVOL_MAJOR;
 unsigned int zvol_request_sync = 0;
 unsigned int zvol_prefetch_bytes = (128 * 1024);
 unsigned long zvol_max_discard_blocks = 16384;
-unsigned int zvol_threads = 32;
+int zvol_threads = 0;
 
 taskq_t *zvol_taskq;
 
@@ -1033,7 +1033,8 @@ zvol_os_ioctl(dev_t dev, unsigned long cmd, caddr_t data, int isblk,
 int
 zvol_init(void)
 {
-	int threads = MIN(MAX(zvol_threads, 1), 1024);
+	int logical_ncpu_to_use = boot_ncpus / 2;
+	int threads = MIN(MAX((zvol_threads ? zvol_threads : logical_ncpu_to_use), 1), 1024);
 
 	zvol_taskq = taskq_create(ZVOL_DRIVER, threads, maxclsyspri,
 	    threads * 2, INT_MAX, TASKQ_PREPOPULATE | TASKQ_DYNAMIC);
@@ -1041,6 +1042,7 @@ zvol_init(void)
 		return (-ENOMEM);
 	}
 
+	zvol_threads = threads; /* update so kstat reflects actual value */
 	zvol_init_impl();
 	return (0);
 }

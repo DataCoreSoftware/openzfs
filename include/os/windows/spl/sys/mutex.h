@@ -37,7 +37,6 @@
 // pre-processor, so we need to push them here as well.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
-#pragma GCC diagnostic ignored "-Wignored-attributes"
 #pragma GCC diagnostic ignored "-Wignored-pragma-intrinsic"
 #endif
 
@@ -73,7 +72,7 @@ typedef struct {
 typedef struct kmutex {
 	mutex_t		m_lock;
 	void		*m_owner;
-	KSPIN_LOCK	m_destroy_lock;
+	unsigned int	m_set_event_guard;
 	unsigned int	m_initialised;
 } kmutex_t;
 

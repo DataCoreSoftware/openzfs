@@ -769,6 +769,8 @@ zil_alloc_lwb(zilog_t *zilog, blkptr_t *bp, boolean_t slog, uint64_t txg,
 	lwb->lwb_zilog = zilog;
 	lwb->lwb_blk = *bp;
 	lwb->lwb_fastwrite = fastwrite;
+	if (fastwrite)
+		metaslab_fastwrite_mark(zilog->zl_spa, bp);
 	lwb->lwb_slog = slog;
 	lwb->lwb_indirect = B_FALSE;
 	if (BP_GET_CHECKSUM(bp) == ZIO_CHECKSUM_ZILOG2) {

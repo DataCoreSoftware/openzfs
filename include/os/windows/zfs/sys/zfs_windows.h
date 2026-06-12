@@ -110,6 +110,11 @@ extern char *major2str(int major, int minor);
 extern char *common_status_str(NTSTATUS Status);
 extern char *create_options(ULONG options);
 extern char *create_reply(NTSTATUS, ULONG reply);
+typedef struct stat_pair {
+	uint64_t count;
+	uint64_t total;
+} stat_pair;
+
 extern void latency_stats(uint64_t *histo, unsigned int buckets,
     stat_pair *lat);
 extern size_t get_reparse_point_impl(znode_t *zp, char *buffer, size_t outlen);
