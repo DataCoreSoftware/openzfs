@@ -458,6 +458,7 @@ static uint64_t zfs_arc_sys_free = 0;
 static uint_t zfs_arc_min_prefetch_ms = 0;
 static uint_t zfs_arc_min_prescient_prefetch_ms = 0;
 static uint_t zfs_arc_lotsfree_percent = 10;
+uint64_t dirty_ceil_bytes;
 
 /*
  * Number of arc_prune threads
@@ -7816,6 +7817,8 @@ arc_init(void)
 		zfs_dirty_data_max = MIN(zfs_dirty_data_max,
 		    zfs_dirty_data_max_max);
 	}
+
+	dirty_ceil_bytes = zfs_dirty_data_max;
 
 	if (zfs_wrlog_data_max == 0) {
 

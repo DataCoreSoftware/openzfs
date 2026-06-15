@@ -28,6 +28,7 @@
 
 
 #include <sys/kstat.h>
+#include <sys/kstat_windows.h>
 
 #include <ntddk.h>
 #include <storport.h>
@@ -85,6 +86,8 @@ OpenZFS_Fini(PDRIVER_OBJECT DriverObject)
 	}
 
 	zfs_kmod_fini();
+
+	kstat_windows_fini();
 
 	system_taskq_fini();
 
@@ -161,6 +164,8 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 
 	/* Start ZFS itself */
 	zfs_kmod_init();
+
+	kstat_windows_init(pRegistryPath);
 
 	/* Register fs with Win */
 	zfs_vfsops_init();

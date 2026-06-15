@@ -32,6 +32,7 @@ zfs_windows_zvol_wmi.c
 zfs_znode.c
 zio_crypt.c
 zvol_os.c
+zfs_kstat_windows.c
 )
 
 target_link_libraries(zfskern_os PRIVATE splkern icpkern)

@@ -1667,10 +1667,22 @@ save_named(kstat_t *kp, ks_instance_t *ksi)
 			nvpair_insert(ksi, knp->name,
 			    (ks_value_t *)&knp->value, KSTAT_DATA_UINT64);
 			break;
-		case KSTAT_DATA_STRING:
+		case 5: /* KSTAT_DATA_LONG as seen from kernel (not usermode alias) */
+			nvpair_insert(ksi, knp->name,
+			    (ks_value_t *)&knp->value, KSTAT_DATA_INT64);
+			break;
+		case 6: /* KSTAT_DATA_ULONG as seen from kernel */
+			nvpair_insert(ksi, knp->name,
+			    (ks_value_t *)&knp->value, KSTAT_DATA_UINT64);
+			break;
+		case 7: /* KSTAT_DATA_STRING as seen from kernel (usermode = 9) */
+			SAVE_STRING_X(ksi, knp->name, KSTAT_NAMED_STR_PTR(knp));
+			break;
+		case KSTAT_DATA_STRING: /* 9 in usermode */
 			SAVE_STRING_X(ksi, knp->name, KSTAT_NAMED_STR_PTR(knp));
 			break;
 		default:
+		    printf("knp->data_type: %d\n", knp->data_type);
 			assert(B_FALSE); /* Invalid data type */
 			break;
 		}
