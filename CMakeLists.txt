@@ -30,7 +30,12 @@ endif()
 # Attempt to simulate scripts/make-gitrev.h and zfs_gitrev.h
 include(GetGitRevisionDescription)
 git_describe_working_tree(GIT_GITREV)
-configure_file("${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h.in" "${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h" @ONLY)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h.in")
+  configure_file("${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h.in" "${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h" @ONLY)
+elseif(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h")
+  file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/include/zfs_gitrev.h"
+    "// Auto-generated fallback\n#define\tZFS_META_GITREV \"${GIT_GITREV}\"\n")
+endif()
 #
 
 function(use_clang)
