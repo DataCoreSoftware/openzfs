@@ -453,8 +453,10 @@ skip_open:
 	if (!blksz) blksz = DEV_BSIZE;
 	if (!pbsize) pbsize = DEV_BSIZE;
 
-	*ashift = highbit64(MAX(pbsize, SPA_MINBLOCKSIZE)) - 1;
-	dprintf("%s: picked ashift %llu for device\n", __func__, *ashift);
+	*ashift = highbit64(MAX(blksz, SPA_MINBLOCKSIZE)) - 1;
+	*physical_ashif = highbit64(MAX(pbsize, SPA_MINBLOCKSIZE)) - 1;
+	dprintf("%s: picked ashift %llu physical_ashift %llu for device\n",
+	    __func__, *ashift, *physical_ashif);
 
 	/*
 	 * Clear the nowritecache bit, so that on a vdev_reopen() we will

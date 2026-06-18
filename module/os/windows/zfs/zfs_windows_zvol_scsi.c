@@ -679,7 +679,9 @@ ScsiOpReadCapacity16(
 		return (SRB_STATUS_NO_DEVICE);
 	}
 	RtlZeroMemory((PUCHAR)pSrb->DataBuffer, pSrb->DataTransferLength);
-	blockSize = MP_BLOCK_SIZE;
+	blockSize = zv->zv_zso->zso_logical_sector_size;
+	if (blockSize == 0)
+		blockSize = MP_BLOCK_SIZE;
 	maxBlocks = (zv->zv_volsize / blockSize) - 1;
 
 	dprintf("%s:%d Block Size: 0x%x Total Blocks: 0x%llx targetid:%d "
@@ -689,7 +691,7 @@ ScsiOpReadCapacity16(
 	REVERSE_BYTES(&readCapacity->BytesPerBlock, &blockSize);
 	REVERSE_BYTES_QUAD(&readCapacity->LogicalBlockAddress.QuadPart,
 	    &maxBlocks);
-	lppFactor = zv->zv_volblocksize / MP_BLOCK_SIZE;
+	lppFactor = zv->zv_volblocksize / blockSize;
 	ASSERT((lppFactor & (lppFactor - 1)) == 0);
 	while (lppFactor >>= 1)
 		lppExponent++;
@@ -950,7 +952,9 @@ wzvol_WkRtn(__in PVOID pWkParms)
 		goto Done;
 	}
 
-	sectorOffset = startingSector * MP_BLOCK_SIZE;
+	sectorOffset = startingSector *
+	    (zv->zv_zso->zso_logical_sector_size ?
+	    zv->zv_zso->zso_logical_sector_size : MP_BLOCK_SIZE);
 
 	TraceEvent(TRACE_VERBOSE, "%s:%d: MpWkRtn Action: %X, starting sector:"
 	    " 0x%llX, sector offset: 0x%llX\n", __func__, __LINE__,

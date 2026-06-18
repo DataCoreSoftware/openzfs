@@ -41,6 +41,7 @@ struct zvol_state_os {
 	uint8_t		zso_lun_id;
 	// for I/O drainage (see assign_targetid, clear_targetid)
 	void		*zso_target_context;
+	uint32_t	zso_logical_sector_size; /* 512 or 4096, derived from pool ashift */
 };
 
 extern int zvol_os_ioctl(dev_t, unsigned long, caddr_t,
