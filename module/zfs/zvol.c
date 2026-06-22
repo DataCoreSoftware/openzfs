@@ -222,6 +222,12 @@ zvol_create_cb(objset_t *os, void *arg, cred_t *cr, dmu_tx_t *tx)
 
 	error = zap_update(os, ZVOL_ZAP_OBJ, "size", 8, 1, &volsize, tx);
 	ASSERT(error == 0);
+
+	uint64_t volsectorsize = 512;
+	(void) nvlist_lookup_uint64(nvprops, "volsectorsize", &volsectorsize);
+	error = zap_update(os, ZVOL_ZAP_OBJ, "sector_size", 8, 1,
+	    &volsectorsize, tx);
+	ASSERT(error == 0);
 }
 
 /*
@@ -409,6 +415,17 @@ zvol_check_volblocksize(const char *name, uint64_t volblocksize)
 	    !ISP2(volblocksize))
 		return (SET_ERROR(EDOM));
 
+	return (0);
+}
+
+/*
+ * Sanity check volume sector size.
+ */
+int
+zvol_check_volsectorsize(uint64_t volsectorsize)
+{
+	if (volsectorsize != 512 && volsectorsize != 4096)
+		return (SET_ERROR(EINVAL));
 	return (0);
 }
 

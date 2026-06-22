@@ -36,7 +36,6 @@
 #include <sys/zio.h>
 #include <sys/zfs_rlock.h>
 #include <sys/spa_impl.h>
-#include <sys/vdev_impl.h>
 #include <sys/zvol.h>
 #include <sys/zvol_impl.h>
 #include <sys/zvol_os.h>
@@ -742,27 +741,10 @@ zvol_os_create_minor(const char *name)
 	zv->zv_volsize = volsize;
 	zv->zv_objset = os;
 
-	/*
-	 * Derive the logical sector size from the hardware-reported logical
-	 * ashift of the pool's top-level vdevs. We use vdev_logical_ashift
-	 * (set by the disk hardware) rather than vdev_ashift (which may be
-	 * inflated by the user's ashift= option at pool creation time).
-	 * Only report 4K sectors if every vdev in the normal class is
-	 * genuinely 4K-native; otherwise fall back to 512.
-	 */
-	spa_t *spa = dmu_objset_spa(os);
-	vdev_t *rvd = spa->spa_root_vdev;
-	boolean_t all_4k = (rvd->vdev_children > 0);
-	for (uint64_t c = 0; c < rvd->vdev_children; c++) {
-		vdev_t *vd = rvd->vdev_child[c];
-		if (vd->vdev_islog || vd->vdev_isl2cache || vd->vdev_isspare)
-			continue;
-		if (vd->vdev_logical_ashift < 12) {
-			all_4k = B_FALSE;
-			break;
-		}
-	}
-	zv->zv_zso->zso_logical_sector_size = all_4k ? 4096 : 512;
+	uint64_t volsectorsize = 512;
+	(void) zap_lookup(os, ZVOL_ZAP_OBJ, "sector_size", 8, 1,
+	    &volsectorsize);
+	zv->zv_zso->zso_logical_sector_size = (uint32_t)volsectorsize;
 
 	// set_capacity(zv->zv_zso->zvo_disk, zv->zv_volsize >> 9);
 	ASSERT3P(zv->zv_zilog, ==, NULL);

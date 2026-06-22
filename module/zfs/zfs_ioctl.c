@@ -3426,6 +3426,14 @@ zfs_ioc_create(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 			volblocksize = zfs_prop_default_numeric(
 			    ZFS_PROP_VOLBLOCKSIZE);
 
+		uint64_t volsectorsize;
+		if (nvlist_lookup_uint64(nvprops,
+		    "volsectorsize", &volsectorsize) == 0) {
+			if ((error = zvol_check_volsectorsize(
+			    volsectorsize)) != 0)
+				return (error);
+		}
+
 		if ((error = zvol_check_volblocksize(fsname,
 		    volblocksize)) != 0 ||
 		    (error = zvol_check_volsize(volsize,
