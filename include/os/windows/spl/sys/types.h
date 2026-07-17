@@ -158,12 +158,15 @@ zfs_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 		return (ret);
 	}
 
-	/* _TRUNCATE ((size_t)-1): truncate and always null-terminate on overflow. */
-	ret = _vsnprintf_s(buf, size, (size_t)-1, fmt, ap);
-	if (ret < 0)
-		buf[size - 1] = '\0';
-
-	return (ret);
+	/*
+	 * _TRUNCATE ((size_t)-1): _vsnprintf_s always null-terminates buf
+	 * itself on truncation (returning -1), so no separate fallback
+	 * write is needed here - callers such as lstrlib.c's str_sprintf()
+	 * pass INT_MAX as a "the caller already pre-sized the real buffer"
+	 * sentinel, not the true size of buf, so a manual buf[size - 1]
+	 * write here would be a wild out-of-bounds write on truncation.
+	 */
+	return (_vsnprintf_s(buf, size, (size_t)-1, fmt, ap));
 }
 
 static inline int

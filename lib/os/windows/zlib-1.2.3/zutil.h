@@ -239,12 +239,15 @@ zlib_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 		return (ret);
 	}
 
-	/* _TRUNCATE ((size_t)-1): truncate and always null-terminate on overflow. */
-	ret = _vsnprintf_s(buf, size, (size_t)-1, fmt, ap);
-	if (ret < 0)
-		buf[size - 1] = '\0';
-
-	return (ret);
+	/*
+	 * _TRUNCATE ((size_t)-1): _vsnprintf_s always null-terminates buf
+	 * itself on truncation (returning -1), so no separate fallback
+	 * write is needed here - a manual buf[size - 1] write would be an
+	 * out-of-bounds write for any future caller that passes a sentinel
+	 * size larger than the true buffer, the same pattern already found
+	 * in module/lua/lstrlib.c's use of the analogous zfs_vsnprintf().
+	 */
+	return (_vsnprintf_s(buf, size, (size_t)-1, fmt, ap));
 }
 #endif
 
