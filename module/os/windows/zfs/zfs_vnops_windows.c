@@ -2286,11 +2286,33 @@ BufferUserBuffer(IN OUT PIRP Irp, IN ULONG BufferLength)
 	//  describing the users input buffer, which we will now snapshot.
 	//
 	if (Irp->AssociatedIrp.SystemBuffer == NULL) {
+		PVOID buf;
+
 		UserBuffer = MapUserBuffer(Irp);
-		Irp->AssociatedIrp.SystemBuffer =
-		    FsRtlAllocatePoolWithQuotaTag(NonPagedPoolNx,
-		    BufferLength,
-		    'qtaf');
+
+		/*
+		 * FsRtlAllocatePoolWithQuotaTag() expands to the deprecated
+		 * ExAllocatePoolWithQuotaTag(). Its documented replacement,
+		 * ExAllocatePool2 with POOL_FLAG_USE_QUOTA, is present in the
+		 * WDK headers but gated behind NTDDI_VERSION >=
+		 * NTDDI_WIN10_VB, above this project's current WDK_WINVER
+		 * (0x0601) target - using it would mean raising the driver's
+		 * minimum supported Windows version project-wide. Reproduce
+		 * the same two effects (charge the calling process's pool
+		 * quota; raise an exception on failure) with the lower-level,
+		 * non-deprecated primitives FsRtlAllocatePoolWithQuotaTag
+		 * itself is built on, instead.
+		 */
+		PsChargePoolQuota(PsGetCurrentProcess(), NonPagedPoolNx,
+		    BufferLength);
+		buf = ExAllocatePoolUninitialized(NonPagedPoolNx,
+		    BufferLength, 'qtaf');
+		if (buf == NULL) {
+			PsReturnPoolQuota(PsGetCurrentProcess(), NonPagedPoolNx,
+			    BufferLength);
+			ExRaiseStatus(STATUS_INSUFFICIENT_RESOURCES);
+		}
+		Irp->AssociatedIrp.SystemBuffer = buf;
 		//
 		// Set the flags so that the completion code knows to
 		// deallocate the buffer.

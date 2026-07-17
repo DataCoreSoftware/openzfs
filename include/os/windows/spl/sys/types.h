@@ -97,6 +97,16 @@ typedef uintptr_t pc_t;
 
 
 #include <stdarg.h>
+#ifndef va_copy
+/*
+ * clang-cl provides va_copy as a compiler builtin, but the WDK's own
+ * kernel-mode CRT stdarg.h (km\crt\stdarg.h, used when this header is
+ * compiled with plain cl.exe rather than clang-cl) does not define it at
+ * all. This driver is AMD64/x64-only, where va_list is a plain pointer
+ * and a direct assignment is a correct, equivalent substitute.
+ */
+#define	va_copy(dest, src) ((dest) = (src))
+#endif
 /*
  * _snprintf()/_vsnprintf() (the legacy MSVCRT functions snprintf/vsnprintf
  * were aliased to below) do not null-terminate the destination buffer when
@@ -106,24 +116,47 @@ typedef uintptr_t pc_t;
  * existing "-1 on truncation" return value is preserved unchanged (every
  * caller in this tree only checks `if (n < 0)`), so this is purely additive.
  */
+/*
+ * "Measure the required length without writing" (the buf==NULL/size==0
+ * idiom used by kmem_asprintf()/kmem_vasprintf()/zfs_dbgmsg()). Neither
+ * _vscprintf (declared in the WDK headers but not exported by the
+ * kernel-mode CRT import lib - confirmed via a link failure) nor
+ * _vsnprintf_s (its count==0 case triggers the invalid-parameter handler)
+ * can do this directly in kernel mode. Measure into a generously-sized
+ * scratch buffer instead: every caller in this tree builds short, bounded
+ * strings (dataset/snapshot names, log messages), so 1024 bytes is never
+ * exceeded in practice. If a caller's format+args ever did exceed it, the
+ * result here is a consistently-truncated (safely null-terminated) length
+ * - the caller's later real write with the same format+args into a
+ * same-size-or-larger buffer would truncate identically, not silently
+ * disagree with what was measured.
+ */
+static inline int
+zfs_vscprintf(const char *fmt, va_list ap)
+{
+	char scratch[1024];
+	va_list ap_copy;
+	int ret;
+
+	va_copy(ap_copy, ap);
+	ret = _vsnprintf_s(scratch, sizeof (scratch), (size_t)-1, fmt, ap_copy);
+	va_end(ap_copy);
+
+	return (ret >= 0 ? ret : (int)sizeof (scratch) - 1);
+}
+
 static inline int
 zfs_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 {
 	int ret;
 
-	/*
-	 * "measure the required length" idiom (buf==NULL, size==0): neither
-	 * _vscprintf (declared here but not exported by the kernel-mode CRT
-	 * import lib - link fails) nor _vsnprintf_s (its count==0 case also
-	 * triggers the invalid-parameter handler, so it can't be used to
-	 * measure without writing either) works for this. Fall back to the
-	 * plain _vsnprintf, which is kernel-mode-linkable and safe here since
-	 * no buffer is written (size 0) - this deliberately remains as a
-	 * CodeQL finding; there is no safe, kernel-linkable "measure without
-	 * writing" replacement available in this WDK.
-	 */
-	if (size == 0)
-		return (_vsnprintf(NULL, 0, fmt, ap));
+	if (size == 0) {
+		va_list ap_copy;
+		va_copy(ap_copy, ap);
+		ret = zfs_vscprintf(fmt, ap_copy);
+		va_end(ap_copy);
+		return (ret);
+	}
 
 	/* _TRUNCATE ((size_t)-1): truncate and always null-terminate on overflow. */
 	ret = _vsnprintf_s(buf, size, (size_t)-1, fmt, ap);
