@@ -249,6 +249,27 @@ zlib_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 	 */
 	return (_vsnprintf_s(buf, size, (size_t)-1, fmt, ap));
 }
+
+/*
+ * Portable (fixed-argument) counterpart to zlib_vsnprintf(), for callers
+ * that don't already have a va_list - e.g. gzio.c's gzdopen(), which needs
+ * this to compile both as part of the kernel-mode zlibkern static lib
+ * (linked into ZFSin) and as part of the plain user-mode zlib library used
+ * by minigzip.c/test tooling. RtlStringCbPrintfA (ntstrsafe.h) would only
+ * be usable from the former.
+ */
+static inline int
+zlib_snprintf(char *buf, size_t size, const char *fmt, ...)
+{
+	va_list ap;
+	int ret;
+
+	va_start(ap, fmt);
+	ret = zlib_vsnprintf(buf, size, fmt, ap);
+	va_end(ap);
+
+	return (ret);
+}
 #endif
 
 #if defined(STDC99) || (defined(__TURBOC__) && __TURBOC__ >= 0x550)

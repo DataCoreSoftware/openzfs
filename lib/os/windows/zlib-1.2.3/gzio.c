@@ -9,8 +9,6 @@
 /* @(#) $Id$ */
 
 #include <stdio.h>
-#include <ntstatus.h>
-#include <ntstrsafe.h>
 
 #include "zutil.h"
 
@@ -236,7 +234,7 @@ gzdopen(
 
 	if (fd < 0)
 		return ((gzFile)Z_NULL);
-	RtlStringCbPrintfA(name, sizeof (name), "<fd:%d>", fd); /* for debugging */
+	zlib_snprintf(name, sizeof (name), "<fd:%d>", fd); /* for debugging */
 
 	return (gz_open(name, mode, fd));
 }
