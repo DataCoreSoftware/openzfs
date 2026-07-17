@@ -12,7 +12,7 @@ lcompat_sprintf(char *buf, size_t size, const char *fmt, ...)
 	va_list args;
 
 	va_start(args, fmt);
-	res = vsnprintf(buf, size, fmt, args);
+	res = zfs_vsnprintf(buf, size, fmt, args);
 	va_end(args);
 
 	return (res);

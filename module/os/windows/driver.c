@@ -319,7 +319,7 @@ spl_kstat_registry(void *arg, kstat_t *ksp)
 			break; // Something is wrong - or we finished
 
 		// Allocate space to hold
-		regBuffer = (PKEY_VALUE_FULL_INFORMATION)ExAllocatePoolWithTag(
+		regBuffer = (PKEY_VALUE_FULL_INFORMATION)ExAllocatePoolUninitialized(
 		    NonPagedPoolNx, length, 'zfsr');
 
 		if (regBuffer == NULL)

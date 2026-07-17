@@ -51,8 +51,17 @@ static unsigned long long startOff = 0;
 int
 initDbgCircularBuffer(void)
 {
-	cbuf = ExAllocatePoolWithTag(NonPagedPoolNx, cbuf_size, '!GBD');
-	ASSERT(cbuf);
+	cbuf = ExAllocatePoolUninitialized(NonPagedPoolNx, cbuf_size, '!GBD');
+	/*
+	 * ASSERT() compiles to a no-op in Release/free builds (DBG not
+	 * defined), so it cannot be relied on to catch an allocation
+	 * failure here - an unconditional RtlZeroMemory(cbuf, ...) right
+	 * after would be a NULL-pointer write that bugchecks the box at
+	 * driver load, with no debugger present to catch the assert.
+	 */
+	if (cbuf == NULL)
+		return (ENOMEM);
+	RtlZeroMemory(cbuf, cbuf_size);
 	KeInitializeSpinLock(&cbuf_spin);
 	return (0);
 }
@@ -82,7 +91,13 @@ void
 addbuffer(char *buf)
 {
 	// unsigned long long writtenBytes = 0;
-	if (buf) {
+	/*
+	 * cbuf is NULL if initDbgCircularBuffer()'s allocation failed;
+	 * without this check, the first debug message after such a
+	 * failure would dereference NULL below instead of being silently
+	 * dropped.
+	 */
+	if (buf && cbuf) {
 		unsigned long long bufLen = strlen(buf);
 		unsigned long long endLineLen = strlen(endLine);
 		unsigned long long endBufLen = strlen(endBuf);
@@ -125,12 +140,12 @@ printBuffer(const char *fmt, ...)
 	va_list args;
 	va_start(args, fmt);
 	char buf[max_line_length];
-	_snprintf(buf, 18, "%p: ", PsGetCurrentThread());
+	RtlStringCbPrintfA(buf, 18, "%p: ", PsGetCurrentThread());
 
 	int tmp = _vsnprintf_s(&buf[17], sizeof (buf), max_line_length,
 	    fmt, args);
 	if (tmp >= max_line_length) {
-		_snprintf(&buf[17], 17, "buffer too small");
+		RtlStringCbPrintfA(&buf[17], 17, "buffer too small");
 	}
 
 	KeAcquireSpinLock(&cbuf_spin, &level);
