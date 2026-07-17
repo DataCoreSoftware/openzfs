@@ -155,7 +155,7 @@ struct sbuf {
 /* sbuf_new() and family does exist in XNU, but Apple wont let us call them */
 #define	M_SBUF	105 /* string buffers */
 #define	SBMALLOC(size)  \
-	(struct sbuf *)ExAllocatePoolWithTag(NonPagedPoolNx, (size), '!SFZ')
+	(struct sbuf *)ExAllocatePoolUninitialized(NonPagedPoolNx, (size), '!SFZ')
 #define	SBFREE(buf)	ExFreePoolWithTag((buf), '!SFZ')
 
 #define	SBUF_SETFLAG(s, f)	do { (s)->s_flags |= (f); } while (0)
@@ -309,7 +309,7 @@ sbuf_vprintf(struct sbuf *s, const char *fmt, va_list ap)
 
 	do {
 		va_copy(ap_copy, ap);
-		len = vsnprintf(&s->s_buf[s->s_len], SBUF_FREESPACE(s) + 1,
+		len = zfs_vsnprintf(&s->s_buf[s->s_len], SBUF_FREESPACE(s) + 1,
 		    fmt, ap_copy);
 		// left-side must be assignable. Win tries to set to 0.
 		// va_end(ap_copy);
@@ -785,7 +785,7 @@ void
 kstat_set_string(char *dst, const char *src)
 {
 	bzero(dst, KSTAT_STRLEN);
-	(void) strncpy(dst, src, KSTAT_STRLEN - 1);
+	(void) strlcpy(dst, src, KSTAT_STRLEN);
 }
 
 void
@@ -1034,7 +1034,8 @@ kstat_create_zone(const char *ks_module, int ks_instance, const char *ks_name,
 	if (ks_name == NULL) {
 		char buf[KSTAT_STRLEN];
 		kstat_set_string(buf, ks_module);
-		(void) sprintf(namebuf, "%s%d", buf, ks_instance);
+		(void) RtlStringCbPrintfA(namebuf, sizeof (namebuf), "%s%d",
+		    buf, ks_instance);
 		ks_name = namebuf;
 	}
 

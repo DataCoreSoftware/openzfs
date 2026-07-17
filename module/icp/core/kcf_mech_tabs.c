@@ -177,72 +177,72 @@ kcf_init_mech_tabs(void)
 	/* Then the pre-defined mechanism entries */
 
 	/* Two digests */
-	(void) strncpy(kcf_digest_mechs_tab[0].me_name, SUN_CKM_MD5,
+	(void) strlcpy(kcf_digest_mechs_tab[0].me_name, SUN_CKM_MD5,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_digest_mechs_tab[0].me_threshold = kcf_md5_threshold;
 
-	(void) strncpy(kcf_digest_mechs_tab[1].me_name, SUN_CKM_SHA1,
+	(void) strlcpy(kcf_digest_mechs_tab[1].me_name, SUN_CKM_SHA1,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_digest_mechs_tab[1].me_threshold = kcf_sha1_threshold;
 
 	/* The symmetric ciphers in various modes */
-	(void) strncpy(kcf_cipher_mechs_tab[0].me_name, SUN_CKM_DES_CBC,
+	(void) strlcpy(kcf_cipher_mechs_tab[0].me_name, SUN_CKM_DES_CBC,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_cipher_mechs_tab[0].me_threshold = kcf_des_threshold;
 
-	(void) strncpy(kcf_cipher_mechs_tab[1].me_name, SUN_CKM_DES3_CBC,
+	(void) strlcpy(kcf_cipher_mechs_tab[1].me_name, SUN_CKM_DES3_CBC,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_cipher_mechs_tab[1].me_threshold = kcf_des3_threshold;
 
-	(void) strncpy(kcf_cipher_mechs_tab[2].me_name, SUN_CKM_DES_ECB,
+	(void) strlcpy(kcf_cipher_mechs_tab[2].me_name, SUN_CKM_DES_ECB,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_cipher_mechs_tab[2].me_threshold = kcf_des_threshold;
 
-	(void) strncpy(kcf_cipher_mechs_tab[3].me_name, SUN_CKM_DES3_ECB,
+	(void) strlcpy(kcf_cipher_mechs_tab[3].me_name, SUN_CKM_DES3_ECB,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_cipher_mechs_tab[3].me_threshold = kcf_des3_threshold;
 
-	(void) strncpy(kcf_cipher_mechs_tab[4].me_name, SUN_CKM_BLOWFISH_CBC,
+	(void) strlcpy(kcf_cipher_mechs_tab[4].me_name, SUN_CKM_BLOWFISH_CBC,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_cipher_mechs_tab[4].me_threshold = kcf_bf_threshold;
 
-	(void) strncpy(kcf_cipher_mechs_tab[5].me_name, SUN_CKM_BLOWFISH_ECB,
+	(void) strlcpy(kcf_cipher_mechs_tab[5].me_name, SUN_CKM_BLOWFISH_ECB,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_cipher_mechs_tab[5].me_threshold = kcf_bf_threshold;
 
-	(void) strncpy(kcf_cipher_mechs_tab[6].me_name, SUN_CKM_AES_CBC,
+	(void) strlcpy(kcf_cipher_mechs_tab[6].me_name, SUN_CKM_AES_CBC,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_cipher_mechs_tab[6].me_threshold = kcf_aes_threshold;
 
-	(void) strncpy(kcf_cipher_mechs_tab[7].me_name, SUN_CKM_AES_ECB,
+	(void) strlcpy(kcf_cipher_mechs_tab[7].me_name, SUN_CKM_AES_ECB,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_cipher_mechs_tab[7].me_threshold = kcf_aes_threshold;
 
-	(void) strncpy(kcf_cipher_mechs_tab[8].me_name, SUN_CKM_RC4,
+	(void) strlcpy(kcf_cipher_mechs_tab[8].me_name, SUN_CKM_RC4,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_cipher_mechs_tab[8].me_threshold = kcf_rc4_threshold;
 
 
 	/* 4 HMACs */
-	(void) strncpy(kcf_mac_mechs_tab[0].me_name, SUN_CKM_MD5_HMAC,
+	(void) strlcpy(kcf_mac_mechs_tab[0].me_name, SUN_CKM_MD5_HMAC,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_mac_mechs_tab[0].me_threshold = kcf_md5_threshold;
 
-	(void) strncpy(kcf_mac_mechs_tab[1].me_name, SUN_CKM_MD5_HMAC_GENERAL,
+	(void) strlcpy(kcf_mac_mechs_tab[1].me_name, SUN_CKM_MD5_HMAC_GENERAL,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_mac_mechs_tab[1].me_threshold = kcf_md5_threshold;
 
-	(void) strncpy(kcf_mac_mechs_tab[2].me_name, SUN_CKM_SHA1_HMAC,
+	(void) strlcpy(kcf_mac_mechs_tab[2].me_name, SUN_CKM_SHA1_HMAC,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_mac_mechs_tab[2].me_threshold = kcf_sha1_threshold;
 
-	(void) strncpy(kcf_mac_mechs_tab[3].me_name, SUN_CKM_SHA1_HMAC_GENERAL,
+	(void) strlcpy(kcf_mac_mechs_tab[3].me_name, SUN_CKM_SHA1_HMAC_GENERAL,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_mac_mechs_tab[3].me_threshold = kcf_sha1_threshold;
 
 
 	/* 1 random number generation pseudo mechanism */
-	(void) strncpy(kcf_misc_mechs_tab[0].me_name, SUN_RANDOM,
+	(void) strlcpy(kcf_misc_mechs_tab[0].me_name, SUN_RANDOM,
 	    CRYPTO_MAX_MECH_NAME);
 
 	kcf_mech_hash = mod_hash_create_strhash_nodtr("kcf mech2id hash",

@@ -297,7 +297,7 @@ stream_parse(char *filename, char **streamname)
 		*colon = 0; // Cut off streamname from filename
 
 		// We now ADD ":$DATA" to the stream name.
-		strcat(*streamname, ":$DATA");
+		strlcat(*streamname, ":$DATA", PATH_MAX - (*streamname - filename));
 
 		return (0);
 	}
@@ -419,7 +419,7 @@ zfs_find_dvp_vp(zfsvfs_t *zfsvfs, char *filename, int finalpartmaynotexist,
  * - maharmstone
  */
 				REPARSE_DATA_BUFFER *rpb;
-				rpb = ExAllocatePoolWithTag(PagedPool,
+				rpb = ExAllocatePoolUninitialized(PagedPool,
 				    zp->z_size, '!FSZ');
 				zfs_uio_t uio;
 				struct iovec iov = { rpb, zp->z_size };
@@ -1763,10 +1763,17 @@ pnp_query_id(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
 	zmo = (mount_t *)DeviceObject->DeviceExtension;
 
-	Irp->IoStatus.Information = (void *)ExAllocatePoolWithTag(PagedPool,
+	Irp->IoStatus.Information = (void *)ExAllocatePoolUninitialized(PagedPool,
 	    zmo->bus_name.Length + sizeof (UNICODE_NULL), '!OIZ');
 	if (Irp->IoStatus.Information == NULL)
 		return (STATUS_NO_MEMORY);
+
+	// Only bus_name.Length bytes are copied below; the trailing
+	// UNICODE_NULL terminator bytes are never explicitly written,
+	// so zero them explicitly now that the allocator no longer
+	// guarantees zeroed memory.
+	RtlZeroMemory(Irp->IoStatus.Information,
+	    zmo->bus_name.Length + sizeof (UNICODE_NULL));
 
 	RtlCopyMemory(Irp->IoStatus.Information, zmo->bus_name.Buffer,
 	    zmo->bus_name.Length);
@@ -5319,8 +5326,9 @@ _Function_class_(DRIVER_DISPATCH)
 			    TargetDeviceRelation) {
 				PDEVICE_RELATIONS DeviceRelations;
 				DeviceRelations =
-				    (PDEVICE_RELATIONS)ExAllocatePool(PagedPool,
-				    sizeof (DEVICE_RELATIONS));
+				    (PDEVICE_RELATIONS)ExAllocatePoolUninitialized(
+				    PagedPool,
+				    sizeof (DEVICE_RELATIONS), 'PnpD');
 				if (!DeviceRelations) {
 					TraceEvent(TRACE_NOISY, "enomem DeviceRelations\n");
 					Status = STATUS_INSUFFICIENT_RESOURCES;

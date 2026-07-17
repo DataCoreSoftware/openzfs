@@ -61,7 +61,7 @@ extern uint64_t physmem;
 	 */
 
 #define	MALLOC(A, C, S, T, F) \
-	(A) = (C)ExAllocatePoolWithTag(NonPagedPoolNx, (S), '!SFZ')
+	(A) = (C)ExAllocatePoolUninitialized(NonPagedPoolNx, (S), '!SFZ')
 #define	FREE(A, T) \
 	ExFreePoolWithTag((A), '!SFZ')
 

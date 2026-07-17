@@ -325,7 +325,7 @@ SendVolumeArrivalNotification(PUNICODE_STRING DeviceName)
 	dprintf("=> SendVolumeArrivalNotification: '%wZ'\n", DeviceName);
 
 	length = sizeof (MOUNTMGR_TARGET_NAME) + DeviceName->Length - 1;
-	targetName = ExAllocatePool(PagedPool, length);
+	targetName = ExAllocatePoolUninitialized(PagedPool, length, 'MMTN');
 
 	if (targetName == NULL) {
 		dprintf("  can't allocate MOUNTMGR_TARGET_NAME\n");
@@ -448,7 +448,7 @@ SendVolumeCreatePoint(__in PUNICODE_STRING DeviceName,
 
 	length = sizeof (MOUNTMGR_CREATE_POINT_INPUT) + MountPoint->Length +
 	    DeviceName->Length;
-	point = ExAllocatePool(PagedPool, length);
+	point = ExAllocatePoolUninitialized(PagedPool, length, 'MMCP');
 
 	if (point == NULL) {
 		dprintf("  can't allocate MOUNTMGR_CREATE_POINT_INPUT\n");
@@ -1012,7 +1012,7 @@ generateVolumeNameMountpoint(wchar_t *vol_mpt)
 	wchar_t wc_guid[50];
 	generateGUID(&GUID);
 	mbstowcs(&wc_guid, GUID, 50);
-	int len = _snwprintf(vol_mpt, 50, L"\\??\\Volume{%s}", wc_guid);
+	int len = RtlStringCchPrintfW(vol_mpt, 50, L"\\??\\Volume{%s}", wc_guid);
 }
 
 int

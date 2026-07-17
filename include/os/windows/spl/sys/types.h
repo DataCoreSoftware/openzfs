@@ -96,10 +96,60 @@ typedef uintptr_t pc_t;
 #include <ntddk.h>
 
 
-#define	snprintf _snprintf
+#include <stdarg.h>
+/*
+ * _snprintf()/_vsnprintf() (the legacy MSVCRT functions snprintf/vsnprintf
+ * were aliased to below) do not null-terminate the destination buffer when
+ * the formatted output is truncated - unlike the POSIX snprintf/vsnprintf
+ * this portable code is written against. Wrap them instead of aliasing
+ * directly, so truncation is always still safely null-terminated. The
+ * existing "-1 on truncation" return value is preserved unchanged (every
+ * caller in this tree only checks `if (n < 0)`), so this is purely additive.
+ */
+static inline int
+zfs_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
+{
+	int ret;
+
+	/*
+	 * "measure the required length" idiom (buf==NULL, size==0): neither
+	 * _vscprintf (declared here but not exported by the kernel-mode CRT
+	 * import lib - link fails) nor _vsnprintf_s (its count==0 case also
+	 * triggers the invalid-parameter handler, so it can't be used to
+	 * measure without writing either) works for this. Fall back to the
+	 * plain _vsnprintf, which is kernel-mode-linkable and safe here since
+	 * no buffer is written (size 0) - this deliberately remains as a
+	 * CodeQL finding; there is no safe, kernel-linkable "measure without
+	 * writing" replacement available in this WDK.
+	 */
+	if (size == 0)
+		return (_vsnprintf(NULL, 0, fmt, ap));
+
+	/* _TRUNCATE ((size_t)-1): truncate and always null-terminate on overflow. */
+	ret = _vsnprintf_s(buf, size, (size_t)-1, fmt, ap);
+	if (ret < 0)
+		buf[size - 1] = '\0';
+
+	return (ret);
+}
+
+static inline int
+zfs_snprintf(char *buf, size_t size, const char *fmt, ...)
+{
+	va_list ap;
+	int ret;
+
+	va_start(ap, fmt);
+	ret = zfs_vsnprintf(buf, size, fmt, ap);
+	va_end(ap);
+
+	return (ret);
+}
+
+#define	snprintf zfs_snprintf
 #define	vprintf(...) vKdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, \
 	__VA_ARGS__))
-#define	vsnprintf _vsnprintf
+#define	vsnprintf zfs_vsnprintf
 
 #ifndef ULLONG_MAX
 #define	ULLONG_MAX			(~0ULL)

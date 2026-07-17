@@ -178,6 +178,43 @@ typedef int ptrdiff_t;
 
 /* functions */
 
+#ifdef WIN32
+/*
+ * Callers in this file call zlib_vsnprintf() directly (not via a "vsnprintf"
+ * macro alias) so the safe wrapper is always used regardless of whether this
+ * compiler/CRT already exposes some form of vsnprintf. _vsnprintf_s (unlike
+ * the legacy _vsnprintf) always null-terminates the destination buffer, even
+ * when the formatted output is truncated, matching the POSIX vsnprintf
+ * contract this code is written against.
+ */
+#include <stdarg.h>
+static inline int
+zlib_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
+{
+	int ret;
+
+	/*
+	 * "measure the required length" idiom (buf==NULL, size==0): neither
+	 * _vscprintf (declared here but not exported by the kernel-mode CRT
+	 * import lib - link fails) nor _vsnprintf_s (its count==0 case also
+	 * triggers the invalid-parameter handler) works for this. Fall back
+	 * to plain _vsnprintf, which is kernel-mode-linkable and safe here
+	 * since no buffer is written (size 0) - this deliberately remains as
+	 * a CodeQL finding; there is no safe, kernel-linkable "measure
+	 * without writing" replacement available in this WDK.
+	 */
+	if (size == 0)
+		return (_vsnprintf(NULL, 0, fmt, ap));
+
+	/* _TRUNCATE ((size_t)-1): truncate and always null-terminate on overflow. */
+	ret = _vsnprintf_s(buf, size, (size_t)-1, fmt, ap);
+	if (ret < 0)
+		buf[size - 1] = '\0';
+
+	return (ret);
+}
+#endif
+
 #if defined(STDC99) || (defined(__TURBOC__) && __TURBOC__ >= 0x550)
 #ifndef HAVE_VSNPRINTF
 #define	HAVE_VSNPRINTF
@@ -202,7 +239,7 @@ typedef int ptrdiff_t;
 #ifdef WIN32
 /* In Win32, vsnprintf is available as the "non-ANSI" _vsnprintf. */
 #if !defined(vsnprintf) && !defined(NO_vsnprintf)
-#define	vsnprintf _vsnprintf
+#define	vsnprintf zlib_vsnprintf
 #endif
 #endif
 #ifdef __SASC
