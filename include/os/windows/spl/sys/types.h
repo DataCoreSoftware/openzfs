@@ -117,19 +117,24 @@ typedef uintptr_t pc_t;
  * caller in this tree only checks `if (n < 0)`), so this is purely additive.
  */
 /*
+ * WARNING: this returns a *capped* length, NOT the true required length.
+ *
  * "Measure the required length without writing" (the buf==NULL/size==0
- * idiom used by kmem_asprintf()/kmem_vasprintf()/zfs_dbgmsg()). Neither
- * _vscprintf (declared in the WDK headers but not exported by the
- * kernel-mode CRT import lib - confirmed via a link failure) nor
- * _vsnprintf_s (its count==0 case triggers the invalid-parameter handler)
- * can do this directly in kernel mode. Measure into a generously-sized
- * scratch buffer instead: every caller in this tree builds short, bounded
- * strings (dataset/snapshot names, log messages), so 1024 bytes is never
- * exceeded in practice. If a caller's format+args ever did exceed it, the
- * result here is a consistently-truncated (safely null-terminated) length
- * - the caller's later real write with the same format+args into a
- * same-size-or-larger buffer would truncate identically, not silently
- * disagree with what was measured.
+ * idiom) cannot be done natively in kernel mode here: _vscprintf is declared
+ * by the WDK but not exported by the kernel-mode CRT import lib (confirmed
+ * via a link failure), and _vsnprintf_s rejects count == 0. So this measures
+ * by formatting into a bounded scratch buffer, which means that for any
+ * format+args longer than the scratch buffer it reports sizeof(scratch) - 1
+ * instead of the real length.
+ *
+ * Consequently this must NEVER be used to size an allocation. Doing so
+ * silently under-allocates for long strings; kmem_vasprintf() used to do
+ * exactly that, which drove it into an error path that freed the buffer with
+ * a mismatched size and returned the freed pointer to its caller - a
+ * use-after-free plus double-free that corrupted the shared kmem/vmem
+ * freelists and crashed unrelated subsystems (nvlist and ABD teardown) much
+ * later. Callers that need a correctly sized buffer must grow-and-retry a
+ * real write instead; see kmem_vasprintf() in spl-kmem.c.
  */
 static inline int
 zfs_vscprintf(const char *fmt, va_list ap)

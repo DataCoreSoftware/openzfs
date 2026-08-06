@@ -6613,21 +6613,21 @@ kmem_asdprintf(const char *fmt, ...)
 	return (ptr);
 }
 
+/*
+ * Largest buffer kmem_vasprintf() will grow to before it accepts a truncated
+ * result. Every format used in this tree (dataset/snapshot names, property
+ * lists, pool history messages) is far below this.
+ */
+#define	KMEM_VASPRINTF_MAX	65536
+
 char *
 kmem_asprintf(const char *fmt, ...)
 {
-	int size;
 	va_list adx;
 	char *buf;
 
 	va_start(adx, fmt);
-	size = zfs_vsnprintf(NULL, 0, fmt, adx) + 1;
-	va_end(adx);
-
-	buf = kmem_alloc(size, KM_SLEEP);
-
-	va_start(adx, fmt);
-	(void) zfs_vsnprintf(buf, size, fmt, adx);
+	buf = kmem_vasprintf(fmt, adx);
 	va_end(adx);
 
 	return (buf);
@@ -6638,26 +6638,64 @@ kmem_asprintf(const char *fmt, ...)
  * Copyright (C) 2014 insane coder
  * (http://insanecoding.blogspot.com/, http://asprintf.insanecoding.org/)
  */
+/*
+ * Format into a newly allocated buffer. Callers free the result with
+ * kmem_strfree(), which computes the size as strlen(str) + 1, so the
+ * returned allocation must be exactly that size.
+ *
+ * This deliberately does NOT use the "measure with a NULL destination, then
+ * allocate that much" idiom. In kernel mode there is no linkable way to
+ * measure a format's true length without writing it (_vscprintf is declared
+ * by the WDK but not exported by the kernel-mode CRT, and _vsnprintf_s
+ * rejects count == 0), so any measuring helper must format into a bounded
+ * scratch buffer and therefore reports a *capped* length once the format
+ * exceeds it. Sizing an allocation from a capped length under-allocates,
+ * which used to drive this function into an error path that freed the buffer
+ * with a mismatched size and then returned the freed pointer to the caller -
+ * a use-after-free plus double-free that corrupted the shared kmem/vmem
+ * freelists and crashed unrelated subsystems later.
+ *
+ * Grow-and-retry instead: no measurement, the freed size always matches the
+ * allocated size, and the result is always a valid, null-terminated string.
+ */
 char *
 kmem_vasprintf(const char *fmt, va_list ap)
 {
-	char *ptr;
-	int size;
-	int r = -1;
+	char *scratch, *ptr;
+	size_t cap = 256;
+	size_t len;
 
-	size = zfs_vsnprintf(NULL, 0, fmt, ap);
-	if ((size >= 0) && (size < INT_MAX)) {
-		ptr = (char *)kmem_alloc(size + 1, KM_SLEEP); // +1 for null
-		if (ptr) {
-			r = zfs_vsnprintf(ptr, size + 1, fmt, ap);  // +1 for null
-			if ((r < 0) || (r > size)) {
-				kmem_free(ptr, size);
-				r = -1;
-			}
-		}
-	} else {
-		ptr = 0;
+	for (;;) {
+		va_list ap_copy;
+		int r;
+
+		scratch = kmem_alloc(cap, KM_SLEEP);
+
+		/*
+		 * Every attempt must walk the argument list from the start, so
+		 * never consume the caller's va_list directly.
+		 */
+		va_copy(ap_copy, ap);
+		r = zfs_vsnprintf(scratch, cap, fmt, ap_copy);
+		va_end(ap_copy);
+
+		/*
+		 * r >= 0 means the whole string fit (r excludes the
+		 * terminator); r < 0 means it was truncated. Accept truncation
+		 * once the ceiling is reached - the buffer is still valid and
+		 * null-terminated, and callers here assume a non-NULL result.
+		 */
+		if (r >= 0 || cap >= KMEM_VASPRINTF_MAX)
+			break;
+
+		kmem_free(scratch, cap);	/* always the size allocated */
+		cap *= 2;
 	}
+
+	len = strlen(scratch);
+	ptr = kmem_alloc(len + 1, KM_SLEEP);
+	strlcpy(ptr, scratch, len + 1);
+	kmem_free(scratch, cap);
 
 	return (ptr);
 }

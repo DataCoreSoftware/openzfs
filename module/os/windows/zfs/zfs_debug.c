@@ -198,9 +198,9 @@ void
 __dprintf(boolean_t dprint, const char *file, const char *func,
     int line, const char *fmt, ...)
 {
-	int size, i;
 	va_list adx;
-	char *buf, *nl;
+	char *buf, *body, *nl;
+	size_t alloc_len;
 	char *prefix = (dprint) ? "dprintf: " : "";
 	const char *newfile;
 
@@ -227,37 +227,29 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 		newfile = file;
 	}
 
+	/*
+	 * Build the message with kmem_vasprintf()/kmem_asprintf() instead of
+	 * measuring the format up front and hand-computing offsets into one
+	 * buffer. The old code did the latter, which depended on a "measure
+	 * without writing" call returning the true, unbounded length -
+	 * something kernel mode cannot do here (see the comment on
+	 * kmem_vasprintf()) - and which also told both of its writes that buf
+	 * had one more byte than it really did.
+	 */
 	va_start(adx, fmt);
-	size = zfs_vsnprintf(NULL, 0, fmt, adx);
+	body = kmem_vasprintf(fmt, adx);
 	va_end(adx);
 
-	size += snprintf(NULL, 0, "%s%s:%d:%s(): ", prefix, newfile, line,
-	    func);
-
-	size++; /* null byte in the "buf" string */
+	buf = kmem_asprintf("%s%s:%d:%s(): %s", prefix, newfile, line, func,
+	    body);
+	kmem_strfree(body);
 
 	/*
-	 * There is one byte of string in sizeof (zfs_dbgmsg_t), used
-	 * for the terminating null.
+	 * Record the allocation size now: the newline strip below edits the
+	 * string in place, after which strlen() + 1 (what kmem_strfree() would
+	 * compute) is a byte short of what was actually allocated.
 	 */
-	buf = kmem_alloc(size, KM_SLEEP);
-	int roger = 0;
-
-	va_start(adx, fmt);
-	i = snprintf(buf, size + 1, "%s%s:%d:%s(): ",
-	    prefix, newfile, line, func);
-	/*
-	 * buf has exactly `size` bytes total; `i` bytes are already used by
-	 * the prefix, leaving `size - i` true remaining bytes at buf + i
-	 * (not size - i + 1 - that overstates the real remaining capacity
-	 * by one byte). This was harmless while zfs_vsnprintf's size==0
-	 * "measure" path could return an unbounded true length, but
-	 * zfs_vscprintf now caps that measurement at a 1023-character
-	 * scratch buffer, so a fmt+args needing >= 1024 characters would
-	 * make this call write one byte past the end of buf.
-	 */
-	roger = zfs_vsnprintf(buf + i, size - i, fmt, adx);
-	va_end(adx);
+	alloc_len = strlen(buf) + 1;
 
 	/*
 	 * Get rid of trailing newline for dprintf logs.
@@ -275,7 +267,7 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 	/* Also emit string to log/console */
 	printBuffer("%s\n", buf);
 
-	kmem_free(buf, size);
+	kmem_free(buf, alloc_len);
 }
 
 #else
