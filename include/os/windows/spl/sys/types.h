@@ -127,14 +127,26 @@ typedef uintptr_t pc_t;
  * format+args longer than the scratch buffer it reports sizeof(scratch) - 1
  * instead of the real length.
  *
- * Consequently this must NEVER be used to size an allocation. Doing so
- * silently under-allocates for long strings; kmem_vasprintf() used to do
- * exactly that, which drove it into an error path that freed the buffer with
- * a mismatched size and returned the freed pointer to its caller - a
- * use-after-free plus double-free that corrupted the shared kmem/vmem
- * freelists and crashed unrelated subsystems (nvlist and ABD teardown) much
- * later. Callers that need a correctly sized buffer must grow-and-retry a
- * real write instead; see kmem_vasprintf() in spl-kmem.c.
+ * Sizing an allocation from this value is only safe when BOTH of the
+ * following hold, in which case a capped measurement costs nothing but
+ * truncated text:
+ *
+ *   1. every write into the buffer is bounded by the buffer's real size
+ *      (not by the measured length, and not by measured + 1), and
+ *   2. the eventual free passes the same size that was allocated.
+ *
+ * It is NOT safe for any caller that treats the measurement as exact.
+ * kmem_vasprintf() used to do that: it sized the buffer from the measured
+ * length, then treated the resulting short write as an error and, on that
+ * path, freed the buffer with the measured size (one less than allocated)
+ * and returned the freed pointer to its caller - a use-after-free plus
+ * double-free that corrupted the shared kmem/vmem freelists and crashed
+ * unrelated subsystems (nvlist and ABD teardown) much later. It now
+ * grows-and-retries a real write and never measures; see spl-kmem.c.
+ *
+ * __dprintf() in zfs_debug.c does size its allocation from this value, and
+ * is correct because it satisfies (1) and (2) above. It must keep doing so
+ * with a single allocation: it is called from inside the allocators.
  */
 static inline int
 zfs_vscprintf(const char *fmt, va_list ap)

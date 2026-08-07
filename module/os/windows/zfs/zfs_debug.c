@@ -198,9 +198,9 @@ void
 __dprintf(boolean_t dprint, const char *file, const char *func,
     int line, const char *fmt, ...)
 {
+	int size, i;
 	va_list adx;
-	char *buf, *body, *nl;
-	size_t alloc_len;
+	char *buf, *nl;
 	char *prefix = (dprint) ? "dprintf: " : "";
 	const char *newfile;
 
@@ -228,28 +228,46 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 	}
 
 	/*
-	 * Build the message with kmem_vasprintf()/kmem_asprintf() instead of
-	 * measuring the format up front and hand-computing offsets into one
-	 * buffer. The old code did the latter, which depended on a "measure
-	 * without writing" call returning the true, unbounded length -
-	 * something kernel mode cannot do here (see the comment on
-	 * kmem_vasprintf()) - and which also told both of its writes that buf
-	 * had one more byte than it really did.
+	 * This logger is reachable from inside the kmem/vmem allocators
+	 * themselves (spl-kmem.c and spl-vmem.c call dprintf() in many places,
+	 * including kmem_error()). It must therefore stay to a single bounded
+	 * allocation: no grow-and-retry, no helper that allocates more than
+	 * once. Do not "improve" this into kmem_vasprintf()/kmem_asprintf().
+	 *
+	 * zfs_vsnprintf()'s measuring path (size == 0) returns a length capped
+	 * by zfs_vscprintf()'s scratch buffer, so a longer message is simply
+	 * truncated below. That is safe because every write is bounded by the
+	 * real remaining capacity, and the free uses the same `size` as the
+	 * allocation - a capped measurement only ever costs message text.
 	 */
 	va_start(adx, fmt);
-	body = kmem_vasprintf(fmt, adx);
+	size = zfs_vsnprintf(NULL, 0, fmt, adx);
 	va_end(adx);
 
-	buf = kmem_asprintf("%s%s:%d:%s(): %s", prefix, newfile, line, func,
-	    body);
-	kmem_strfree(body);
+	size += snprintf(NULL, 0, "%s%s:%d:%s(): ", prefix, newfile, line,
+	    func);
+
+	size++;			/* terminating null */
+
+	buf = kmem_alloc(size, KM_SLEEP);
 
 	/*
-	 * Record the allocation size now: the newline strip below edits the
-	 * string in place, after which strlen() + 1 (what kmem_strfree() would
-	 * compute) is a byte short of what was actually allocated.
+	 * buf holds exactly `size` bytes, so both writes get the true
+	 * remaining capacity. The previous code passed size + 1 here and
+	 * size - i + 1 below, one byte more than existed in each case.
+	 *
+	 * i comes from strlen() rather than snprintf()'s return value: on
+	 * truncation _vsnprintf_s returns -1, and buf + (-1) would be a wild
+	 * pointer. After a truncating write the buffer is still
+	 * null-terminated, so strlen() is always the real prefix length and
+	 * always leaves size - i >= 1.
 	 */
-	alloc_len = strlen(buf) + 1;
+	va_start(adx, fmt);
+	(void) snprintf(buf, size, "%s%s:%d:%s(): ", prefix, newfile, line,
+	    func);
+	i = (int)strlen(buf);
+	(void) zfs_vsnprintf(buf + i, size - i, fmt, adx);
+	va_end(adx);
 
 	/*
 	 * Get rid of trailing newline for dprintf logs.
@@ -267,7 +285,7 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 	/* Also emit string to log/console */
 	printBuffer("%s\n", buf);
 
-	kmem_free(buf, alloc_len);
+	kmem_free(buf, size);
 }
 
 #else
