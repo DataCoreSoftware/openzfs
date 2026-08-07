@@ -355,8 +355,23 @@ size_t	kmem_max_cached = KMEM_BIG_MAXBUF;	/* maximum kmem_alloc cache */
 // can be 0 or KMF_LITE
 // or KMF_DEADBEEF | KMF_REDZONE | KMF_CONTENTS
 // with or without KMF_AUDIT
-// int kmem_flags = KMF_DEADBEEF | KMF_REDZONE | KMF_CONTENTS | KMF_AUDIT;
-int kmem_flags = KMF_LITE;
+/*
+ * DIAGNOSTIC BUILD ONLY - DO NOT SHIP. See the KMF_AUDIT warning above: audit
+ * records are never released, so this build leaks steadily and will eventually
+ * grind to a halt. It exists solely to identify the source of a wrong-size
+ * kmem_free() (a KMERR_BADCACHE panic freeing a kmem_alloc_384 buffer to
+ * kmem_alloc_256) that static review has failed to locate.
+ *
+ * With KMF_AUDIT set, kmem_panic_info.kmp_bufctl is populated and kmem_error()
+ * dumps the previous transaction's thread and call stack for the offending
+ * buffer, naming the culprit directly instead of guessing across ~80 candidate
+ * free sites.
+ *
+ * Revert this hunk (restore "int kmem_flags = KMF_LITE;") before the fix branch
+ * is merged anywhere.
+ */
+int kmem_flags = KMF_DEADBEEF | KMF_REDZONE | KMF_CONTENTS | KMF_AUDIT;
+// int kmem_flags = KMF_LITE;
 #else
 int kmem_flags = 0;
 #endif
