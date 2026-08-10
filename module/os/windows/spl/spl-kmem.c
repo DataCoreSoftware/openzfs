@@ -351,30 +351,38 @@ size_t	kmem_max_cached = KMEM_BIG_MAXBUF;	/* maximum kmem_alloc cache */
  * grind to a halt. But it is useful to enable if you can trigger a memory
  * fault, and wish to see the calling stack.
  */
-#ifdef DEBUG
-// can be 0 or KMF_LITE
-// or KMF_DEADBEEF | KMF_REDZONE | KMF_CONTENTS
-// with or without KMF_AUDIT
 /*
- * DIAGNOSTIC BUILD ONLY - DO NOT SHIP. See the KMF_AUDIT warning above: audit
- * records are never released, so this build leaks steadily and will eventually
- * grind to a halt. It exists solely to identify the source of a wrong-size
- * kmem_free() (a KMERR_BADCACHE panic freeing a kmem_alloc_384 buffer to
- * kmem_alloc_256) that static review has failed to locate.
+ * DIAGNOSTIC BUILD ONLY - DO NOT SHIP. Revert this whole hunk (restore the
+ * "#ifdef DEBUG / KMF_LITE / #else / 0 / #endif" block) before merging.
  *
- * With KMF_AUDIT set, kmem_panic_info.kmp_bufctl is populated and kmem_error()
- * dumps the previous transaction's thread and call stack for the offending
- * buffer, naming the culprit directly instead of guessing across ~80 candidate
- * free sites.
+ * Deliberately NOT wrapped in #ifdef DEBUG. The ZFSin kernel target is never
+ * compiled with DEBUG defined - its defines are -DDBG -DDBG=1 -DZFS_DEBUG,
+ * while the -DDEBUG in this tree belongs to the user-mode libzpool target
+ * (lib/libzpool/CMakeLists.txt). So the original "#ifdef DEBUG" selected
+ * "kmem_flags = 0" in every driver configuration, Debug and Release alike,
+ * which makes this entire kmem debug facility unreachable dead code in the
+ * driver as shipped. Confirmed empirically from a crash dump: kmem_alloc_384
+ * had cache_flags == 0 and kmem_transaction_log was NULL even on a build that
+ * contained the previous version of this change.
  *
- * Revert this hunk (restore "int kmem_flags = KMF_LITE;") before the fix branch
- * is merged anywhere.
+ * Purpose: identify the source of a wrong-size kmem_free() - a KMERR_BADCACHE
+ * panic freeing a kmem_alloc_384 buffer to kmem_alloc_256 - that static review
+ * has repeatedly failed to locate.
+ *
+ * KMF_AUDIT is what makes the history available: it causes kmem_cache_create()
+ * to also set KMF_HASH (see the chunksize/KMF_AUDIT branch near the bottom of
+ * kmem_cache_create), and kmem_error()'s bufctl lookup is gated on KMF_HASH -
+ * which is why kmem_panic_info.kmp_bufctl was NULL before. With this active,
+ * kmp_bufctl is populated and carries the offending buffer's previous
+ * transaction thread and call stack, and kmem_transaction_log is allocated.
+ *
+ * Cost, per the KMF_AUDIT warning above: audit records are never released, so
+ * this build leaks steadily and will eventually grind to a halt. Enabling
+ * buftags/audit also changes allocator layout and may disable magazines, so
+ * timing differs from a production build - treat a non-reproduction here as
+ * inconclusive rather than as a fix.
  */
 int kmem_flags = KMF_DEADBEEF | KMF_REDZONE | KMF_CONTENTS | KMF_AUDIT;
-// int kmem_flags = KMF_LITE;
-#else
-int kmem_flags = 0;
-#endif
 int kmem_ready;
 
 static kmem_cache_t	*kmem_slab_cache;
