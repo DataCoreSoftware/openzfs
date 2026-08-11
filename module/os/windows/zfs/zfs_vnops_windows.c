@@ -2281,7 +2281,7 @@ BufferUserBuffer(IN OUT PIRP Irp, IN ULONG BufferLength)
 	if (Irp->AssociatedIrp.SystemBuffer == NULL) {
 		UserBuffer = MapUserBuffer(Irp);
 		Irp->AssociatedIrp.SystemBuffer =
-		    FsRtlAllocatePoolWithQuotaTag(NonPagedPoolNx,
+		    ExAllocatePoolZero(NonPagedPoolNx,
 		    BufferLength,
 		    'qtaf');
 		//
