@@ -325,14 +325,12 @@ SendVolumeArrivalNotification(PUNICODE_STRING DeviceName)
 	dprintf("=> SendVolumeArrivalNotification: '%wZ'\n", DeviceName);
 
 	length = sizeof (MOUNTMGR_TARGET_NAME) + DeviceName->Length - 1;
-	targetName = ExAllocatePool(PagedPool, length);
+	targetName = ExAllocatePoolZero(PagedPool, length, 'ZVAN');
 
 	if (targetName == NULL) {
 		dprintf("  can't allocate MOUNTMGR_TARGET_NAME\n");
 		return (STATUS_INSUFFICIENT_RESOURCES);
 	}
-
-	RtlZeroMemory(targetName, length);
 
 	targetName->DeviceNameLength = DeviceName->Length;
 	RtlCopyMemory(targetName->DeviceName, DeviceName->Buffer,
@@ -448,14 +446,12 @@ SendVolumeCreatePoint(__in PUNICODE_STRING DeviceName,
 
 	length = sizeof (MOUNTMGR_CREATE_POINT_INPUT) + MountPoint->Length +
 	    DeviceName->Length;
-	point = ExAllocatePool(PagedPool, length);
+	point = ExAllocatePoolZero(PagedPool, length, 'ZVCP');
 
 	if (point == NULL) {
 		dprintf("  can't allocate MOUNTMGR_CREATE_POINT_INPUT\n");
 		return (STATUS_INSUFFICIENT_RESOURCES);
 	}
-
-	RtlZeroMemory(point, length);
 
 	dprintf("  DeviceName: %wZ\n", DeviceName);
 	point->DeviceNameOffset = sizeof (MOUNTMGR_CREATE_POINT_INPUT);

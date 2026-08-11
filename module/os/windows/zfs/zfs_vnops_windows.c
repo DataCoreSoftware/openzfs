@@ -5319,8 +5319,8 @@ _Function_class_(DRIVER_DISPATCH)
 			    TargetDeviceRelation) {
 				PDEVICE_RELATIONS DeviceRelations;
 				DeviceRelations =
-				    (PDEVICE_RELATIONS)ExAllocatePool(PagedPool,
-				    sizeof (DEVICE_RELATIONS));
+				    (PDEVICE_RELATIONS)ExAllocatePoolUninitialized(PagedPool,
+				    sizeof (DEVICE_RELATIONS), '!DRZ');
 				if (!DeviceRelations) {
 					TraceEvent(TRACE_NOISY, "enomem DeviceRelations\n");
 					Status = STATUS_INSUFFICIENT_RESOURCES;
