@@ -81,7 +81,7 @@ procfs_list_addr(kstat_t *ksp, loff_t n)
 		ksp->ks_private1 = list_next(&pl->pl_list, elt);
 
 	if (ksp->ks_private1) {
-		p = ExAllocatePoolWithTag(NonPagedPoolNx, sizeof (*p), '!SFZ');
+		p = ExAllocatePoolUninitialized(NonPagedPoolNx, sizeof (*p), '!SFZ');
 		p->pli_pl = pl;
 		p->pli_elt = ksp->ks_private1;
 	}

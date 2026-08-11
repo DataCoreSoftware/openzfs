@@ -155,7 +155,7 @@ struct sbuf {
 /* sbuf_new() and family does exist in XNU, but Apple wont let us call them */
 #define	M_SBUF	105 /* string buffers */
 #define	SBMALLOC(size)  \
-	(struct sbuf *)ExAllocatePoolWithTag(NonPagedPoolNx, (size), '!SFZ')
+	(struct sbuf *)ExAllocatePoolUninitialized(NonPagedPoolNx, (size), '!SFZ')
 #define	SBFREE(buf)	ExFreePoolWithTag((buf), '!SFZ')
 
 #define	SBUF_SETFLAG(s, f)	do { (s)->s_flags |= (f); } while (0)

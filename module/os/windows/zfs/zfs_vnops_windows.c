@@ -419,7 +419,7 @@ zfs_find_dvp_vp(zfsvfs_t *zfsvfs, char *filename, int finalpartmaynotexist,
  * - maharmstone
  */
 				REPARSE_DATA_BUFFER *rpb;
-				rpb = ExAllocatePoolWithTag(PagedPool,
+				rpb = ExAllocatePoolZero(PagedPool,
 				    zp->z_size, '!FSZ');
 				zfs_uio_t uio;
 				struct iovec iov = { rpb, zp->z_size };
@@ -1763,7 +1763,7 @@ pnp_query_id(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
 	zmo = (mount_t *)DeviceObject->DeviceExtension;
 
-	Irp->IoStatus.Information = (void *)ExAllocatePoolWithTag(PagedPool,
+	Irp->IoStatus.Information = (void *)ExAllocatePoolZero(PagedPool,
 	    zmo->bus_name.Length + sizeof (UNICODE_NULL), '!OIZ');
 	if (Irp->IoStatus.Information == NULL)
 		return (STATUS_NO_MEMORY);

@@ -156,7 +156,7 @@ wzvol_assign_targetid(zvol_state_t *zv)
 {
 	wzvolContext* zv_targets = STOR_wzvolDriverInfo.zvContextArray;
 	ASSERT(zv->zv_zso->zso_target_context == NULL);
-	PIO_REMOVE_LOCK pIoRemLock = ExAllocatePoolWithTag(NonPagedPoolNx,
+	PIO_REMOVE_LOCK pIoRemLock = ExAllocatePoolUninitialized(NonPagedPoolNx,
 	    sizeof (*pIoRemLock), MP_TAG_GENERAL);
 
 	if (!pIoRemLock) {
@@ -397,15 +397,13 @@ ScsiGetMPIOExt(
 	}
 
 	if (pNextEntry == &pHBAExt->pwzvolDrvObj->ListMPIOExt) {
-		pLUMPIOExt = ExAllocatePoolWithTag(NonPagedPoolNx,
+		pLUMPIOExt = ExAllocatePoolZero(NonPagedPoolNx,
 		    sizeof (HW_LU_EXTENSION_MPIO), MP_TAG_GENERAL);
 
 		if (!pLUMPIOExt) {
 			dprintf("Failed to allocate HW_LU_EXTENSION_MPIO\n");
 			goto Done;
 		}
-
-		RtlZeroMemory(pLUMPIOExt, sizeof (HW_LU_EXTENSION_MPIO));
 
 		pLUMPIOExt->ScsiAddr.PathId = pSrb->PathId;
 		pLUMPIOExt->ScsiAddr.TargetId = pSrb->TargetId;
@@ -1088,7 +1086,7 @@ DiReadWriteSetup(zvol_state_t *zv, MpWkRtnAction action, zfsiodesc_t *pIo)
 {
 	// cannot use kmem_alloc with sleep if IRQL dispatch so get straight
 	// from NP pool.
-	pMP_WorkRtnParms pWkRtnParms = (pMP_WorkRtnParms)ExAllocatePoolWithTag(
+	pMP_WorkRtnParms pWkRtnParms = (pMP_WorkRtnParms)ExAllocatePoolZero(
 	    NonPagedPoolNx, ALIGN_UP_BY(sizeof (MP_WorkRtnParms), 16) +
 	    IoSizeofWorkItem(), MP_TAG_GENERAL);
 	if (NULL == pWkRtnParms) {
