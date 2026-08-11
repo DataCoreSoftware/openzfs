@@ -606,7 +606,7 @@ init_prov_mechs(crypto_provider_info_t *info, kcf_provider_desc_t *desc)
 			rand_mi = &desc->pd_mechanisms[mcount - 1];
 
 			bzero(rand_mi, sizeof (crypto_mech_info_t));
-			(void) strncpy(rand_mi->cm_mech_name, SUN_RANDOM,
+			(void) spl_strlcpy(rand_mi->cm_mech_name, SUN_RANDOM,
 			    CRYPTO_MAX_MECH_NAME);
 			rand_mi->cm_func_group_mask = CRYPTO_FG_RANDOM;
 		} else {

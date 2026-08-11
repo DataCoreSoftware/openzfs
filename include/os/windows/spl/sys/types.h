@@ -132,6 +132,30 @@ spl_snprintf(char *buf, size_t size, const char *fmt, ...)
 	__VA_ARGS__))
 #define	vsnprintf _vsnprintf
 
+/*
+ * Kernel-mode strncpy() does not NUL-terminate if strlen(src) >= n,
+ * and zero-fills the whole remainder of the buffer if strlen(src) < n
+ * - neither behavior is depended on by any of this codebase's callers.
+ * strlcpy() is the semantically-closest safe replacement (always
+ * terminates, never overflows) but has no kernel-linkable
+ * implementation here, so provide one - mirrors lib/libspl/strlcpy.c's
+ * existing user-mode algorithm exactly. Callers pass n == the size of
+ * the destination buffer (or the intended-substring-length + 1),
+ * unlike strncpy's n == copy-length - not a drop-in same-args swap.
+ */
+static __inline size_t
+spl_strlcpy(char *dst, const char *src, size_t dstsize)
+{
+	size_t srclen = strlen(src);
+	size_t copied = (srclen < dstsize) ? srclen : dstsize - 1;
+
+	if (dstsize != 0) {
+		memcpy(dst, src, copied);
+		dst[copied] = '\0';
+	}
+	return (srclen);
+}
+
 #ifndef ULLONG_MAX
 #define	ULLONG_MAX			(~0ULL)
 #endif

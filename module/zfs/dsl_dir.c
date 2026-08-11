@@ -441,8 +441,7 @@ getcomponent(const char *path, char *component, const char **nextp)
 		if (p - path >= ZFS_MAX_DATASET_NAME_LEN)
 			return (SET_ERROR(ENAMETOOLONG));
 
-		(void) strncpy(component, path, p - path);
-		component[p - path] = '\0';
+		(void) spl_strlcpy(component, path, (p - path) + 1);
 		p++;
 	} else if (p[0] == '@') {
 		/*
@@ -455,8 +454,7 @@ getcomponent(const char *path, char *component, const char **nextp)
 		if (p - path >= ZFS_MAX_DATASET_NAME_LEN)
 			return (SET_ERROR(ENAMETOOLONG));
 
-		(void) strncpy(component, path, p - path);
-		component[p - path] = '\0';
+		(void) spl_strlcpy(component, path, (p - path) + 1);
 	} else {
 		panic("invalid p=%p", (void *)p);
 	}

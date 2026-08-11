@@ -785,7 +785,7 @@ void
 kstat_set_string(char *dst, const char *src)
 {
 	bzero(dst, KSTAT_STRLEN);
-	(void) strncpy(dst, src, KSTAT_STRLEN - 1);
+	(void) spl_strlcpy(dst, src, KSTAT_STRLEN);
 }
 
 void
