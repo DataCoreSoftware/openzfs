@@ -6621,13 +6621,13 @@ kmem_asprintf(const char *fmt, ...)
 	char *buf;
 
 	va_start(adx, fmt);
-	size = spl_spl_vsnprintf(NULL, 0, fmt, adx) + 1;
+	size = spl_vsnprintf(NULL, 0, fmt, adx) + 1;
 	va_end(adx);
 
 	buf = kmem_alloc(size, KM_SLEEP);
 
 	va_start(adx, fmt);
-	(void) spl_spl_vsnprintf(buf, size, fmt, adx);
+	(void) spl_vsnprintf(buf, size, fmt, adx);
 	va_end(adx);
 
 	return (buf);
