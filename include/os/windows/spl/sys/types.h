@@ -94,9 +94,40 @@ typedef uintptr_t pc_t;
 #include <ntstrsafe.h>
 #include <stdlib.h>
 #include <ntddk.h>
+#include <stdarg.h>
 
+/*
+ * Kernel-mode _snprintf() returns -1 on truncation (not the would-be
+ * length) and does not NUL-terminate the buffer on truncation, unlike
+ * standard snprintf(). Portable ZFS/SPL code assumes real snprintf()
+ * semantics, so give it those semantics here rather than the raw
+ * deprecated function. No _vscprintf in ntoskrnl.lib - measure via
+ * _vsnprintf(NULL, 0, ...), which returns the true length for count==0
+ * (same idiom kmem_asprintf() already relies on).
+ */
+static __inline int
+spl_vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
+{
+	va_list args_copy = args; /* x64 MSVC va_list is a plain pointer */
+	int needed = _vsnprintf(NULL, 0, fmt, args_copy);
+	if (size > 0 && buf != NULL)
+		_vsnprintf_s(buf, size, _TRUNCATE, fmt, args);
+	return (needed);
+}
 
-#define	snprintf _snprintf
+static __inline int
+spl_snprintf(char *buf, size_t size, const char *fmt, ...)
+{
+	va_list args;
+	int ret;
+
+	va_start(args, fmt);
+	ret = spl_vsnprintf(buf, size, fmt, args);
+	va_end(args);
+	return (ret);
+}
+
+#define	snprintf spl_snprintf
 #define	vprintf(...) vKdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, \
 	__VA_ARGS__))
 #define	vsnprintf _vsnprintf
