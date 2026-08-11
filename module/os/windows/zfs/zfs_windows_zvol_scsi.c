@@ -513,7 +513,8 @@ ScsiOpInquiry(
 		    pHBAExt->ProductRevision, 4);
 		memset((PCHAR)pInqData->VendorSpecific, ' ',
 		    sizeof (pInqData->VendorSpecific));
-		sprintf(pInqData->VendorSpecific, "%.04d-%.04d-%.04d",
+		spl_snprintf(pInqData->VendorSpecific,
+		    sizeof (pInqData->VendorSpecific), "%.04d-%.04d-%.04d",
 		    pSrb->PathId, pSrb->TargetId, pSrb->Lun);
 		pInqData->VendorSpecific[strlen(pInqData->VendorSpecific)] =
 		    ' ';

@@ -234,7 +234,7 @@ gzdopen(
 
 	if (fd < 0)
 		return ((gzFile)Z_NULL);
-	sprintf(name, "<fd:%d>", fd); /* for debugging */
+	spl_snprintf(name, sizeof (name), "<fd:%d>", fd); /* for debugging */
 
 	return (gz_open(name, mode, fd));
 }

@@ -1034,7 +1034,8 @@ kstat_create_zone(const char *ks_module, int ks_instance, const char *ks_name,
 	if (ks_name == NULL) {
 		char buf[KSTAT_STRLEN];
 		kstat_set_string(buf, ks_module);
-		(void) sprintf(namebuf, "%s%d", buf, ks_instance);
+		(void) spl_snprintf(namebuf, sizeof (namebuf), "%s%d", buf,
+		    ks_instance);
 		ks_name = namebuf;
 	}
 
