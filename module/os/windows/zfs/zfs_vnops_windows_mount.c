@@ -1008,7 +1008,7 @@ generateVolumeNameMountpoint(wchar_t *vol_mpt)
 	wchar_t wc_guid[50];
 	generateGUID(&GUID);
 	mbstowcs(&wc_guid, GUID, 50);
-	int len = _snwprintf(vol_mpt, 50, L"\\??\\Volume{%s}", wc_guid);
+	(void) RtlStringCchPrintfW(vol_mpt, 50, L"\\??\\Volume{%s}", wc_guid);
 }
 
 int
