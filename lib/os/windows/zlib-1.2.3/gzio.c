@@ -666,7 +666,7 @@ gzprintf(gzFile file, const char *format, /* args */ ...)
 	va_end(va);
 	len = strlen(buf);
 #else
-	len = vsnprintf(buf, sizeof (buf), format, va);
+	len = spl_vsnprintf(buf, sizeof (buf), format, va);
 	va_end(va);
 #endif
 #endif

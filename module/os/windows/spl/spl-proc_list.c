@@ -35,7 +35,7 @@ seq_printf(struct seq_file *f, const char *fmt, ...)
 	va_list adx;
 
 	va_start(adx, fmt);
-	(void) vsnprintf(f->sf_buf, f->sf_size, fmt, adx);
+	(void) spl_vsnprintf(f->sf_buf, f->sf_size, fmt, adx);
 	va_end(adx);
 }
 

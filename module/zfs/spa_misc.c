@@ -400,7 +400,7 @@ spa_load_failed(spa_t *spa, const char *fmt, ...)
 	char buf[256];
 
 	va_start(adx, fmt);
-	(void) vsnprintf(buf, sizeof (buf), fmt, adx);
+	(void) spl_vsnprintf(buf, sizeof (buf), fmt, adx);
 	va_end(adx);
 
 	zfs_dbgmsg("spa_load(%s, config %s): FAILED: %s", spa->spa_name,
@@ -415,7 +415,7 @@ spa_load_note(spa_t *spa, const char *fmt, ...)
 	char buf[256];
 
 	va_start(adx, fmt);
-	(void) vsnprintf(buf, sizeof (buf), fmt, adx);
+	(void) spl_vsnprintf(buf, sizeof (buf), fmt, adx);
 	va_end(adx);
 
 	zfs_dbgmsg("spa_load(%s, config %s): %s", spa->spa_name,

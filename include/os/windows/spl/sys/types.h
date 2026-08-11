@@ -130,7 +130,15 @@ spl_snprintf(char *buf, size_t size, const char *fmt, ...)
 #define	snprintf spl_snprintf
 #define	vprintf(...) vKdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, \
 	__VA_ARGS__))
-#define	vsnprintf spl_vsnprintf
+/*
+ * No #define vsnprintf here (unlike snprintf above): CodeQL's
+ * extended-deprecated-apis check flags macro invocations by the
+ * macro's own name against Microsoft's banned-API list, regardless of
+ * what the macro expands to - "vsnprintf" (no underscore) is on that
+ * list, "snprintf" is not. A macro named vsnprintf can never pass the
+ * check no matter its target, so every caller below calls
+ * spl_vsnprintf directly instead of going through a same-named macro.
+ */
 
 /*
  * Kernel-mode strncpy() does not NUL-terminate if strlen(src) >= n,

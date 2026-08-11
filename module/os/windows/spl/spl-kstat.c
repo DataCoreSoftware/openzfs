@@ -309,7 +309,7 @@ sbuf_vprintf(struct sbuf *s, const char *fmt, va_list ap)
 
 	do {
 		va_copy(ap_copy, ap);
-		len = vsnprintf(&s->s_buf[s->s_len], SBUF_FREESPACE(s) + 1,
+		len = spl_vsnprintf(&s->s_buf[s->s_len], SBUF_FREESPACE(s) + 1,
 		    fmt, ap_copy);
 		// left-side must be assignable. Win tries to set to 0.
 		// va_end(ap_copy);

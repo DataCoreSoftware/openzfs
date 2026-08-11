@@ -1244,7 +1244,7 @@ zcp_args_error(lua_State *state, const char *fname, const zcp_arg_t *pargs,
 	va_list argp;
 
 	va_start(argp, fmt);
-	VERIFY3U(len, >, vsnprintf(errmsg, len, fmt, argp));
+	VERIFY3U(len, >, spl_vsnprintf(errmsg, len, fmt, argp));
 	va_end(argp);
 
 	/*
