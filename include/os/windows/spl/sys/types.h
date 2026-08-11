@@ -130,7 +130,7 @@ spl_snprintf(char *buf, size_t size, const char *fmt, ...)
 #define	snprintf spl_snprintf
 #define	vprintf(...) vKdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, \
 	__VA_ARGS__))
-#define	vsnprintf _vsnprintf
+#define	vsnprintf spl_vsnprintf
 
 /*
  * Kernel-mode strncpy() does not NUL-terminate if strlen(src) >= n,
