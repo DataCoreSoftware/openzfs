@@ -244,9 +244,9 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 	int roger = 0;
 
 	va_start(adx, fmt);
-	i = snprintf(buf, size + 1, "%s%s:%d:%s(): ",
+	i = snprintf(buf, size, "%s%s:%d:%s(): ",
 	    prefix, newfile, line, func);
-	roger = spl_vsnprintf(buf + i, size -i + 1, fmt, adx);
+	roger = spl_vsnprintf(buf + i, size - i, fmt, adx);
 	va_end(adx);
 
 	/*
