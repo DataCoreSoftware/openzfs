@@ -297,7 +297,9 @@ stream_parse(char *filename, char **streamname)
 		*colon = 0; // Cut off streamname from filename
 
 		// We now ADD ":$DATA" to the stream name.
-		strcat(*streamname, ":$DATA");
+		size_t remaining = PATH_MAX - (*streamname - filename);
+		if (spl_strlcat(*streamname, ":$DATA", remaining) >= remaining)
+			return (SET_ERROR(ENAMETOOLONG));
 
 		return (0);
 	}

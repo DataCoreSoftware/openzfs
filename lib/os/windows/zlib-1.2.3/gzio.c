@@ -1095,8 +1095,8 @@ gzerror(
 	if (s->msg == Z_NULL)
 		return ((const char *)ERR_MSG(Z_MEM_ERROR));
 	strcpy(s->msg, s->path);
-	strcat(s->msg, ": ");
-	strcat(s->msg, m);
+	spl_strlcat(s->msg, ": ", strlen(s->path) + strlen(m) + 3);
+	spl_strlcat(s->msg, m, strlen(s->path) + strlen(m) + 3);
 	return ((const char *)s->msg);
 }
 

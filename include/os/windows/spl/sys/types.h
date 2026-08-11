@@ -156,6 +156,32 @@ spl_strlcpy(char *dst, const char *src, size_t dstsize)
 	return (srclen);
 }
 
+/*
+ * strcat() has no size parameter at all - unbounded by construction.
+ * strlcat() is the closest safe replacement (always terminates, never
+ * overflows, return value is the total length it tried to create) but
+ * - same as strlcpy() - has no kernel-linkable implementation here.
+ * Mirrors lib/libspl/strlcat.c's existing user-mode algorithm exactly.
+ */
+static __inline size_t
+spl_strlcat(char *dst, const char *src, size_t dstsize)
+{
+	char *df = dst;
+	size_t left = dstsize;
+	size_t l1, l2 = strlen(src), copied;
+
+	while (left-- != 0 && *df != '\0')
+		df++;
+	l1 = df - dst;
+	if (dstsize == l1)
+		return (l1 + l2);
+
+	copied = (l1 + l2 >= dstsize) ? dstsize - l1 - 1 : l2;
+	memcpy(dst + l1, src, copied);
+	dst[l1 + copied] = '\0';
+	return (l1 + l2);
+}
+
 #ifndef ULLONG_MAX
 #define	ULLONG_MAX			(~0ULL)
 #endif
