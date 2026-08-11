@@ -261,7 +261,7 @@ zcp_table_to_nvlist(lua_State *state, int index, int depth)
 			/* check if this could collide with a number or bool */
 			long long tmp;
 			int parselen;
-			if ((sscanf(key, "%lld%n", &tmp, &parselen) > 0 &&
+			if ((sscanf_s(key, "%lld%n", &tmp, &parselen) > 0 &&
 			    parselen == strlen(key)) ||
 			    strcmp(key, "true") == 0 ||
 			    strcmp(key, "false") == 0) {
