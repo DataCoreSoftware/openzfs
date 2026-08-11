@@ -105,12 +105,17 @@ zvol_start(PDRIVER_OBJECT  DriverObject, PUNICODE_STRING pRegistryPath)
 	// array. now we can go up to 32,640 zvols.
 	pwzvolDrvInfo->NumberOfBuses = 1;
 	pwzvolDrvInfo->zvContextArray =
-	    (wzvolContext*)ExAllocatePoolZero(NonPagedPoolNx,
+	    (wzvolContext*)ExAllocatePoolUninitialized(NonPagedPoolNx,
 	    ((SIZE_T)pwzvolDrvInfo->MaximumNumberOfTargets *
 	    pwzvolDrvInfo->MaximumNumberOfLogicalUnits *
 	    sizeof (wzvolContext)), MP_TAG_GENERAL);
 	if (pwzvolDrvInfo->zvContextArray == NULL)
 		return (STATUS_NO_MEMORY);
+
+	RtlZeroMemory(pwzvolDrvInfo->zvContextArray,
+	    ((SIZE_T)pwzvolDrvInfo->MaximumNumberOfTargets *
+	    pwzvolDrvInfo->MaximumNumberOfLogicalUnits *
+	    (sizeof (wzvolContext))));
 
 	RtlZeroMemory(&hwInitData, sizeof (VIRTUAL_HW_INITIALIZATION_DATA));
 
@@ -340,9 +345,11 @@ wzvol_HwReportAdapter(__in pHW_HBA_EXT pHBAExt)
 	    WnodeSizeInstanceName +
 	    WnodeSizeDataBlock;
 
-	pWnode = ExAllocatePoolZero(NonPagedPoolNx, size, MP_TAG_GENERAL);
+	pWnode = ExAllocatePoolUninitialized(NonPagedPoolNx, size, MP_TAG_GENERAL);
 
 	if (NULL != pWnode) {
+		RtlZeroMemory(pWnode, size);
+
 		// Fill out most of header. StorPort will set the
 		// ProviderId and TimeStamp in the header.
 
@@ -438,9 +445,11 @@ wzvol_HwReportLink(__in pHW_HBA_EXT pHBAExt)
 	    WnodeSizeInstanceName +
 	    WnodeSizeDataBlock;
 
-	pWnode = ExAllocatePoolZero(NonPagedPoolNx, size, MP_TAG_GENERAL);
+	pWnode = ExAllocatePoolUninitialized(NonPagedPoolNx, size, MP_TAG_GENERAL);
 
 	if (NULL != pWnode) {
+		RtlZeroMemory(pWnode, size);
+
 		// Fill out most of header. StorPort will set the
 		// ProviderId and TimeStamp in the header.
 
@@ -526,9 +535,11 @@ wzvol_HwReportLog(__in pHW_HBA_EXT pHBAExt)
 	    WnodeSizeInstanceName +
 	    WnodeSizeDataBlock;
 
-	pWnode = ExAllocatePoolZero(NonPagedPoolNx, size, MP_TAG_GENERAL);
+	pWnode = ExAllocatePoolUninitialized(NonPagedPoolNx, size, MP_TAG_GENERAL);
 
 	if (NULL != pWnode) {
+		RtlZeroMemory(pWnode, size);
+
 		// Fill out most of header. StorPort will set the
 		// ProviderId and TimeStamp in the header.
 

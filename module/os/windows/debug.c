@@ -51,8 +51,10 @@ static unsigned long long startOff = 0;
 int
 initDbgCircularBuffer(void)
 {
-	cbuf = ExAllocatePoolZero(NonPagedPoolNx, cbuf_size, '!GBD');
+	cbuf = ExAllocatePoolUninitialized(NonPagedPoolNx, cbuf_size, '!GBD');
 	ASSERT(cbuf);
+	if (cbuf != NULL)
+		RtlZeroMemory(cbuf, cbuf_size);
 	KeInitializeSpinLock(&cbuf_spin);
 	return (0);
 }
