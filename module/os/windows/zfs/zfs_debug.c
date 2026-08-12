@@ -138,7 +138,17 @@ zfs_dbgmsg_fini(void)
 		kstat_delete(zfs_dbgmsg_kstat);
 
 	while ((zdm = list_remove_head(&zfs_dbgmsgs)) != NULL) {
-		int size = sizeof (zfs_dbgmsg_t) + strlen(zdm->zdm_msg);
+		/*
+		 * Free with the size that was recorded at allocation, not one
+		 * recomputed from the message. __zfs_dbgmsg() stores it in
+		 * zdm_size for exactly this reason and zfs_dbgmsg_purge()
+		 * already uses it. Recomputing re-derives the length from
+		 * zdm_msg, so any truncation or later edit of the message
+		 * yields a smaller size than was allocated and hands
+		 * kmem_free() the wrong size - which returns the buffer to the
+		 * wrong kmem cache and silently corrupts the allocator.
+		 */
+		int size = zdm->zdm_size;
 		kmem_free(zdm, size);
 		zfs_dbgmsg_size -= size;
 	}
@@ -184,7 +194,17 @@ __zfs_dbgmsg(char *buf)
 	zfs_dbgmsg_t *zdm = kmem_zalloc(size, KM_SLEEP);
 	zdm->zdm_size = size;
 	zdm->zdm_timestamp = gethrestime_sec();
-	strlcpy(zdm->zdm_msg, buf, size);
+
+	/*
+	 * The bound is the space at zdm_msg, not the size of the whole
+	 * allocation: zdm_msg starts at offsetof(zfs_dbgmsg_t, zdm_msg), so
+	 * only size - that many bytes exist there. Passing `size` claimed 28
+	 * bytes more than the buffer has. It does not overrun today only
+	 * because strlcpy() stops at the source length, which is 3 bytes
+	 * inside the real capacity - a margin no caller states or enforces.
+	 */
+	strlcpy(zdm->zdm_msg, buf,
+	    size - offsetof(zfs_dbgmsg_t, zdm_msg));
 
 	mutex_enter(&zfs_dbgmsgs_lock);
 	list_insert_tail(&zfs_dbgmsgs, zdm);
