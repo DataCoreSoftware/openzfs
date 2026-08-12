@@ -421,10 +421,8 @@ zfs_find_dvp_vp(zfsvfs_t *zfsvfs, char *filename, int finalpartmaynotexist,
  * - maharmstone
  */
 				REPARSE_DATA_BUFFER *rpb;
-				rpb = ExAllocatePoolUninitialized(PagedPool,
+				rpb = spl_ExAllocatePoolZero(PagedPool,
 				    zp->z_size, '!FSZ');
-				if (rpb != NULL)
-					RtlZeroMemory(rpb, zp->z_size);
 				zfs_uio_t uio;
 				struct iovec iov = { rpb, zp->z_size };
 				zfs_uio_iovec_init(&uio, &iov, 1, 0,
@@ -1767,13 +1765,10 @@ pnp_query_id(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
 	zmo = (mount_t *)DeviceObject->DeviceExtension;
 
-	Irp->IoStatus.Information = (void *)ExAllocatePoolUninitialized(PagedPool,
+	Irp->IoStatus.Information = (void *)spl_ExAllocatePoolZero(PagedPool,
 	    zmo->bus_name.Length + sizeof (UNICODE_NULL), '!OIZ');
 	if (Irp->IoStatus.Information == NULL)
 		return (STATUS_NO_MEMORY);
-
-	RtlZeroMemory(Irp->IoStatus.Information,
-	    zmo->bus_name.Length + sizeof (UNICODE_NULL));
 
 	RtlCopyMemory(Irp->IoStatus.Information, zmo->bus_name.Buffer,
 	    zmo->bus_name.Length);
@@ -2288,12 +2283,9 @@ BufferUserBuffer(IN OUT PIRP Irp, IN ULONG BufferLength)
 	if (Irp->AssociatedIrp.SystemBuffer == NULL) {
 		UserBuffer = MapUserBuffer(Irp);
 		Irp->AssociatedIrp.SystemBuffer =
-		    ExAllocatePoolUninitialized(NonPagedPoolNx,
+		    spl_ExAllocatePoolZero(NonPagedPoolNx,
 		    BufferLength,
 		    'qtaf');
-		if (Irp->AssociatedIrp.SystemBuffer != NULL)
-			RtlZeroMemory(Irp->AssociatedIrp.SystemBuffer,
-			    BufferLength);
 		//
 		// Set the flags so that the completion code knows to
 		// deallocate the buffer.

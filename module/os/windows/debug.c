@@ -28,6 +28,7 @@
 #define	_NO_CRT_STDIO_INLINE
 
 #include <sys/debug.h>
+#include <sys/kmem.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <Trace.h>
@@ -51,10 +52,8 @@ static unsigned long long startOff = 0;
 int
 initDbgCircularBuffer(void)
 {
-	cbuf = ExAllocatePoolUninitialized(NonPagedPoolNx, cbuf_size, '!GBD');
+	cbuf = spl_ExAllocatePoolZero(NonPagedPoolNx, cbuf_size, '!GBD');
 	ASSERT(cbuf);
-	if (cbuf != NULL)
-		RtlZeroMemory(cbuf, cbuf_size);
 	KeInitializeSpinLock(&cbuf_spin);
 	return (0);
 }
