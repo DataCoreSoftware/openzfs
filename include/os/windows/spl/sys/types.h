@@ -117,19 +117,36 @@ typedef uintptr_t pc_t;
  * caller in this tree only checks `if (n < 0)`), so this is purely additive.
  */
 /*
+ * WARNING: this returns a *capped* length, NOT the true required length.
+ *
  * "Measure the required length without writing" (the buf==NULL/size==0
- * idiom used by kmem_asprintf()/kmem_vasprintf()/zfs_dbgmsg()). Neither
- * _vscprintf (declared in the WDK headers but not exported by the
- * kernel-mode CRT import lib - confirmed via a link failure) nor
- * _vsnprintf_s (its count==0 case triggers the invalid-parameter handler)
- * can do this directly in kernel mode. Measure into a generously-sized
- * scratch buffer instead: every caller in this tree builds short, bounded
- * strings (dataset/snapshot names, log messages), so 1024 bytes is never
- * exceeded in practice. If a caller's format+args ever did exceed it, the
- * result here is a consistently-truncated (safely null-terminated) length
- * - the caller's later real write with the same format+args into a
- * same-size-or-larger buffer would truncate identically, not silently
- * disagree with what was measured.
+ * idiom) cannot be done natively in kernel mode here: _vscprintf is declared
+ * by the WDK but not exported by the kernel-mode CRT import lib (confirmed
+ * via a link failure), and _vsnprintf_s rejects count == 0. So this measures
+ * by formatting into a bounded scratch buffer, which means that for any
+ * format+args longer than the scratch buffer it reports sizeof(scratch) - 1
+ * instead of the real length.
+ *
+ * Sizing an allocation from this value is only safe when BOTH of the
+ * following hold, in which case a capped measurement costs nothing but
+ * truncated text:
+ *
+ *   1. every write into the buffer is bounded by the buffer's real size
+ *      (not by the measured length, and not by measured + 1), and
+ *   2. the eventual free passes the same size that was allocated.
+ *
+ * It is NOT safe for any caller that treats the measurement as exact.
+ * kmem_vasprintf() used to do that: it sized the buffer from the measured
+ * length, then treated the resulting short write as an error and, on that
+ * path, freed the buffer with the measured size (one less than allocated)
+ * and returned the freed pointer to its caller - a use-after-free plus
+ * double-free that corrupted the shared kmem/vmem freelists and crashed
+ * unrelated subsystems (nvlist and ABD teardown) much later. It now
+ * grows-and-retries a real write and never measures; see spl-kmem.c.
+ *
+ * __dprintf() in zfs_debug.c does size its allocation from this value, and
+ * is correct because it satisfies (1) and (2) above. It must keep doing so
+ * with a single allocation: it is called from inside the allocators.
  */
 static inline int
 zfs_vscprintf(const char *fmt, va_list ap)

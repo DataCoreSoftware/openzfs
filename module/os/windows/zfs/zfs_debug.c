@@ -138,7 +138,17 @@ zfs_dbgmsg_fini(void)
 		kstat_delete(zfs_dbgmsg_kstat);
 
 	while ((zdm = list_remove_head(&zfs_dbgmsgs)) != NULL) {
-		int size = sizeof (zfs_dbgmsg_t) + strlen(zdm->zdm_msg);
+		/*
+		 * Free with the size that was recorded at allocation, not one
+		 * recomputed from the message. __zfs_dbgmsg() stores it in
+		 * zdm_size for exactly this reason and zfs_dbgmsg_purge()
+		 * already uses it. Recomputing re-derives the length from
+		 * zdm_msg, so any truncation or later edit of the message
+		 * yields a smaller size than was allocated and hands
+		 * kmem_free() the wrong size - which returns the buffer to the
+		 * wrong kmem cache and silently corrupts the allocator.
+		 */
+		int size = zdm->zdm_size;
 		kmem_free(zdm, size);
 		zfs_dbgmsg_size -= size;
 	}
@@ -184,7 +194,17 @@ __zfs_dbgmsg(char *buf)
 	zfs_dbgmsg_t *zdm = kmem_zalloc(size, KM_SLEEP);
 	zdm->zdm_size = size;
 	zdm->zdm_timestamp = gethrestime_sec();
-	strlcpy(zdm->zdm_msg, buf, size);
+
+	/*
+	 * The bound is the space at zdm_msg, not the size of the whole
+	 * allocation: zdm_msg starts at offsetof(zfs_dbgmsg_t, zdm_msg), so
+	 * only size - that many bytes exist there. Passing `size` claimed 28
+	 * bytes more than the buffer has. It does not overrun today only
+	 * because strlcpy() stops at the source length, which is 3 bytes
+	 * inside the real capacity - a margin no caller states or enforces.
+	 */
+	strlcpy(zdm->zdm_msg, buf,
+	    size - offsetof(zfs_dbgmsg_t, zdm_msg));
 
 	mutex_enter(&zfs_dbgmsgs_lock);
 	list_insert_tail(&zfs_dbgmsgs, zdm);
@@ -227,6 +247,19 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 		newfile = file;
 	}
 
+	/*
+	 * This logger is reachable from inside the kmem/vmem allocators
+	 * themselves (spl-kmem.c and spl-vmem.c call dprintf() in many places,
+	 * including kmem_error()). It must therefore stay to a single bounded
+	 * allocation: no grow-and-retry, no helper that allocates more than
+	 * once. Do not "improve" this into kmem_vasprintf()/kmem_asprintf().
+	 *
+	 * zfs_vsnprintf()'s measuring path (size == 0) returns a length capped
+	 * by zfs_vscprintf()'s scratch buffer, so a longer message is simply
+	 * truncated below. That is safe because every write is bounded by the
+	 * real remaining capacity, and the free uses the same `size` as the
+	 * allocation - a capped measurement only ever costs message text.
+	 */
 	va_start(adx, fmt);
 	size = zfs_vsnprintf(NULL, 0, fmt, adx);
 	va_end(adx);
@@ -234,29 +267,26 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 	size += snprintf(NULL, 0, "%s%s:%d:%s(): ", prefix, newfile, line,
 	    func);
 
-	size++; /* null byte in the "buf" string */
+	size++;			/* terminating null */
 
-	/*
-	 * There is one byte of string in sizeof (zfs_dbgmsg_t), used
-	 * for the terminating null.
-	 */
 	buf = kmem_alloc(size, KM_SLEEP);
-	int roger = 0;
 
-	va_start(adx, fmt);
-	i = snprintf(buf, size + 1, "%s%s:%d:%s(): ",
-	    prefix, newfile, line, func);
 	/*
-	 * buf has exactly `size` bytes total; `i` bytes are already used by
-	 * the prefix, leaving `size - i` true remaining bytes at buf + i
-	 * (not size - i + 1 - that overstates the real remaining capacity
-	 * by one byte). This was harmless while zfs_vsnprintf's size==0
-	 * "measure" path could return an unbounded true length, but
-	 * zfs_vscprintf now caps that measurement at a 1023-character
-	 * scratch buffer, so a fmt+args needing >= 1024 characters would
-	 * make this call write one byte past the end of buf.
+	 * buf holds exactly `size` bytes, so both writes get the true
+	 * remaining capacity. The previous code passed size + 1 here and
+	 * size - i + 1 below, one byte more than existed in each case.
+	 *
+	 * i comes from strlen() rather than snprintf()'s return value: on
+	 * truncation _vsnprintf_s returns -1, and buf + (-1) would be a wild
+	 * pointer. After a truncating write the buffer is still
+	 * null-terminated, so strlen() is always the real prefix length and
+	 * always leaves size - i >= 1.
 	 */
-	roger = zfs_vsnprintf(buf + i, size - i, fmt, adx);
+	va_start(adx, fmt);
+	(void) snprintf(buf, size, "%s%s:%d:%s(): ", prefix, newfile, line,
+	    func);
+	i = (int)strlen(buf);
+	(void) zfs_vsnprintf(buf + i, size - i, fmt, adx);
 	va_end(adx);
 
 	/*
