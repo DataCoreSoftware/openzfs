@@ -237,6 +237,16 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 	size++; /* null byte in the "buf" string */
 
 	/*
+	 * size is negative only if both spl_vsnprintf() measuring calls
+	 * above independently failed (e.g. each needed more than the
+	 * ~1 MiB spl_vsnprintf() will grow to) - not realistic for a
+	 * single log line, but kmem_alloc() must never see a negative
+	 * size turn into a huge size_t.
+	 */
+	if (size <= 0)
+		return;
+
+	/*
 	 * There is one byte of string in sizeof (zfs_dbgmsg_t), used
 	 * for the terminating null.
 	 */

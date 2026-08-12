@@ -6613,6 +6613,118 @@ kmem_asdprintf(const char *fmt, ...)
 	return (ptr);
 }
 
+#define	SPL_VSNPRINTF_PROBE_MIN	256
+/*
+ * 1 MiB: roughly 256x the largest single formatted string anywhere
+ * in this tree today (PAGE_SIZE == 4096, in zfs_fletcher.c). No real
+ * caller is expected to ever reach this; it exists only to bound a
+ * pathological/malformed format string's retry loop.
+ */
+#define	SPL_VSNPRINTF_PROBE_MAX	(1024 * 1024)
+
+/*
+ * True-length-preserving, deprecated-API-free replacement for
+ * _vsnprintf(). See the comment above its prototype in sys/types.h
+ * for why this can't be ntstrsafe.h-based and why it lives here
+ * rather than as a header inline.
+ *
+ * Contract (do not change without auditing every caller of
+ * spl_vsnprintf()/spl_snprintf()/snprintf() in the tree - e.g.
+ * dmu_redact.c, zcp_iter.c, zfs_fletcher.c, kmem_asprintf(),
+ * kmem_vasprintf()):
+ *   - If the formatted string (plus NUL) fits in [buf, buf+size),
+ *     it is written in full and the exact number of characters
+ *     written (excluding the NUL) is returned.
+ *   - Otherwise (including buf==NULL/size==0), the return value is
+ *     still the exact number of characters the FULL, untruncated
+ *     result would have needed - real snprintf() semantics, not
+ *     _vsnprintf()'s -1 - even though buf itself may be left
+ *     truncated exactly as _vsnprintf_s(..., _TRUNCATE, ...) leaves
+ *     it (or untouched, if buf==NULL/size==0).
+ */
+int
+spl_vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
+{
+	va_list args_copy;
+	int ret;
+	size_t cap;
+	char stackbuf[SPL_VSNPRINTF_PROBE_MIN];
+
+	/*
+	 * Tier 1: try the caller's own buffer first. This covers every
+	 * call site that already passes a real, adequately sized
+	 * buffer (the common case) with zero extra allocation - IRQL-
+	 * safe (no allocation), cheaper than the old code, which always
+	 * paid for a wasted measuring call even when the real write
+	 * succeeded.
+	 */
+	if (buf != NULL && size > 0) {
+		args_copy = args; /* x64 MSVC va_list is a plain pointer */
+		ret = _vsnprintf_s(buf, size, _TRUNCATE, fmt, args_copy);
+		if (ret >= 0)
+			return (ret); /* fit: ret IS the true length */
+	}
+
+	/*
+	 * Tier 2: a small on-stack probe. Still IRQL-safe (no
+	 * allocation) - every real caller in this tree writes a buffer
+	 * under a few hundred bytes (the one known exception,
+	 * module/lua/lstrlib.c's Lua channel-program formatting, is
+	 * intentionally unbounded and falls through to Tier 3), so this
+	 * is what makes every measure-only caller (buf==NULL, e.g.
+	 * __dprintf's first call, kmem_asprintf(), kmem_vasprintf())
+	 * avoid the allocator entirely in the overwhelmingly common
+	 * case.
+	 */
+	args_copy = args;
+	ret = _vsnprintf_s(stackbuf, sizeof (stackbuf), _TRUNCATE, fmt,
+	    args_copy);
+	if (ret >= 0)
+		return (ret);
+
+	/*
+	 * Tier 3: only reached when even a 256-byte probe truncates.
+	 * This is the only tier that allocates, so it is the only tier
+	 * that can violate IRQL rules (KM_SLEEP can block) - guard it
+	 * explicitly here, at the one place that actually needs it,
+	 * rather than requiring every current and future caller
+	 * (vcmn_err included) to remember its own guard.
+	 *
+	 * This is a real, if rare, new return value. Every live caller
+	 * in the tree has been individually audited to confirm this is
+	 * safe: callers that discard the return value are unaffected
+	 * (their buffer is already correctly truncated by Tier 1/2's
+	 * _vsnprintf_s call); kmem_vasprintf() already anticipates and
+	 * handles a negative return from its measuring call;
+	 * kmem_asprintf() is hardened alongside this change specifically
+	 * because it previously was not safe against one.
+	 */
+	if (KeGetCurrentIrql() >= DISPATCH_LEVEL)
+		return (-1);
+
+	cap = SPL_VSNPRINTF_PROBE_MIN * 2;
+	if (size > cap)
+		cap = size;
+	if (cap >= SPL_VSNPRINTF_PROBE_MAX)
+		cap = SPL_VSNPRINTF_PROBE_MAX;
+
+	for (;;) {
+		/* KM_SLEEP: always succeeds, never returns NULL. */
+		char *tmp = kmem_alloc(cap, KM_SLEEP);
+		args_copy = args;
+		ret = _vsnprintf_s(tmp, cap, _TRUNCATE, fmt, args_copy);
+		kmem_free(tmp, cap);
+		if (ret >= 0)
+			return (ret);
+		if (cap >= SPL_VSNPRINTF_PROBE_MAX)
+			return (-1); /* honest failure, not a fabricated length */
+		if (cap > SPL_VSNPRINTF_PROBE_MAX / 2)
+			cap = SPL_VSNPRINTF_PROBE_MAX;
+		else
+			cap *= 2;
+	}
+}
+
 char *
 kmem_asprintf(const char *fmt, ...)
 {
@@ -6621,8 +6733,12 @@ kmem_asprintf(const char *fmt, ...)
 	char *buf;
 
 	va_start(adx, fmt);
-	size = spl_vsnprintf(NULL, 0, fmt, adx) + 1;
+	size = spl_vsnprintf(NULL, 0, fmt, adx);
 	va_end(adx);
+
+	if (size < 0)
+		return (NULL); /* honest failure, not KMEM_ZERO_SIZE_PTR */
+	size++;
 
 	buf = kmem_alloc(size, KM_SLEEP);
 

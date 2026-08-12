@@ -101,19 +101,24 @@ typedef uintptr_t pc_t;
  * length) and does not NUL-terminate the buffer on truncation, unlike
  * standard snprintf(). Portable ZFS/SPL code assumes real snprintf()
  * semantics, so give it those semantics here rather than the raw
- * deprecated function. No _vscprintf in ntoskrnl.lib - measure via
- * _vsnprintf(NULL, 0, ...), which returns the true length for count==0
- * (same idiom kmem_asprintf() already relies on).
+ * deprecated function.
+ *
+ * There is no _vscprintf() in ntoskrnl.lib, and ntstrsafe.h's
+ * String RtlStringCchPrintfEx family cannot measure a formatted
+ * string's length without a real, non-zero destination buffer (a
+ * cchDest of 0 short-circuits before formatting even happens) - so
+ * "how long would this be" can only be discovered by actually
+ * formatting into a real, possibly-grown, scratch buffer.
+ *
+ * spl_vsnprintf() is implemented out-of-line in
+ * module/os/windows/spl/spl-kmem.c, NOT as a static inline here,
+ * because that implementation needs kmem_alloc()/kmem_free() -
+ * sys/kmem.h itself #includes sys/types.h, so an inline definition
+ * here could never see kmem_alloc()'s declaration without an
+ * unsupportable circular include.
  */
-static __inline int
-spl_vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
-{
-	va_list args_copy = args; /* x64 MSVC va_list is a plain pointer */
-	int needed = _vsnprintf(NULL, 0, fmt, args_copy);
-	if (size > 0 && buf != NULL)
-		_vsnprintf_s(buf, size, _TRUNCATE, fmt, args);
-	return (needed);
-}
+extern int spl_vsnprintf(char *buf, size_t size, const char *fmt,
+    va_list args);
 
 static __inline int
 spl_snprintf(char *buf, size_t size, const char *fmt, ...)

@@ -313,6 +313,16 @@ sbuf_vprintf(struct sbuf *s, const char *fmt, va_list ap)
 		    fmt, ap_copy);
 		// left-side must be assignable. Win tries to set to 0.
 		// va_end(ap_copy);
+		/*
+		 * spl_vsnprintf() can return -1 on failure (e.g. format
+		 * needs more than its ~1 MiB growth ceiling). Treat that
+		 * as "nothing written" rather than let a negative len
+		 * flow into the signed s_len accounting below, which
+		 * would silently decrement s_len and corrupt the next
+		 * sbuf_vprintf() call's buffer offset.
+		 */
+		if (len < 0)
+			len = 0;
 	} while (len > SBUF_FREESPACE(s) &&
 	    sbuf_extend(s, len - SBUF_FREESPACE(s)) == 0);
 	s->s_len += min(len, SBUF_FREESPACE(s));
