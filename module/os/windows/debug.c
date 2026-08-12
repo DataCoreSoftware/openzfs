@@ -140,12 +140,34 @@ printBuffer(const char *fmt, ...)
 	va_list args;
 	va_start(args, fmt);
 	char buf[max_line_length];
-	RtlStringCbPrintfA(buf, 18, "%p: ", PsGetCurrentThread());
+	size_t prefix_len;
 
-	int tmp = _vsnprintf_s(&buf[17], sizeof (buf), max_line_length,
-	    fmt, args);
-	if (tmp >= max_line_length) {
-		RtlStringCbPrintfA(&buf[17], 17, "buffer too small");
+	/*
+	 * The thread-id prefix used to be written with a hardcoded 18-byte
+	 * destination, and the message appended at a hardcoded &buf[17]. "%p"
+	 * emits 16 hex digits on x64, so "%p: " needs 19 bytes including the
+	 * terminator and was silently truncated, and the two constants had to
+	 * be kept in agreement by hand. Give it the whole buffer and take the
+	 * offset back from the buffer, so nothing is assumed.
+	 */
+	RtlStringCbPrintfA(buf, sizeof (buf), "%p: ", PsGetCurrentThread());
+	prefix_len = strlen(buf);
+
+	/*
+	 * The destination is &buf[prefix_len], so the capacity that remains is
+	 * sizeof (buf) - prefix_len. Passing sizeof (buf) claimed 17 bytes
+	 * more than exist, letting a long enough message run off the end of
+	 * buf - a genuine stack buffer overflow.
+	 *
+	 * The count is _TRUNCATE ((size_t)-1): _vsnprintf_s null-terminates on
+	 * truncation itself and returns -1, so the old "tmp >= max_line_length"
+	 * test could never be true and its fallback was dead code.
+	 */
+	int tmp = _vsnprintf_s(&buf[prefix_len], sizeof (buf) - prefix_len,
+	    (size_t)-1, fmt, args);
+	if (tmp < 0) {
+		RtlStringCbPrintfA(&buf[prefix_len], sizeof (buf) - prefix_len,
+		    "buffer too small");
 	}
 
 	KeAcquireSpinLock(&cbuf_spin, &level);
