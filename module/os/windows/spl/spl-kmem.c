@@ -6736,8 +6736,13 @@ kmem_asprintf(const char *fmt, ...)
 	size = spl_vsnprintf(NULL, 0, fmt, adx);
 	va_end(adx);
 
+	/*
+	 * Degrade a failed measurement to an empty string rather than
+	 * returning NULL: callers of this function do not check, because
+	 * KM_SLEEP cannot fail. See kmem_vasprintf(), which matches.
+	 */
 	if (size < 0)
-		return (NULL); /* honest failure, not KMEM_ZERO_SIZE_PTR */
+		size = 0;
 	size++;
 
 	buf = kmem_alloc(size, KM_SLEEP);
