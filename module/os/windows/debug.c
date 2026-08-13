@@ -126,12 +126,30 @@ printBuffer(const char *fmt, ...)
 	va_list args;
 	va_start(args, fmt);
 	char buf[max_line_length];
-	_snprintf_s(buf, sizeof (buf), _TRUNCATE, "%p: ", PsGetCurrentThread());
+	size_t prefix_len;
 
-	int tmp = _vsnprintf_s(&buf[17], sizeof (buf), max_line_length,
-	    fmt, args);
-	if (tmp >= max_line_length) {
-		_snprintf_s(&buf[17], 17, _TRUNCATE, "buffer too small");
+	/*
+	 * "%p" emits 16 hex digits on x64, so the prefix is 18 characters and
+	 * needs 19 bytes with its terminator. Take the length back from the
+	 * buffer rather than assuming it, so the offset used below cannot
+	 * disagree with what was actually written.
+	 */
+	_snprintf_s(buf, sizeof (buf), _TRUNCATE, "%p: ", PsGetCurrentThread());
+	prefix_len = strlen(buf);
+
+	/*
+	 * The destination is &buf[prefix_len], so the capacity remaining is
+	 * sizeof (buf) - prefix_len, not sizeof (buf).
+	 *
+	 * The count is _TRUNCATE: _vsnprintf_s null-terminates on truncation
+	 * itself and returns -1, so test tmp < 0. The previous
+	 * "tmp >= max_line_length" could never be true.
+	 */
+	int tmp = _vsnprintf_s(&buf[prefix_len], sizeof (buf) - prefix_len,
+	    _TRUNCATE, fmt, args);
+	if (tmp < 0) {
+		_snprintf_s(&buf[prefix_len], sizeof (buf) - prefix_len,
+		    _TRUNCATE, "buffer too small");
 	}
 
 	KeAcquireSpinLock(&cbuf_spin, &level);
