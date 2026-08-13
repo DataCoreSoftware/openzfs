@@ -58,6 +58,13 @@ dodefault(zfs_prop_t prop, int intsz, int numints, void *buf)
 		if (intsz != 1)
 			return (SET_ERROR(EOVERFLOW));
 
+		/*
+		 * strncpy(), which this replaced, zero-filled the whole of
+		 * buf once the source was exhausted; strlcpy() writes only up
+		 * to the terminator and leaves the tail as it found it. buf
+		 * reaches userland through "zfs get", so restore the fill.
+		 */
+		bzero(buf, numints);
 		(void) spl_strlcpy(buf, zfs_prop_default_string(prop),
 		    numints);
 	} else {
