@@ -254,8 +254,18 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 	int roger = 0;
 
 	va_start(adx, fmt);
-	i = snprintf(buf, size, "%s%s:%d:%s(): ",
+	(void) snprintf(buf, size, "%s%s:%d:%s(): ",
 	    prefix, newfile, line, func);
+	/*
+	 * Take the prefix length from the buffer, not from snprintf()'s
+	 * return value. spl_snprintf() returns the length the result
+	 * required, which on truncation exceeds what it wrote - that would
+	 * put buf + i past the end of buf and make size - i negative, which
+	 * converts to a huge size_t for the call below. strlen() is the real
+	 * prefix length whether or not the write was truncated, and always
+	 * leaves size - i >= 1.
+	 */
+	i = (int)strlen(buf);
 	roger = spl_vsnprintf(buf + i, size - i, fmt, adx);
 	va_end(adx);
 
