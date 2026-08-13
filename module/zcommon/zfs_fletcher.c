@@ -897,16 +897,32 @@ fletcher_4_param_get(char *buffer, zfs_kernel_param_t *unused)
 	const uint32_t impl = IMPL_READ(fletcher_4_impl_chosen);
 	char *fmt;
 	int cnt = 0;
+	int len;
+
+	/*
+	 * spl_snprintf() returns the length the result required, which on
+	 * truncation is larger than what it wrote. Accumulating that directly
+	 * would push cnt past PAGE_SIZE, making buffer + cnt point outside
+	 * buffer and PAGE_SIZE - cnt a negative int that converts to a huge
+	 * size_t, defeating the bound on the next call. Stop at the first
+	 * truncation instead, which keeps cnt < PAGE_SIZE throughout.
+	 */
 
 	/* list fastest */
 	fmt = IMPL_FMT(impl, IMPL_FASTEST);
-	cnt += spl_snprintf(buffer + cnt, PAGE_SIZE - cnt, fmt, "fastest");
+	len = spl_snprintf(buffer + cnt, PAGE_SIZE - cnt, fmt, "fastest");
+	if (len < 0 || len >= PAGE_SIZE - cnt)
+		return (cnt);
+	cnt += len;
 
 	/* list all supported implementations */
 	for (uint32_t i = 0; i < fletcher_4_supp_impls_cnt; ++i) {
 		fmt = IMPL_FMT(impl, i);
-		cnt += spl_snprintf(buffer + cnt, PAGE_SIZE - cnt, fmt,
+		len = spl_snprintf(buffer + cnt, PAGE_SIZE - cnt, fmt,
 		    fletcher_4_supp_impls[i]->name);
+		if (len < 0 || len >= PAGE_SIZE - cnt)
+			break;
+		cnt += len;
 	}
 
 	return (cnt);

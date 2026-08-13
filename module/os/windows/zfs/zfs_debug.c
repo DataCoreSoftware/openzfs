@@ -138,7 +138,13 @@ zfs_dbgmsg_fini(void)
 		kstat_delete(zfs_dbgmsg_kstat);
 
 	while ((zdm = list_remove_head(&zfs_dbgmsgs)) != NULL) {
-		int size = sizeof (zfs_dbgmsg_t) + strlen(zdm->zdm_msg);
+		/*
+		 * Free with the size recorded at allocation, as
+		 * zfs_dbgmsg_purge() already does. Recomputing it from the
+		 * stored message re-derives a length that no longer has to
+		 * match what was allocated.
+		 */
+		int size = zdm->zdm_size;
 		kmem_free(zdm, size);
 		zfs_dbgmsg_size -= size;
 	}
@@ -184,7 +190,12 @@ __zfs_dbgmsg(char *buf)
 	zfs_dbgmsg_t *zdm = kmem_zalloc(size, KM_SLEEP);
 	zdm->zdm_size = size;
 	zdm->zdm_timestamp = gethrestime_sec();
-	strlcpy(zdm->zdm_msg, buf, size);
+	/*
+	 * The bound is the room at zdm_msg, not the size of the whole
+	 * allocation: zdm_msg starts offsetof(zfs_dbgmsg_t, zdm_msg) bytes
+	 * in, so only size minus that many bytes exist there.
+	 */
+	strlcpy(zdm->zdm_msg, buf, size - offsetof(zfs_dbgmsg_t, zdm_msg));
 
 	mutex_enter(&zfs_dbgmsgs_lock);
 	list_insert_tail(&zfs_dbgmsgs, zdm);
@@ -254,8 +265,18 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 	int roger = 0;
 
 	va_start(adx, fmt);
-	i = snprintf(buf, size, "%s%s:%d:%s(): ",
+	(void) snprintf(buf, size, "%s%s:%d:%s(): ",
 	    prefix, newfile, line, func);
+	/*
+	 * Take the prefix length from the buffer, not from snprintf()'s
+	 * return value. spl_snprintf() returns the length the result
+	 * required, which on truncation exceeds what it wrote - that would
+	 * put buf + i past the end of buf and make size - i negative, which
+	 * converts to a huge size_t for the call below. strlen() is the real
+	 * prefix length whether or not the write was truncated, and always
+	 * leaves size - i >= 1.
+	 */
+	i = (int)strlen(buf);
 	roger = spl_vsnprintf(buf + i, size - i, fmt, adx);
 	va_end(adx);
 

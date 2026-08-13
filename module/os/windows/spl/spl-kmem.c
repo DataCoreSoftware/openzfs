@@ -3560,7 +3560,7 @@ kmem_cache_create(
 	/*
 	 * Set cache properties.
 	 */
-	(void) spl_strlcpy(cp->cache_name, name, KMEM_CACHE_NAMELEN + 1);
+	(void) strlcpy(cp->cache_name, name, KMEM_CACHE_NAMELEN + 1);
 	strident_canon(cp->cache_name, KMEM_CACHE_NAMELEN + 1);
 	cp->cache_bufsize = bufsize;
 	cp->cache_align = align;
@@ -6613,7 +6613,16 @@ kmem_asdprintf(const char *fmt, ...)
 	return (ptr);
 }
 
-#define	SPL_VSNPRINTF_PROBE_MIN	256
+/*
+ * Sized so that Tier 2 covers every log line this driver actually emits,
+ * because Tier 3 is the only tier that allocates and __dprintf() - which
+ * measures with buf == NULL, so it always reaches at least Tier 2 - is
+ * reachable from inside the kmem allocators themselves. kmem_error()
+ * calls dprintf() directly. At 256 the metaslab_load message, 311
+ * characters, fell through to Tier 3 on every emission, putting a
+ * kmem_alloc()/kmem_free() pair inside the allocator's own error path.
+ */
+#define	SPL_VSNPRINTF_PROBE_MIN	1024
 /*
  * 1 MiB: roughly 256x the largest single formatted string anywhere
  * in this tree today (PAGE_SIZE == 4096, in zfs_fletcher.c). No real
@@ -6666,15 +6675,14 @@ spl_vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
 	}
 
 	/*
-	 * Tier 2: a small on-stack probe. Still IRQL-safe (no
-	 * allocation) - every real caller in this tree writes a buffer
-	 * under a few hundred bytes (the one known exception,
-	 * module/lua/lstrlib.c's Lua channel-program formatting, is
-	 * intentionally unbounded and falls through to Tier 3), so this
-	 * is what makes every measure-only caller (buf==NULL, e.g.
-	 * __dprintf's first call, kmem_asprintf(), kmem_vasprintf())
-	 * avoid the allocator entirely in the overwhelmingly common
-	 * case.
+	 * Tier 2: an on-stack probe, sized by SPL_VSNPRINTF_PROBE_MIN.
+	 * Still IRQL-safe (no allocation), and it is what makes every
+	 * measure-only caller (buf == NULL, e.g. __dprintf's first call,
+	 * kmem_asprintf(), kmem_vasprintf()) avoid the allocator
+	 * entirely. Sized to cover the log lines this driver actually
+	 * emits rather than "a few hundred bytes" - see the constant.
+	 * module/lua/lstrlib.c's Lua channel-program formatting is
+	 * intentionally unbounded and still falls through to Tier 3.
 	 */
 	args_copy = args;
 	ret = _vsnprintf_s(stackbuf, sizeof (stackbuf), _TRUNCATE, fmt,
@@ -6683,7 +6691,8 @@ spl_vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
 		return (ret);
 
 	/*
-	 * Tier 3: only reached when even a 256-byte probe truncates.
+	 * Tier 3: only reached when even the SPL_VSNPRINTF_PROBE_MIN stack
+	 * probe truncates.
 	 * This is the only tier that allocates, so it is the only tier
 	 * that can violate IRQL rules (KM_SLEEP can block) - guard it
 	 * explicitly here, at the one place that actually needs it,
@@ -6736,8 +6745,13 @@ kmem_asprintf(const char *fmt, ...)
 	size = spl_vsnprintf(NULL, 0, fmt, adx);
 	va_end(adx);
 
+	/*
+	 * Degrade a failed measurement to an empty string rather than
+	 * returning NULL: callers of this function do not check, because
+	 * KM_SLEEP cannot fail. See kmem_vasprintf(), which matches.
+	 */
 	if (size < 0)
-		return (NULL); /* honest failure, not KMEM_ZERO_SIZE_PTR */
+		size = 0;
 	size++;
 
 	buf = kmem_alloc(size, KM_SLEEP);
@@ -6759,21 +6773,27 @@ kmem_vasprintf(const char *fmt, va_list ap)
 {
 	char *ptr;
 	int size;
-	int r = -1;
 
+	/*
+	 * spl_vsnprintf() returns the length the result requires, so one
+	 * measuring call sizes the buffer exactly and there is no retry and
+	 * no free on the success path. ap is reused for the write below:
+	 * x64 va_list is a plain pointer passed by value, so a callee cannot
+	 * advance the caller's copy - the assumption spl_vsnprintf() already
+	 * documents for its own internal copies.
+	 *
+	 * A negative measurement degrades to an empty string rather than
+	 * NULL. Callers of this function and of kmem_asprintf() are shared
+	 * with the Linux and FreeBSD ports, where KM_SLEEP cannot fail and
+	 * the result is never checked - see kcf_spi.c:241, spl-kstat.c:576
+	 * and spl-procfs-list.c:234, all of which use the result directly.
+	 */
 	size = spl_vsnprintf(NULL, 0, fmt, ap);
-	if ((size >= 0) && (size < INT_MAX)) {
-		ptr = (char *)kmem_alloc(size + 1, KM_SLEEP); // +1 for null
-		if (ptr) {
-			r = spl_vsnprintf(ptr, size + 1, fmt, ap);  // +1 for null
-			if ((r < 0) || (r > size)) {
-				kmem_free(ptr, size);
-				r = -1;
-			}
-		}
-	} else {
-		ptr = 0;
-	}
+	if (size < 0)
+		size = 0;
+
+	ptr = (char *)kmem_alloc((size_t)size + 1, KM_SLEEP); // +1 for null
+	(void) spl_vsnprintf(ptr, (size_t)size + 1, fmt, ap); // +1 for null
 
 	return (ptr);
 }

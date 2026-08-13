@@ -232,27 +232,15 @@ typedef uint64_t zoff_t;
 #include <stdio.h>
 
 /*
- * Mirrors include/os/windows/spl/sys/types.h's kernel-mode shims of the
+ * Mirrors include/os/windows/spl/sys/types.h's kernel-mode shim of the
  * same name. Several shared module/zfs, module/icp, and module/lua
  * source files (built both into the ZFSin kernel driver and into
- * user-mode libzpool/libicp/zlib here) call these directly by name, not
- * through a portable macro. In user mode, real strlcpy/strlcat
- * (lib/libspl) and real, C99-conformant UCRT vsnprintf are already
- * available, so these are simple passthroughs - no downlevel-
- * unavailability workaround is needed here, unlike the kernel version.
+ * user-mode libzpool/libicp/zlib here) call this directly by name, not
+ * through a portable macro. In user mode a real, C99-conformant UCRT
+ * vsnprintf is already available, so this is a simple passthrough - no
+ * downlevel-unavailability workaround is needed here, unlike the kernel
+ * version.
  */
-static __inline size_t
-spl_strlcpy(char *dst, const char *src, size_t dstsize)
-{
-	return (strlcpy(dst, src, dstsize));
-}
-
-static __inline size_t
-spl_strlcat(char *dst, const char *src, size_t dstsize)
-{
-	return (strlcat(dst, src, dstsize));
-}
-
 static __inline int
 spl_vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
 {
