@@ -2281,11 +2281,39 @@ BufferUserBuffer(IN OUT PIRP Irp, IN ULONG BufferLength)
 	//  describing the users input buffer, which we will now snapshot.
 	//
 	if (Irp->AssociatedIrp.SystemBuffer == NULL) {
+		PVOID buf;
+
 		UserBuffer = MapUserBuffer(Irp);
-		Irp->AssociatedIrp.SystemBuffer =
-		    spl_ExAllocatePoolZero(NonPagedPoolNx,
-		    BufferLength,
+
+		/*
+		 * FsRtlAllocatePoolWithQuotaTag(), which this replaced, does
+		 * two things beyond allocating: it charges the calling
+		 * process's pool quota, and it raises an exception on failure
+		 * rather than returning NULL. That is why the code below has
+		 * no NULL check - there was never a NULL to check.
+		 *
+		 * Its documented replacement, ExAllocatePool2 with
+		 * POOL_FLAG_USE_QUOTA, is gated behind NTDDI_VERSION >=
+		 * NTDDI_WIN10_VB in the WDK headers, above this project's
+		 * WDK_WINVER target of 0x0601; using it would raise the
+		 * driver's minimum supported Windows version tree-wide.
+		 * Reproduce both effects with the lower-level primitives
+		 * FsRtlAllocatePoolWithQuotaTag is itself built on instead.
+		 *
+		 * Dropping the quota charge would also let a user-mode caller
+		 * drive unbounded non-paged pool allocation with none of it
+		 * accounted to the requesting process.
+		 */
+		PsChargePoolQuota(PsGetCurrentProcess(), NonPagedPoolNx,
+		    BufferLength);
+		buf = ExAllocatePoolUninitialized(NonPagedPoolNx, BufferLength,
 		    'qtaf');
+		if (buf == NULL) {
+			PsReturnPoolQuota(PsGetCurrentProcess(), NonPagedPoolNx,
+			    BufferLength);
+			ExRaiseStatus(STATUS_INSUFFICIENT_RESOURCES);
+		}
+		Irp->AssociatedIrp.SystemBuffer = buf;
 		//
 		// Set the flags so that the completion code knows to
 		// deallocate the buffer.
