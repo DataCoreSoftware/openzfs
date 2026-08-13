@@ -132,7 +132,7 @@ gz_open(
 	if (s->path == NULL) {
 		return (destroy(s), (gzFile)Z_NULL);
 	}
-	spl_strlcpy(s->path, path, strlen(path) + 1); /* do this early for debugging */
+	strlcpy(s->path, path, strlen(path) + 1); /* do this early for debugging */
 
 	s->mode = '\0';
 	do {
@@ -1094,9 +1094,9 @@ gzerror(
 	s->msg = (char *)ALLOC(strlen(s->path) + strlen(m) + 3);
 	if (s->msg == Z_NULL)
 		return ((const char *)ERR_MSG(Z_MEM_ERROR));
-	spl_strlcpy(s->msg, s->path, strlen(s->path) + strlen(m) + 3);
-	spl_strlcat(s->msg, ": ", strlen(s->path) + strlen(m) + 3);
-	spl_strlcat(s->msg, m, strlen(s->path) + strlen(m) + 3);
+	strlcpy(s->msg, s->path, strlen(s->path) + strlen(m) + 3);
+	strlcat(s->msg, ": ", strlen(s->path) + strlen(m) + 3);
+	strlcat(s->msg, m, strlen(s->path) + strlen(m) + 3);
 	return ((const char *)s->msg);
 }
 

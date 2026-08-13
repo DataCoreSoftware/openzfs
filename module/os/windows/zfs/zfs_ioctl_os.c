@@ -185,7 +185,7 @@ NTSTATUS zpool_zfs_get_metrics(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_
 
 	perf->zpool_allocated = pool_alloc;
 	perf->zpool_size = pool_size;
-	spl_strlcpy(perf->zpoolHealthState, healthState,
+	strlcpy(perf->zpoolHealthState, healthState,
 	    sizeof (perf->zpoolHealthState));
     }
     else

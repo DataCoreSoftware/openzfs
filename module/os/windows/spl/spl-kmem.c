@@ -3560,7 +3560,7 @@ kmem_cache_create(
 	/*
 	 * Set cache properties.
 	 */
-	(void) spl_strlcpy(cp->cache_name, name, KMEM_CACHE_NAMELEN + 1);
+	(void) strlcpy(cp->cache_name, name, KMEM_CACHE_NAMELEN + 1);
 	strident_canon(cp->cache_name, KMEM_CACHE_NAMELEN + 1);
 	cp->cache_bufsize = bufsize;
 	cp->cache_align = align;
