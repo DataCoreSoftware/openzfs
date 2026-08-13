@@ -6759,21 +6759,27 @@ kmem_vasprintf(const char *fmt, va_list ap)
 {
 	char *ptr;
 	int size;
-	int r = -1;
 
+	/*
+	 * spl_vsnprintf() returns the length the result requires, so one
+	 * measuring call sizes the buffer exactly and there is no retry and
+	 * no free on the success path. ap is reused for the write below:
+	 * x64 va_list is a plain pointer passed by value, so a callee cannot
+	 * advance the caller's copy - the assumption spl_vsnprintf() already
+	 * documents for its own internal copies.
+	 *
+	 * A negative measurement degrades to an empty string rather than
+	 * NULL. Callers of this function and of kmem_asprintf() are shared
+	 * with the Linux and FreeBSD ports, where KM_SLEEP cannot fail and
+	 * the result is never checked - see kcf_spi.c:241, spl-kstat.c:576
+	 * and spl-procfs-list.c:234, all of which use the result directly.
+	 */
 	size = spl_vsnprintf(NULL, 0, fmt, ap);
-	if ((size >= 0) && (size < INT_MAX)) {
-		ptr = (char *)kmem_alloc(size + 1, KM_SLEEP); // +1 for null
-		if (ptr) {
-			r = spl_vsnprintf(ptr, size + 1, fmt, ap);  // +1 for null
-			if ((r < 0) || (r > size)) {
-				kmem_free(ptr, size);
-				r = -1;
-			}
-		}
-	} else {
-		ptr = 0;
-	}
+	if (size < 0)
+		size = 0;
+
+	ptr = (char *)kmem_alloc((size_t)size + 1, KM_SLEEP); // +1 for null
+	(void) spl_vsnprintf(ptr, (size_t)size + 1, fmt, ap); // +1 for null
 
 	return (ptr);
 }
