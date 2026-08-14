@@ -3000,8 +3000,8 @@ dmu_send_estimate_fast(dsl_dataset_t *origds, dsl_dataset_t *fromds,
 		char dsname[ZFS_MAX_DATASET_NAME_LEN + 6];
 
 		dsl_dataset_name(origds, dsname);
-		(void) strlcat(dsname, "/", sizeof (dsname));
-		(void) strlcat(dsname, recv_clone_name, sizeof (dsname));
+		(void) strcat(dsname, "/");
+		(void) strcat(dsname, recv_clone_name);
 
 		err = dsl_dataset_hold(origds->ds_dir->dd_pool,
 		    dsname, FTAG, &ds);

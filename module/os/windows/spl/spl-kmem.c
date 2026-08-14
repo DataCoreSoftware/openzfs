@@ -1885,7 +1885,7 @@ kmem_dumppr(char **pp, char *e, const char *format, ...)
 		va_list ap;
 
 		va_start(ap, format);
-		n = zfs_vsnprintf(p, e - p, format, ap);
+		n = vsnprintf(p, e - p, format, ap);
 		va_end(ap);
 		*pp = p + n;
 	}
@@ -3560,7 +3560,7 @@ kmem_cache_create(
 	/*
 	 * Set cache properties.
 	 */
-	(void) strlcpy(cp->cache_name, name, KMEM_CACHE_NAMELEN + 1);
+	(void) strncpy(cp->cache_name, name, KMEM_CACHE_NAMELEN);
 	strident_canon(cp->cache_name, KMEM_CACHE_NAMELEN + 1);
 	cp->cache_bufsize = bufsize;
 	cp->cache_align = align;
@@ -6621,13 +6621,13 @@ kmem_asprintf(const char *fmt, ...)
 	char *buf;
 
 	va_start(adx, fmt);
-	size = zfs_vsnprintf(NULL, 0, fmt, adx) + 1;
+	size = _vsnprintf(NULL, 0, fmt, adx) + 1;
 	va_end(adx);
 
 	buf = kmem_alloc(size, KM_SLEEP);
 
 	va_start(adx, fmt);
-	(void) zfs_vsnprintf(buf, size, fmt, adx);
+	(void) _vsnprintf(buf, size, fmt, adx);
 	va_end(adx);
 
 	return (buf);
@@ -6645,11 +6645,11 @@ kmem_vasprintf(const char *fmt, va_list ap)
 	int size;
 	int r = -1;
 
-	size = zfs_vsnprintf(NULL, 0, fmt, ap);
+	size = vsnprintf(NULL, 0, fmt, ap);
 	if ((size >= 0) && (size < INT_MAX)) {
 		ptr = (char *)kmem_alloc(size + 1, KM_SLEEP); // +1 for null
 		if (ptr) {
-			r = zfs_vsnprintf(ptr, size + 1, fmt, ap);  // +1 for null
+			r = vsnprintf(ptr, size + 1, fmt, ap);  // +1 for null
 			if ((r < 0) || (r > size)) {
 				kmem_free(ptr, size);
 				r = -1;

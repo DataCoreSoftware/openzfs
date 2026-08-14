@@ -105,7 +105,7 @@ zvol_start(PDRIVER_OBJECT  DriverObject, PUNICODE_STRING pRegistryPath)
 	// array. now we can go up to 32,640 zvols.
 	pwzvolDrvInfo->NumberOfBuses = 1;
 	pwzvolDrvInfo->zvContextArray =
-	    (wzvolContext*)ExAllocatePoolUninitialized(NonPagedPoolNx,
+	    (wzvolContext*)ExAllocatePoolWithTag(NonPagedPoolNx,
 	    ((SIZE_T)pwzvolDrvInfo->MaximumNumberOfTargets *
 	    pwzvolDrvInfo->MaximumNumberOfLogicalUnits *
 	    sizeof (wzvolContext)), MP_TAG_GENERAL);
@@ -345,8 +345,7 @@ wzvol_HwReportAdapter(__in pHW_HBA_EXT pHBAExt)
 	    WnodeSizeInstanceName +
 	    WnodeSizeDataBlock;
 
-	pWnode = ExAllocatePoolUninitialized(NonPagedPoolNx, size,
-	    MP_TAG_GENERAL);
+	pWnode = ExAllocatePoolWithTag(NonPagedPoolNx, size, MP_TAG_GENERAL);
 
 	if (NULL != pWnode) {
 		RtlZeroMemory(pWnode, size);
@@ -446,8 +445,7 @@ wzvol_HwReportLink(__in pHW_HBA_EXT pHBAExt)
 	    WnodeSizeInstanceName +
 	    WnodeSizeDataBlock;
 
-	pWnode = ExAllocatePoolUninitialized(NonPagedPoolNx, size,
-	    MP_TAG_GENERAL);
+	pWnode = ExAllocatePoolWithTag(NonPagedPoolNx, size, MP_TAG_GENERAL);
 
 	if (NULL != pWnode) {
 		RtlZeroMemory(pWnode, size);
@@ -537,8 +535,7 @@ wzvol_HwReportLog(__in pHW_HBA_EXT pHBAExt)
 	    WnodeSizeInstanceName +
 	    WnodeSizeDataBlock;
 
-	pWnode = ExAllocatePoolUninitialized(NonPagedPoolNx, size,
-	    MP_TAG_GENERAL);
+	pWnode = ExAllocatePoolWithTag(NonPagedPoolNx, size, MP_TAG_GENERAL);
 
 	if (NULL != pWnode) {
 		RtlZeroMemory(pWnode, size);

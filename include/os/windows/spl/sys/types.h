@@ -96,96 +96,10 @@ typedef uintptr_t pc_t;
 #include <ntddk.h>
 
 
-#include <stdarg.h>
-#ifndef va_copy
-/*
- * clang-cl provides va_copy as a compiler builtin, but the WDK's own
- * kernel-mode CRT stdarg.h (km\crt\stdarg.h, used when this header is
- * compiled with plain cl.exe rather than clang-cl) does not define it at
- * all. This driver is AMD64/x64-only, where va_list is a plain pointer
- * and a direct assignment is a correct, equivalent substitute.
- */
-#define	va_copy(dest, src) ((dest) = (src))
-#endif
-/*
- * _snprintf()/_vsnprintf() (the legacy MSVCRT functions snprintf/vsnprintf
- * were aliased to below) do not null-terminate the destination buffer when
- * the formatted output is truncated - unlike the POSIX snprintf/vsnprintf
- * this portable code is written against. Wrap them instead of aliasing
- * directly, so truncation is always still safely null-terminated. The
- * existing "-1 on truncation" return value is preserved unchanged (every
- * caller in this tree only checks `if (n < 0)`), so this is purely additive.
- */
-/*
- * "Measure the required length without writing" (the buf==NULL/size==0
- * idiom used by kmem_asprintf()/kmem_vasprintf()/zfs_dbgmsg()). Neither
- * _vscprintf (declared in the WDK headers but not exported by the
- * kernel-mode CRT import lib - confirmed via a link failure) nor
- * _vsnprintf_s (its count==0 case triggers the invalid-parameter handler)
- * can do this directly in kernel mode. Measure into a generously-sized
- * scratch buffer instead: every caller in this tree builds short, bounded
- * strings (dataset/snapshot names, log messages), so 1024 bytes is never
- * exceeded in practice. If a caller's format+args ever did exceed it, the
- * result here is a consistently-truncated (safely null-terminated) length
- * - the caller's later real write with the same format+args into a
- * same-size-or-larger buffer would truncate identically, not silently
- * disagree with what was measured.
- */
-static inline int
-zfs_vscprintf(const char *fmt, va_list ap)
-{
-	char scratch[1024];
-	va_list ap_copy;
-	int ret;
-
-	va_copy(ap_copy, ap);
-	ret = _vsnprintf_s(scratch, sizeof (scratch), (size_t)-1, fmt, ap_copy);
-	va_end(ap_copy);
-
-	return (ret >= 0 ? ret : (int)sizeof (scratch) - 1);
-}
-
-static inline int
-zfs_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
-{
-	int ret;
-
-	if (size == 0) {
-		va_list ap_copy;
-		va_copy(ap_copy, ap);
-		ret = zfs_vscprintf(fmt, ap_copy);
-		va_end(ap_copy);
-		return (ret);
-	}
-
-	/*
-	 * _TRUNCATE ((size_t)-1): _vsnprintf_s always null-terminates buf
-	 * itself on truncation (returning -1), so no separate fallback
-	 * write is needed here - callers such as lstrlib.c's str_sprintf()
-	 * pass INT_MAX as a "the caller already pre-sized the real buffer"
-	 * sentinel, not the true size of buf, so a manual buf[size - 1]
-	 * write here would be a wild out-of-bounds write on truncation.
-	 */
-	return (_vsnprintf_s(buf, size, (size_t)-1, fmt, ap));
-}
-
-static inline int
-zfs_snprintf(char *buf, size_t size, const char *fmt, ...)
-{
-	va_list ap;
-	int ret;
-
-	va_start(ap, fmt);
-	ret = zfs_vsnprintf(buf, size, fmt, ap);
-	va_end(ap);
-
-	return (ret);
-}
-
-#define	snprintf zfs_snprintf
+#define	snprintf _snprintf
 #define	vprintf(...) vKdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, \
 	__VA_ARGS__))
-#define	vsnprintf zfs_vsnprintf
+#define	vsnprintf _vsnprintf
 
 #ifndef ULLONG_MAX
 #define	ULLONG_MAX			(~0ULL)

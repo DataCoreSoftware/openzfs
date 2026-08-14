@@ -894,7 +894,7 @@ zio_inject_list_next(int *id, char *name, size_t buflen,
 	if (handler) {
 		*record = handler->zi_record;
 		*id = handler->zi_id;
-		(void) strlcpy(name, spa_name(handler->zi_spa), buflen);
+		(void) strncpy(name, spa_name(handler->zi_spa), buflen);
 		ret = 0;
 	} else {
 		ret = SET_ERROR(ENOENT);

@@ -156,7 +156,7 @@ wzvol_assign_targetid(zvol_state_t *zv)
 {
 	wzvolContext* zv_targets = STOR_wzvolDriverInfo.zvContextArray;
 	ASSERT(zv->zv_zso->zso_target_context == NULL);
-	PIO_REMOVE_LOCK pIoRemLock = ExAllocatePoolUninitialized(NonPagedPoolNx,
+	PIO_REMOVE_LOCK pIoRemLock = ExAllocatePoolWithTag(NonPagedPoolNx,
 	    sizeof (*pIoRemLock), MP_TAG_GENERAL);
 
 	if (!pIoRemLock) {
@@ -397,7 +397,7 @@ ScsiGetMPIOExt(
 	}
 
 	if (pNextEntry == &pHBAExt->pwzvolDrvObj->ListMPIOExt) {
-		pLUMPIOExt = ExAllocatePoolUninitialized(NonPagedPoolNx,
+		pLUMPIOExt = ExAllocatePoolWithTag(NonPagedPoolNx,
 		    sizeof (HW_LU_EXTENSION_MPIO), MP_TAG_GENERAL);
 
 		if (!pLUMPIOExt) {
@@ -515,8 +515,7 @@ ScsiOpInquiry(
 		    pHBAExt->ProductRevision, 4);
 		memset((PCHAR)pInqData->VendorSpecific, ' ',
 		    sizeof (pInqData->VendorSpecific));
-		RtlStringCbPrintfA(pInqData->VendorSpecific,
-		    sizeof (pInqData->VendorSpecific), "%.04d-%.04d-%.04d",
+		sprintf(pInqData->VendorSpecific, "%.04d-%.04d-%.04d",
 		    pSrb->PathId, pSrb->TargetId, pSrb->Lun);
 		pInqData->VendorSpecific[strlen(pInqData->VendorSpecific)] =
 		    ' ';
@@ -1089,8 +1088,7 @@ DiReadWriteSetup(zvol_state_t *zv, MpWkRtnAction action, zfsiodesc_t *pIo)
 {
 	// cannot use kmem_alloc with sleep if IRQL dispatch so get straight
 	// from NP pool.
-	pMP_WorkRtnParms pWkRtnParms =
-	    (pMP_WorkRtnParms)ExAllocatePoolUninitialized(
+	pMP_WorkRtnParms pWkRtnParms = (pMP_WorkRtnParms)ExAllocatePoolWithTag(
 	    NonPagedPoolNx, ALIGN_UP_BY(sizeof (MP_WorkRtnParms), 16) +
 	    IoSizeofWorkItem(), MP_TAG_GENERAL);
 	if (NULL == pWkRtnParms) {

@@ -900,23 +900,13 @@ fletcher_4_param_get(char *buffer, zfs_kernel_param_t *unused)
 
 	/* list fastest */
 	fmt = IMPL_FMT(impl, IMPL_FASTEST);
-	RtlStringCbPrintfA(buffer + cnt, PAGE_SIZE - cnt, fmt, "fastest");
-	cnt += strlen(buffer + cnt);
+	cnt += sprintf(buffer + cnt, fmt, "fastest");
 
 	/* list all supported implementations */
 	for (uint32_t i = 0; i < fletcher_4_supp_impls_cnt; ++i) {
-		/*
-		 * Guard PAGE_SIZE - cnt against underflow: cnt is a signed
-		 * int, so if the implementation list ever grew enough to
-		 * fill buffer, the subtraction would go negative and wrap
-		 * to a huge size_t, defeating RtlStringCbPrintfA's bound.
-		 */
-		if (cnt >= PAGE_SIZE)
-			break;
 		fmt = IMPL_FMT(impl, i);
-		RtlStringCbPrintfA(buffer + cnt, PAGE_SIZE - cnt, fmt,
+		cnt += sprintf(buffer + cnt, fmt,
 		    fletcher_4_supp_impls[i]->name);
-		cnt += strlen(buffer + cnt);
 	}
 
 	return (cnt);
