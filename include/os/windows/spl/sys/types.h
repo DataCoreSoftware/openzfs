@@ -94,12 +94,106 @@ typedef uintptr_t pc_t;
 #include <ntstrsafe.h>
 #include <stdlib.h>
 #include <ntddk.h>
+#include <stdarg.h>
 
+/*
+ * Kernel-mode _snprintf() returns -1 on truncation (not the would-be
+ * length) and does not NUL-terminate the buffer on truncation, unlike
+ * standard snprintf(). Portable ZFS/SPL code assumes real snprintf()
+ * semantics, so give it those semantics here rather than the raw
+ * deprecated function.
+ *
+ * There is no _vscprintf() in ntoskrnl.lib, and ntstrsafe.h's
+ * String RtlStringCchPrintfEx family cannot measure a formatted
+ * string's length without a real, non-zero destination buffer (a
+ * cchDest of 0 short-circuits before formatting even happens) - so
+ * "how long would this be" can only be discovered by actually
+ * formatting into a real, possibly-grown, scratch buffer.
+ *
+ * spl_vsnprintf() is implemented out-of-line in
+ * module/os/windows/spl/spl-kmem.c, NOT as a static inline here,
+ * because that implementation needs kmem_alloc()/kmem_free() -
+ * sys/kmem.h itself #includes sys/types.h, so an inline definition
+ * here could never see kmem_alloc()'s declaration without an
+ * unsupportable circular include.
+ */
+extern int spl_vsnprintf(char *buf, size_t size, const char *fmt,
+    va_list args);
 
-#define	snprintf _snprintf
+static __inline int
+spl_snprintf(char *buf, size_t size, const char *fmt, ...)
+{
+	va_list args;
+	int ret;
+
+	va_start(args, fmt);
+	ret = spl_vsnprintf(buf, size, fmt, args);
+	va_end(args);
+	return (ret);
+}
+
+#define	snprintf spl_snprintf
 #define	vprintf(...) vKdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, \
 	__VA_ARGS__))
-#define	vsnprintf _vsnprintf
+/*
+ * No #define vsnprintf here (unlike snprintf above): CodeQL's
+ * extended-deprecated-apis check flags macro invocations by the
+ * macro's own name against Microsoft's banned-API list, regardless of
+ * what the macro expands to - "vsnprintf" (no underscore) is on that
+ * list, "snprintf" is not. A macro named vsnprintf can never pass the
+ * check no matter its target, so every caller below calls
+ * spl_vsnprintf directly instead of going through a same-named macro.
+ */
+
+/*
+ * Kernel-mode strncpy() does not NUL-terminate if strlen(src) >= n,
+ * and zero-fills the whole remainder of the buffer if strlen(src) < n
+ * - neither behavior is depended on by any of this codebase's callers.
+ * strlcpy() is the semantically-closest safe replacement (always
+ * terminates, never overflows) but has no kernel-linkable
+ * implementation here, so provide one - mirrors lib/libspl/strlcpy.c's
+ * existing user-mode algorithm exactly. Callers pass n == the size of
+ * the destination buffer (or the intended-substring-length + 1),
+ * unlike strncpy's n == copy-length - not a drop-in same-args swap.
+ */
+static __inline size_t
+spl_strlcpy(char *dst, const char *src, size_t dstsize)
+{
+	size_t srclen = strlen(src);
+	size_t copied = (srclen < dstsize) ? srclen : dstsize - 1;
+
+	if (dstsize != 0) {
+		memcpy(dst, src, copied);
+		dst[copied] = '\0';
+	}
+	return (srclen);
+}
+
+/*
+ * strcat() has no size parameter at all - unbounded by construction.
+ * strlcat() is the closest safe replacement (always terminates, never
+ * overflows, return value is the total length it tried to create) but
+ * - same as strlcpy() - has no kernel-linkable implementation here.
+ * Mirrors lib/libspl/strlcat.c's existing user-mode algorithm exactly.
+ */
+static __inline size_t
+spl_strlcat(char *dst, const char *src, size_t dstsize)
+{
+	char *df = dst;
+	size_t left = dstsize;
+	size_t l1, l2 = strlen(src), copied;
+
+	while (left-- != 0 && *df != '\0')
+		df++;
+	l1 = df - dst;
+	if (dstsize == l1)
+		return (l1 + l2);
+
+	copied = (l1 + l2 >= dstsize) ? dstsize - l1 - 1 : l2;
+	memcpy(dst + l1, src, copied);
+	dst[l1 + copied] = '\0';
+	return (l1 + l2);
+}
 
 #ifndef ULLONG_MAX
 #define	ULLONG_MAX			(~0ULL)

@@ -35,7 +35,7 @@ seq_printf(struct seq_file *f, const char *fmt, ...)
 	va_list adx;
 
 	va_start(adx, fmt);
-	(void) vsnprintf(f->sf_buf, f->sf_size, fmt, adx);
+	(void) spl_vsnprintf(f->sf_buf, f->sf_size, fmt, adx);
 	va_end(adx);
 }
 
@@ -81,7 +81,7 @@ procfs_list_addr(kstat_t *ksp, loff_t n)
 		ksp->ks_private1 = list_next(&pl->pl_list, elt);
 
 	if (ksp->ks_private1) {
-		p = ExAllocatePoolWithTag(NonPagedPoolNx, sizeof (*p), '!SFZ');
+		p = ExAllocatePoolUninitialized(NonPagedPoolNx, sizeof (*p), '!SFZ');
 		p->pli_pl = pl;
 		p->pli_elt = ksp->ks_private1;
 	}

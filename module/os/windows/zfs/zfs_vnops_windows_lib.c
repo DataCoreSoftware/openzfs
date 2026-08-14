@@ -1559,7 +1559,7 @@ zfs_uid2sid(uint64_t uid, SID **sid)
 	// Root?
 	num = (uid == 0) ? 1 : 2;
 
-	tmp = ExAllocatePoolWithTag(PagedPool,
+	tmp = ExAllocatePoolUninitialized(PagedPool,
 	    offsetof(SID, SubAuthority) + (num * sizeof (ULONG)), 'zsid');
 
 	tmp->Revision = 1;
@@ -1618,7 +1618,7 @@ zfs_gid2sid(uint64_t gid, SID **sid)
 
 	ASSERT(sid != NULL);
 
-	tmp = ExAllocatePoolWithTag(PagedPool,
+	tmp = ExAllocatePoolUninitialized(PagedPool,
 	    offsetof(SID, SubAuthority) + (num * sizeof (ULONG)), 'zsid');
 
 	tmp->Revision = 1;
@@ -1660,7 +1660,7 @@ zfs_set_acl(dacl *dacls)
 		i++;
 	}
 
-	acl = ExAllocatePoolWithTag(PagedPool, size, 'zacl');
+	acl = ExAllocatePoolUninitialized(PagedPool, size, 'zacl');
 	if (!acl)
 		return (NULL);
 
@@ -1726,7 +1726,7 @@ zfs_set_security_root(struct vnode *vp)
 
 	ASSERT(buflen != 0);
 
-	void *tmp = ExAllocatePoolWithTag(PagedPool, buflen, 'ZSEC');
+	void *tmp = ExAllocatePoolUninitialized(PagedPool, buflen, 'ZSEC');
 	if (tmp == NULL)
 		goto err;
 

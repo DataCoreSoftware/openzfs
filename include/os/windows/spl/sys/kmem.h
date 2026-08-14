@@ -61,9 +61,29 @@ extern uint64_t physmem;
 	 */
 
 #define	MALLOC(A, C, S, T, F) \
-	(A) = (C)ExAllocatePoolWithTag(NonPagedPoolNx, (S), '!SFZ')
+	(A) = (C)ExAllocatePoolUninitialized(NonPagedPoolNx, (S), '!SFZ')
 #define	FREE(A, T) \
 	ExFreePoolWithTag((A), '!SFZ')
+
+/*
+ * Centralizes the "allocate uninitialized, then zero on success"
+ * pattern used throughout the Windows port, in one place, so the
+ * allocation size can never drift between the alloc call and the
+ * zero call (two historical call sites had exactly that bug - see
+ * zfs_windows_zvol.c's zvol_start() and zfs_vnops_windows.c's
+ * pnp_query_id(), before this was centralized). A real function,
+ * not a macro: a macro that referenced its Size argument twice would
+ * silently reintroduce the same double-evaluation bug for any future
+ * caller passing a computed expression.
+ */
+static __inline PVOID
+spl_ExAllocatePoolZero(POOL_TYPE PoolType, SIZE_T Size, ULONG Tag)
+{
+	PVOID ptr = ExAllocatePoolUninitialized(PoolType, Size, Tag);
+	if (ptr != NULL)
+		RtlZeroMemory(ptr, Size);
+	return (ptr);
+}
 
 // Work around symbol collisions in XNU
 #define	kmem_alloc(size, kmflags) zfs_kmem_alloc((size), (kmflags))

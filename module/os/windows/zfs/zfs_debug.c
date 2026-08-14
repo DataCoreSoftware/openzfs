@@ -228,13 +228,23 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 	}
 
 	va_start(adx, fmt);
-	size = vsnprintf(NULL, 0, fmt, adx);
+	size = spl_vsnprintf(NULL, 0, fmt, adx);
 	va_end(adx);
 
 	size += snprintf(NULL, 0, "%s%s:%d:%s(): ", prefix, newfile, line,
 	    func);
 
 	size++; /* null byte in the "buf" string */
+
+	/*
+	 * size is negative only if both spl_vsnprintf() measuring calls
+	 * above independently failed (e.g. each needed more than the
+	 * ~1 MiB spl_vsnprintf() will grow to) - not realistic for a
+	 * single log line, but kmem_alloc() must never see a negative
+	 * size turn into a huge size_t.
+	 */
+	if (size <= 0)
+		return;
 
 	/*
 	 * There is one byte of string in sizeof (zfs_dbgmsg_t), used
@@ -244,9 +254,9 @@ __dprintf(boolean_t dprint, const char *file, const char *func,
 	int roger = 0;
 
 	va_start(adx, fmt);
-	i = snprintf(buf, size + 1, "%s%s:%d:%s(): ",
+	i = snprintf(buf, size, "%s%s:%d:%s(): ",
 	    prefix, newfile, line, func);
-	roger = vsnprintf(buf + i, size -i + 1, fmt, adx);
+	roger = spl_vsnprintf(buf + i, size - i, fmt, adx);
 	va_end(adx);
 
 	/*
