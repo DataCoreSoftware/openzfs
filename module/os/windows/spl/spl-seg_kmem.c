@@ -121,7 +121,7 @@ osif_malloc(uint64_t size)
 #ifdef _KERNEL
 	void *tr = NULL;
 
-	tr = ExAllocatePoolUninitialized(NonPagedPoolNx, size, '!SFZ');
+	tr = ExAllocatePoolWithTag(NonPagedPoolNx, size, '!SFZ');
 	ASSERT(P2PHASE(tr, PAGE_SIZE) == 0);
 	if (tr != NULL) {
 		atomic_inc_64(&stat_osif_malloc_success);

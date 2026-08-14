@@ -228,16 +228,4 @@ typedef uint64_t zoff_t;
 #include <wosix.h>
 #endif
 
-/*
- * Several source files under module/ (module/zfs, module/lua, ...) are
- * shared between the ZFSin kernel driver and this user-mode build (e.g.
- * libzpool) and call zfs_vsnprintf() directly by name - the kernel-side
- * include/os/windows/spl/sys/types.h defines that name as a safe wrapper
- * around the legacy, non-null-terminating-on-truncation kernel-mode
- * _vsnprintf. This user-mode types.h has no such problem (the real UCRT
- * vsnprintf() is already POSIX-conformant), so just alias the name to it.
- */
-#include <stdio.h>
-#define	zfs_vsnprintf vsnprintf
-
 #endif

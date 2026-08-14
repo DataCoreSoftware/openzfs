@@ -995,8 +995,8 @@ zfsctl_snapshot_name(zfsvfs_t *zfsvfs, const char *snap_name, int len,
 	if ((strlen(full_name) + 1 + strlen(snap_name)) >= len)
 		return (SET_ERROR(ENAMETOOLONG));
 
-	(void) strlcat(full_name, "@", len);
-	(void) strlcat(full_name, snap_name, len);
+	(void) strcat(full_name, "@");
+	(void) strcat(full_name, snap_name);
 
 	return (0);
 }
