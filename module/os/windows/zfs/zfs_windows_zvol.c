@@ -104,18 +104,14 @@ zvol_start(PDRIVER_OBJECT  DriverObject, PUNICODE_STRING pRegistryPath)
 	// supporting more would mean bigger changes in the zv_targets
 	// array. now we can go up to 32,640 zvols.
 	pwzvolDrvInfo->NumberOfBuses = 1;
+	SIZE_T zvContextArraySize = (SIZE_T)pwzvolDrvInfo->MaximumNumberOfTargets *
+	    pwzvolDrvInfo->MaximumNumberOfLogicalUnits * sizeof (wzvolContext);
+
 	pwzvolDrvInfo->zvContextArray =
-	    (wzvolContext*)ExAllocatePoolWithTag(NonPagedPoolNx,
-	    ((SIZE_T)pwzvolDrvInfo->MaximumNumberOfTargets *
-	    pwzvolDrvInfo->MaximumNumberOfLogicalUnits *
-	    sizeof (wzvolContext)), MP_TAG_GENERAL);
+	    (wzvolContext*)spl_ExAllocatePoolZero(NonPagedPoolNx,
+	    zvContextArraySize, MP_TAG_GENERAL);
 	if (pwzvolDrvInfo->zvContextArray == NULL)
 		return (STATUS_NO_MEMORY);
-
-	RtlZeroMemory(pwzvolDrvInfo->zvContextArray,
-	    ((SIZE_T)pwzvolDrvInfo->MaximumNumberOfTargets *
-	    pwzvolDrvInfo->MaximumNumberOfLogicalUnits *
-	    (sizeof (wzvolContext))));
 
 	RtlZeroMemory(&hwInitData, sizeof (VIRTUAL_HW_INITIALIZATION_DATA));
 
@@ -345,11 +341,9 @@ wzvol_HwReportAdapter(__in pHW_HBA_EXT pHBAExt)
 	    WnodeSizeInstanceName +
 	    WnodeSizeDataBlock;
 
-	pWnode = ExAllocatePoolWithTag(NonPagedPoolNx, size, MP_TAG_GENERAL);
+	pWnode = spl_ExAllocatePoolZero(NonPagedPoolNx, size, MP_TAG_GENERAL);
 
 	if (NULL != pWnode) {
-		RtlZeroMemory(pWnode, size);
-
 		// Fill out most of header. StorPort will set the
 		// ProviderId and TimeStamp in the header.
 
@@ -445,11 +439,9 @@ wzvol_HwReportLink(__in pHW_HBA_EXT pHBAExt)
 	    WnodeSizeInstanceName +
 	    WnodeSizeDataBlock;
 
-	pWnode = ExAllocatePoolWithTag(NonPagedPoolNx, size, MP_TAG_GENERAL);
+	pWnode = spl_ExAllocatePoolZero(NonPagedPoolNx, size, MP_TAG_GENERAL);
 
 	if (NULL != pWnode) {
-		RtlZeroMemory(pWnode, size);
-
 		// Fill out most of header. StorPort will set the
 		// ProviderId and TimeStamp in the header.
 
@@ -535,11 +527,9 @@ wzvol_HwReportLog(__in pHW_HBA_EXT pHBAExt)
 	    WnodeSizeInstanceName +
 	    WnodeSizeDataBlock;
 
-	pWnode = ExAllocatePoolWithTag(NonPagedPoolNx, size, MP_TAG_GENERAL);
+	pWnode = spl_ExAllocatePoolZero(NonPagedPoolNx, size, MP_TAG_GENERAL);
 
 	if (NULL != pWnode) {
-		RtlZeroMemory(pWnode, size);
-
 		// Fill out most of header. StorPort will set the
 		// ProviderId and TimeStamp in the header.
 

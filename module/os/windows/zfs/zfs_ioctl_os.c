@@ -139,7 +139,7 @@ NTSTATUS zpool_zfs_get_metrics(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_
     perf->zpool_allocated = 0;
     perf->zpool_size = 0;
     perf->zfs_volSize = 0;
-    strncpy(perf->zpoolHealthState, "", sizeof(perf->zpoolHealthState));
+    spl_strlcpy(perf->zpoolHealthState, "", sizeof(perf->zpoolHealthState));
     perf->l2arc_alloc_size = 0;
     perf->l2arc_space = 0;
     perf->special_mirror_alloc_size = 0;
@@ -185,7 +185,8 @@ NTSTATUS zpool_zfs_get_metrics(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_
 
 	perf->zpool_allocated = pool_alloc;
 	perf->zpool_size = pool_size;
-	strcpy(perf->zpoolHealthState, healthState);
+	spl_strlcpy(perf->zpoolHealthState, healthState,
+	    sizeof (perf->zpoolHealthState));
     }
     else
 	perf->zfs_volSize = getZvolSize(perf->name);
