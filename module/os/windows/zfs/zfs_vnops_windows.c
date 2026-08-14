@@ -297,7 +297,7 @@ stream_parse(char *filename, char **streamname)
 		*colon = 0; // Cut off streamname from filename
 
 		// We now ADD ":$DATA" to the stream name.
-		strlcat(*streamname, ":$DATA", PATH_MAX - (*streamname - filename));
+		strcat(*streamname, ":$DATA");
 
 		return (0);
 	}
@@ -419,7 +419,7 @@ zfs_find_dvp_vp(zfsvfs_t *zfsvfs, char *filename, int finalpartmaynotexist,
  * - maharmstone
  */
 				REPARSE_DATA_BUFFER *rpb;
-				rpb = ExAllocatePoolUninitialized(PagedPool,
+				rpb = ExAllocatePoolWithTag(PagedPool,
 				    zp->z_size, '!FSZ');
 				zfs_uio_t uio;
 				struct iovec iov = { rpb, zp->z_size };
@@ -1763,17 +1763,10 @@ pnp_query_id(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
 	zmo = (mount_t *)DeviceObject->DeviceExtension;
 
-	Irp->IoStatus.Information = (void *)ExAllocatePoolUninitialized(PagedPool,
+	Irp->IoStatus.Information = (void *)ExAllocatePoolWithTag(PagedPool,
 	    zmo->bus_name.Length + sizeof (UNICODE_NULL), '!OIZ');
 	if (Irp->IoStatus.Information == NULL)
 		return (STATUS_NO_MEMORY);
-
-	// Only bus_name.Length bytes are copied below; the trailing
-	// UNICODE_NULL terminator bytes are never explicitly written,
-	// so zero them explicitly now that the allocator no longer
-	// guarantees zeroed memory.
-	RtlZeroMemory(Irp->IoStatus.Information,
-	    zmo->bus_name.Length + sizeof (UNICODE_NULL));
 
 	RtlCopyMemory(Irp->IoStatus.Information, zmo->bus_name.Buffer,
 	    zmo->bus_name.Length);
@@ -2286,33 +2279,11 @@ BufferUserBuffer(IN OUT PIRP Irp, IN ULONG BufferLength)
 	//  describing the users input buffer, which we will now snapshot.
 	//
 	if (Irp->AssociatedIrp.SystemBuffer == NULL) {
-		PVOID buf;
-
 		UserBuffer = MapUserBuffer(Irp);
-
-		/*
-		 * FsRtlAllocatePoolWithQuotaTag() expands to the deprecated
-		 * ExAllocatePoolWithQuotaTag(). Its documented replacement,
-		 * ExAllocatePool2 with POOL_FLAG_USE_QUOTA, is present in the
-		 * WDK headers but gated behind NTDDI_VERSION >=
-		 * NTDDI_WIN10_VB, above this project's current WDK_WINVER
-		 * (0x0601) target - using it would mean raising the driver's
-		 * minimum supported Windows version project-wide. Reproduce
-		 * the same two effects (charge the calling process's pool
-		 * quota; raise an exception on failure) with the lower-level,
-		 * non-deprecated primitives FsRtlAllocatePoolWithQuotaTag
-		 * itself is built on, instead.
-		 */
-		PsChargePoolQuota(PsGetCurrentProcess(), NonPagedPoolNx,
-		    BufferLength);
-		buf = ExAllocatePoolUninitialized(NonPagedPoolNx,
-		    BufferLength, 'qtaf');
-		if (buf == NULL) {
-			PsReturnPoolQuota(PsGetCurrentProcess(), NonPagedPoolNx,
-			    BufferLength);
-			ExRaiseStatus(STATUS_INSUFFICIENT_RESOURCES);
-		}
-		Irp->AssociatedIrp.SystemBuffer = buf;
+		Irp->AssociatedIrp.SystemBuffer =
+		    FsRtlAllocatePoolWithQuotaTag(NonPagedPoolNx,
+		    BufferLength,
+		    'qtaf');
 		//
 		// Set the flags so that the completion code knows to
 		// deallocate the buffer.
@@ -5348,9 +5319,8 @@ _Function_class_(DRIVER_DISPATCH)
 			    TargetDeviceRelation) {
 				PDEVICE_RELATIONS DeviceRelations;
 				DeviceRelations =
-				    (PDEVICE_RELATIONS)ExAllocatePoolUninitialized(
-				    PagedPool,
-				    sizeof (DEVICE_RELATIONS), 'PnpD');
+				    (PDEVICE_RELATIONS)ExAllocatePool(PagedPool,
+				    sizeof (DEVICE_RELATIONS));
 				if (!DeviceRelations) {
 					TraceEvent(TRACE_NOISY, "enomem DeviceRelations\n");
 					Status = STATUS_INSUFFICIENT_RESOURCES;

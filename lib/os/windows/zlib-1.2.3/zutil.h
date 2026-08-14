@@ -178,100 +178,6 @@ typedef int ptrdiff_t;
 
 /* functions */
 
-#ifdef WIN32
-/*
- * Callers in this file call zlib_vsnprintf() directly (not via a "vsnprintf"
- * macro alias) so the safe wrapper is always used regardless of whether this
- * compiler/CRT already exposes some form of vsnprintf. _vsnprintf_s (unlike
- * the legacy _vsnprintf) always null-terminates the destination buffer, even
- * when the formatted output is truncated, matching the POSIX vsnprintf
- * contract this code is written against.
- */
-#include <stdarg.h>
-#ifndef va_copy
-/*
- * clang-cl provides va_copy as a compiler builtin, but the WDK's own
- * kernel-mode CRT stdarg.h (km\crt\stdarg.h, used when this header is
- * compiled with plain cl.exe rather than clang-cl) does not define it at
- * all. This driver is AMD64/x64-only, where va_list is a plain pointer
- * and a direct assignment is a correct, equivalent substitute.
- */
-#define	va_copy(dest, src) ((dest) = (src))
-#endif
-
-/*
- * "Measure the required length without writing" (buf==NULL/size==0).
- * Neither _vscprintf (declared in the WDK headers but not exported by the
- * kernel-mode CRT import lib - confirmed via a link failure) nor
- * _vsnprintf_s (its count==0 case triggers the invalid-parameter handler)
- * can do this directly in kernel mode. Measure into a generously-sized
- * scratch buffer instead: this file's only caller formats a short
- * "<fd:%d>" tag and short error messages, never anything close to 1024
- * bytes. If that ever changed, the result here is a consistently
- * truncated (safely null-terminated) length - a later real write with the
- * same format+args into a same-size-or-larger buffer would truncate
- * identically, not silently disagree with what was measured.
- */
-static inline int
-zlib_vscprintf(const char *fmt, va_list ap)
-{
-	char scratch[1024];
-	va_list ap_copy;
-	int ret;
-
-	va_copy(ap_copy, ap);
-	ret = _vsnprintf_s(scratch, sizeof (scratch), (size_t)-1, fmt, ap_copy);
-	va_end(ap_copy);
-
-	return (ret >= 0 ? ret : (int)sizeof (scratch) - 1);
-}
-
-static inline int
-zlib_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
-{
-	int ret;
-
-	if (size == 0) {
-		va_list ap_copy;
-		va_copy(ap_copy, ap);
-		ret = zlib_vscprintf(fmt, ap_copy);
-		va_end(ap_copy);
-		return (ret);
-	}
-
-	/*
-	 * _TRUNCATE ((size_t)-1): _vsnprintf_s always null-terminates buf
-	 * itself on truncation (returning -1), so no separate fallback
-	 * write is needed here - a manual buf[size - 1] write would be an
-	 * out-of-bounds write for any future caller that passes a sentinel
-	 * size larger than the true buffer, the same pattern already found
-	 * in module/lua/lstrlib.c's use of the analogous zfs_vsnprintf().
-	 */
-	return (_vsnprintf_s(buf, size, (size_t)-1, fmt, ap));
-}
-
-/*
- * Portable (fixed-argument) counterpart to zlib_vsnprintf(), for callers
- * that don't already have a va_list - e.g. gzio.c's gzdopen(), which needs
- * this to compile both as part of the kernel-mode zlibkern static lib
- * (linked into ZFSin) and as part of the plain user-mode zlib library used
- * by minigzip.c/test tooling. RtlStringCbPrintfA (ntstrsafe.h) would only
- * be usable from the former.
- */
-static inline int
-zlib_snprintf(char *buf, size_t size, const char *fmt, ...)
-{
-	va_list ap;
-	int ret;
-
-	va_start(ap, fmt);
-	ret = zlib_vsnprintf(buf, size, fmt, ap);
-	va_end(ap);
-
-	return (ret);
-}
-#endif
-
 #if defined(STDC99) || (defined(__TURBOC__) && __TURBOC__ >= 0x550)
 #ifndef HAVE_VSNPRINTF
 #define	HAVE_VSNPRINTF
@@ -296,7 +202,7 @@ zlib_snprintf(char *buf, size_t size, const char *fmt, ...)
 #ifdef WIN32
 /* In Win32, vsnprintf is available as the "non-ANSI" _vsnprintf. */
 #if !defined(vsnprintf) && !defined(NO_vsnprintf)
-#define	vsnprintf zlib_vsnprintf
+#define	vsnprintf _vsnprintf
 #endif
 #endif
 #ifdef __SASC

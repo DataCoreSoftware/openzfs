@@ -713,7 +713,7 @@ spl_GetZfsTotalMemory(PUNICODE_STRING RegistryPath)
 			break; // Something is wrong - or we finished
 
 		// Allocate space to hold
-		regBuffer = (PKEY_VALUE_FULL_INFORMATION)ExAllocatePoolUninitialized(
+		regBuffer = (PKEY_VALUE_FULL_INFORMATION)ExAllocatePoolWithTag(
 		    NonPagedPoolNx, length, 'zfsr');
 
 		if (regBuffer == NULL)
@@ -801,7 +801,7 @@ spl_getZfsPreallocSize(PUNICODE_STRING RegistryPath)
 			break; // Something is wrong - or we finished
 
 		// Allocate space to hold
-		regBuffer = (PKEY_VALUE_FULL_INFORMATION)ExAllocatePoolUninitialized(
+		regBuffer = (PKEY_VALUE_FULL_INFORMATION)ExAllocatePoolWithTag(
 		    NonPagedPoolNx, length, 'zfsr');
 
 		if (regBuffer == NULL)
