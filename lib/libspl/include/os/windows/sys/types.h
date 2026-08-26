@@ -228,16 +228,47 @@ typedef uint64_t zoff_t;
 #include <wosix.h>
 #endif
 
-/*
- * Several source files under module/ (module/zfs, module/lua, ...) are
- * shared between the ZFSin kernel driver and this user-mode build (e.g.
- * libzpool) and call zfs_vsnprintf() directly by name - the kernel-side
- * include/os/windows/spl/sys/types.h defines that name as a safe wrapper
- * around the legacy, non-null-terminating-on-truncation kernel-mode
- * _vsnprintf. This user-mode types.h has no such problem (the real UCRT
- * vsnprintf() is already POSIX-conformant), so just alias the name to it.
- */
+#include <string.h>
 #include <stdio.h>
-#define	zfs_vsnprintf vsnprintf
+
+/*
+ * Mirrors include/os/windows/spl/sys/types.h's kernel-mode shims of the
+ * same name. Several shared module/zfs, module/icp, and module/lua
+ * source files (built both into the ZFSin kernel driver and into
+ * user-mode libzpool/libicp/zlib here) call these directly by name, not
+ * through a portable macro. In user mode, real strlcpy/strlcat
+ * (lib/libspl) and real, C99-conformant UCRT vsnprintf are already
+ * available, so these are simple passthroughs - no downlevel-
+ * unavailability workaround is needed here, unlike the kernel version.
+ */
+static __inline size_t
+spl_strlcpy(char *dst, const char *src, size_t dstsize)
+{
+	return (strlcpy(dst, src, dstsize));
+}
+
+static __inline size_t
+spl_strlcat(char *dst, const char *src, size_t dstsize)
+{
+	return (strlcat(dst, src, dstsize));
+}
+
+static __inline int
+spl_vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
+{
+	return (vsnprintf(buf, size, fmt, args));
+}
+
+static __inline int
+spl_snprintf(char *buf, size_t size, const char *fmt, ...)
+{
+	va_list args;
+	int ret;
+
+	va_start(args, fmt);
+	ret = spl_vsnprintf(buf, size, fmt, args);
+	va_end(args);
+	return (ret);
+}
 
 #endif

@@ -37,7 +37,7 @@ static size_t str_sprintf(char *buf, const char *fmt, ...) {
   size_t len;
 
   va_start(args, fmt);
-  len = zfs_vsnprintf(buf, INT_MAX, fmt, args);
+  len = spl_vsnprintf(buf, INT_MAX, fmt, args);
   va_end(args);
 
   return len;

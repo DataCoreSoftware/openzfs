@@ -929,7 +929,7 @@ zfs_blkptr_verify_log(spa_t *spa, const blkptr_t *bp,
 	char buf[256];
 
 	va_start(adx, fmt);
-	(void) zfs_vsnprintf(buf, sizeof (buf), fmt, adx);
+	(void) spl_vsnprintf(buf, sizeof (buf), fmt, adx);
 	va_end(adx);
 
 	switch (blk_verify) {

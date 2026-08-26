@@ -309,10 +309,20 @@ sbuf_vprintf(struct sbuf *s, const char *fmt, va_list ap)
 
 	do {
 		va_copy(ap_copy, ap);
-		len = zfs_vsnprintf(&s->s_buf[s->s_len], SBUF_FREESPACE(s) + 1,
+		len = spl_vsnprintf(&s->s_buf[s->s_len], SBUF_FREESPACE(s) + 1,
 		    fmt, ap_copy);
 		// left-side must be assignable. Win tries to set to 0.
 		// va_end(ap_copy);
+		/*
+		 * spl_vsnprintf() can return -1 on failure (e.g. format
+		 * needs more than its ~1 MiB growth ceiling). Treat that
+		 * as "nothing written" rather than let a negative len
+		 * flow into the signed s_len accounting below, which
+		 * would silently decrement s_len and corrupt the next
+		 * sbuf_vprintf() call's buffer offset.
+		 */
+		if (len < 0)
+			len = 0;
 	} while (len > SBUF_FREESPACE(s) &&
 	    sbuf_extend(s, len - SBUF_FREESPACE(s)) == 0);
 	s->s_len += min(len, SBUF_FREESPACE(s));
@@ -785,7 +795,7 @@ void
 kstat_set_string(char *dst, const char *src)
 {
 	bzero(dst, KSTAT_STRLEN);
-	(void) strlcpy(dst, src, KSTAT_STRLEN);
+	(void) spl_strlcpy(dst, src, KSTAT_STRLEN);
 }
 
 void
@@ -1034,8 +1044,8 @@ kstat_create_zone(const char *ks_module, int ks_instance, const char *ks_name,
 	if (ks_name == NULL) {
 		char buf[KSTAT_STRLEN];
 		kstat_set_string(buf, ks_module);
-		(void) RtlStringCbPrintfA(namebuf, sizeof (namebuf), "%s%d",
-		    buf, ks_instance);
+		(void) spl_snprintf(namebuf, sizeof (namebuf), "%s%d", buf,
+		    ks_instance);
 		ks_name = namebuf;
 	}
 

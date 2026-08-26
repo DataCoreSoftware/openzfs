@@ -145,7 +145,7 @@ vdev_dbgmsg(vdev_t *vd, const char *fmt, ...)
 	char buf[256];
 
 	va_start(adx, fmt);
-	(void) zfs_vsnprintf(buf, sizeof (buf), fmt, adx);
+	(void) spl_vsnprintf(buf, sizeof (buf), fmt, adx);
 	va_end(adx);
 
 	if (vd->vdev_path != NULL) {

@@ -397,15 +397,13 @@ ScsiGetMPIOExt(
 	}
 
 	if (pNextEntry == &pHBAExt->pwzvolDrvObj->ListMPIOExt) {
-		pLUMPIOExt = ExAllocatePoolUninitialized(NonPagedPoolNx,
+		pLUMPIOExt = spl_ExAllocatePoolZero(NonPagedPoolNx,
 		    sizeof (HW_LU_EXTENSION_MPIO), MP_TAG_GENERAL);
 
 		if (!pLUMPIOExt) {
 			dprintf("Failed to allocate HW_LU_EXTENSION_MPIO\n");
 			goto Done;
 		}
-
-		RtlZeroMemory(pLUMPIOExt, sizeof (HW_LU_EXTENSION_MPIO));
 
 		pLUMPIOExt->ScsiAddr.PathId = pSrb->PathId;
 		pLUMPIOExt->ScsiAddr.TargetId = pSrb->TargetId;
@@ -515,7 +513,7 @@ ScsiOpInquiry(
 		    pHBAExt->ProductRevision, 4);
 		memset((PCHAR)pInqData->VendorSpecific, ' ',
 		    sizeof (pInqData->VendorSpecific));
-		RtlStringCbPrintfA(pInqData->VendorSpecific,
+		spl_snprintf(pInqData->VendorSpecific,
 		    sizeof (pInqData->VendorSpecific), "%.04d-%.04d-%.04d",
 		    pSrb->PathId, pSrb->TargetId, pSrb->Lun);
 		pInqData->VendorSpecific[strlen(pInqData->VendorSpecific)] =
@@ -1089,8 +1087,11 @@ DiReadWriteSetup(zvol_state_t *zv, MpWkRtnAction action, zfsiodesc_t *pIo)
 {
 	// cannot use kmem_alloc with sleep if IRQL dispatch so get straight
 	// from NP pool.
-	pMP_WorkRtnParms pWkRtnParms =
-	    (pMP_WorkRtnParms)ExAllocatePoolUninitialized(
+	// Not spl_ExAllocatePoolZero(): this allocation is deliberately
+	// larger than what gets zeroed below - the extra IoSizeofWorkItem()
+	// bytes are opaque storage that IoInitializeWorkItem() fills in
+	// itself, so zeroing them would be redundant work.
+	pMP_WorkRtnParms pWkRtnParms = (pMP_WorkRtnParms)ExAllocatePoolUninitialized(
 	    NonPagedPoolNx, ALIGN_UP_BY(sizeof (MP_WorkRtnParms), 16) +
 	    IoSizeofWorkItem(), MP_TAG_GENERAL);
 	if (NULL == pWkRtnParms) {

@@ -132,7 +132,7 @@ gz_open(
 	if (s->path == NULL) {
 		return (destroy(s), (gzFile)Z_NULL);
 	}
-	strlcpy(s->path, path, strlen(path)+1); /* do this early for debugging */
+	spl_strlcpy(s->path, path, strlen(path) + 1); /* do this early for debugging */
 
 	s->mode = '\0';
 	do {
@@ -234,7 +234,7 @@ gzdopen(
 
 	if (fd < 0)
 		return ((gzFile)Z_NULL);
-	zlib_snprintf(name, sizeof (name), "<fd:%d>", fd); /* for debugging */
+	spl_snprintf(name, sizeof (name), "<fd:%d>", fd); /* for debugging */
 
 	return (gz_open(name, mode, fd));
 }
@@ -666,7 +666,7 @@ gzprintf(gzFile file, const char *format, /* args */ ...)
 	va_end(va);
 	len = strlen(buf);
 #else
-	len = zlib_vsnprintf(buf, sizeof (buf), format, va);
+	len = spl_vsnprintf(buf, sizeof (buf), format, va);
 	va_end(va);
 #endif
 #endif
@@ -1094,9 +1094,9 @@ gzerror(
 	s->msg = (char *)ALLOC(strlen(s->path) + strlen(m) + 3);
 	if (s->msg == Z_NULL)
 		return ((const char *)ERR_MSG(Z_MEM_ERROR));
-	strlcpy(s->msg, s->path, strlen(s->path) + strlen(m) + 3);
-	strlcat(s->msg, ": ", strlen(s->path) + strlen(m) + 3);
-	strlcat(s->msg, m, strlen(s->path) + strlen(m) + 3);
+	spl_strlcpy(s->msg, s->path, strlen(s->path) + strlen(m) + 3);
+	spl_strlcat(s->msg, ": ", strlen(s->path) + strlen(m) + 3);
+	spl_strlcat(s->msg, m, strlen(s->path) + strlen(m) + 3);
 	return ((const char *)s->msg);
 }
 

@@ -1243,18 +1243,8 @@ zcp_args_error(lua_State *state, const char *fname, const zcp_arg_t *pargs,
 	size_t msglen = 0;
 	va_list argp;
 
-	/*
-	 * Call zfs_vsnprintf() by name (not through the "vsnprintf" macro)
-	 * so CodeQL's driver-scoped scan, which flags the literal
-	 * "vsnprintf" macro-invocation name, doesn't fire here. This file
-	 * also compiles into the user-mode libzpool library, where
-	 * zfs_vsnprintf is aliased (lib/libspl/include/os/windows/sys/
-	 * types.h) to the real, POSIX-conformant UCRT vsnprintf - unlike
-	 * RtlStringCbVPrintfA/STATUS_SUCCESS, previously used here, which
-	 * don't exist in that build at all.
-	 */
 	va_start(argp, fmt);
-	VERIFY3U(len, >, zfs_vsnprintf(errmsg, len, fmt, argp));
+	VERIFY3U(len, >, spl_vsnprintf(errmsg, len, fmt, argp));
 	va_end(argp);
 
 	/*
