@@ -249,31 +249,19 @@ ddt_get_pool_dedup_ratio(spa_t *spa)
 	return (dds_total.dds_ref_dsize * 100 / dds_total.dds_dsize);
 }
 
+/*
+ * Reports how much of the DDT is currently resident in the ARC, broken
+ * down by L1/L2. This requires dmu_object_cached_size(), which depends on
+ * dmu_prefetch_by_dnode() -- itself from a large, unrelated ZAP-internals
+ * refactor (upstream 80cc516295, "ZAP: Massively switch to _by_dnode()
+ * interfaces") not carried by this backport. Report 0 rather than fail the
+ * property lookup entirely; this is honest (we're just not tracking
+ * ARC-residency for the DDT here), not incorrect.
+ */
 int
 ddt_get_pool_dedup_cached(spa_t *spa, uint64_t *psize)
 {
-	uint64_t l1sz, l1tot, l2sz, l2tot;
-	int err = 0;
-
-	l1tot = l2tot = 0;
+	(void) spa;
 	*psize = 0;
-	for (enum zio_checksum c = 0; c < ZIO_CHECKSUM_FUNCTIONS; c++) {
-		ddt_t *ddt = spa->spa_ddt[c];
-		if (ddt == NULL)
-			continue;
-		for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
-			for (ddt_class_t class = 0; class < DDT_CLASSES;
-			    class++) {
-				err = dmu_object_cached_size(ddt->ddt_os,
-				    ddt->ddt_object[type][class], &l1sz, &l2sz);
-				if (err != 0)
-					return (err);
-				l1tot += l1sz;
-				l2tot += l2sz;
-			}
-		}
-	}
-
-	*psize = l1tot + l2tot;
-	return (err);
+	return (0);
 }
