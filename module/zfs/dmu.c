@@ -701,13 +701,48 @@ dmu_buf_rele_array(dmu_buf_t **dbp_fake, int numbufs, void *tag)
  * Note that if the indirect blocks above the blocks being prefetched are not
  * in cache, they will be asynchronously read in.
  */
+/*
+ * Prefetch [offset, offset + len) in the given dnode. The caller must
+ * already hold a reference to dn (e.g. via dnode_hold()); this does not
+ * take or release one.
+ */
+void
+dmu_prefetch_by_dnode(dnode_t *dn, int64_t level, uint64_t offset,
+    uint64_t len, zio_priority_t pri)
+{
+	uint64_t blkid;
+	int nblks;
+
+	/*
+	 * offset + len - 1 is the last byte we want to prefetch for, and offset
+	 * is the first.  Then dbuf_whichblk(dn, level, off + len - 1) is the
+	 * last block we want to prefetch, and dbuf_whichblock(dn, level,
+	 * offset)  is the first.  Then the number we need to prefetch is the
+	 * last - first + 1.
+	 */
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	if (level > 0 || dn->dn_datablkshift != 0) {
+		nblks = dbuf_whichblock(dn, level, offset + len - 1) -
+		    dbuf_whichblock(dn, level, offset) + 1;
+	} else {
+		nblks = (offset < dn->dn_datablksz);
+	}
+
+	if (nblks != 0) {
+		blkid = dbuf_whichblock(dn, level, offset);
+		for (int i = 0; i < nblks; i++)
+			dbuf_prefetch(dn, level, blkid + i, pri, 0);
+	}
+	rw_exit(&dn->dn_struct_rwlock);
+}
+
 void
 dmu_prefetch(objset_t *os, uint64_t object, int64_t level, uint64_t offset,
     uint64_t len, zio_priority_t pri)
 {
 	dnode_t *dn;
 	uint64_t blkid;
-	int nblks, err;
+	int err;
 
 	if (len == 0) {  /* they're interested in the bonus buffer */
 		dn = DMU_META_DNODE(os);
@@ -737,27 +772,7 @@ dmu_prefetch(objset_t *os, uint64_t object, int64_t level, uint64_t offset,
 	if (err != 0)
 		return;
 
-	/*
-	 * offset + len - 1 is the last byte we want to prefetch for, and offset
-	 * is the first.  Then dbuf_whichblk(dn, level, off + len - 1) is the
-	 * last block we want to prefetch, and dbuf_whichblock(dn, level,
-	 * offset)  is the first.  Then the number we need to prefetch is the
-	 * last - first + 1.
-	 */
-	rw_enter(&dn->dn_struct_rwlock, RW_READER);
-	if (level > 0 || dn->dn_datablkshift != 0) {
-		nblks = dbuf_whichblock(dn, level, offset + len - 1) -
-		    dbuf_whichblock(dn, level, offset) + 1;
-	} else {
-		nblks = (offset < dn->dn_datablksz);
-	}
-
-	if (nblks != 0) {
-		blkid = dbuf_whichblock(dn, level, offset);
-		for (int i = 0; i < nblks; i++)
-			dbuf_prefetch(dn, level, blkid + i, pri, 0);
-	}
-	rw_exit(&dn->dn_struct_rwlock);
+	dmu_prefetch_by_dnode(dn, level, offset, len, pri);
 
 	dnode_rele(dn, FTAG);
 }

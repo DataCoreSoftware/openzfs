@@ -79,10 +79,7 @@ ddt_zap_decompress(uchar_t *src, void *dst, size_t s_len, size_t d_len)
 		return;
 	}
 
-	abd_t sabd;
-	abd_get_from_buf_struct(&sabd, src, s_len);
-	VERIFY0(zio_decompress_data(cpfunc, &sabd, dst, s_len, d_len, NULL));
-	abd_free(&sabd);
+	VERIFY0(zio_decompress_data_buf(cpfunc, src, dst, s_len, d_len, NULL));
 
 	if (((version & DDT_ZAP_COMPRESS_BYTEORDER_MASK) != 0) !=
 	    (ZFS_HOST_BYTEORDER != 0))
