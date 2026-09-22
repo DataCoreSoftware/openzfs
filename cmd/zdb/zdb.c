@@ -3184,23 +3184,6 @@ fuid_table_destroy(void)
 	}
 }
 
-static void
-zdb_exit(int reason)
-{
-	if (os != NULL) {
-		close_objset(os, FTAG);
-	} else if (spa != NULL) {
-		spa_close(spa, FTAG);
-	}
-
-	fuid_table_destroy();
-
-	if (kernel_init_done)
-		kernel_fini();
-
-	exit(reason);
-}
-
 /*
  * Clean up DDT internal state. ddt_lookup() adds entries to ddt_tree, which on
  * a live pool are normally cleaned up during ddt_sync(). We can't do that (and
