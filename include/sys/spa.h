@@ -483,6 +483,21 @@ _NOTE(CONSTCOND) } while (0)
 	(BP_IS_EMBEDDED(bp) ? 0 : \
 	(bp)->blk_phys_birth ? (bp)->blk_phys_birth : (bp)->blk_birth)
 
+/*
+ * These are aliases for BP_PHYSICAL_BIRTH() and the raw blk_birth/
+ * blk_phys_birth fields, added only so that later cherry-picked dedup
+ * commits (which use upstream's post-493fcce9be names) compile without
+ * pulling in that commit's unrelated blkptr_t field rename (blk_birth/
+ * blk_phys_birth -> blk_birth_word[2]), which would otherwise force
+ * touching every other blk_birth consumer in the tree. Same on-disk
+ * bytes, same semantics, just under the newer names.
+ */
+#define	BP_GET_BIRTH(bp)		BP_PHYSICAL_BIRTH(bp)
+#define	BP_GET_LOGICAL_BIRTH(bp)	((bp)->blk_birth)
+#define	BP_SET_LOGICAL_BIRTH(bp, x)	((bp)->blk_birth = (x))
+#define	BP_GET_PHYSICAL_BIRTH(bp)	((bp)->blk_phys_birth)
+#define	BP_SET_PHYSICAL_BIRTH(bp, x)	((bp)->blk_phys_birth = (x))
+
 #define	BP_SET_BIRTH(bp, logical, physical)	\
 {						\
 	ASSERT(!BP_IS_EMBEDDED(bp));		\
