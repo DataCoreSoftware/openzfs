@@ -875,6 +875,8 @@ void dmu_prefetch_by_dnode(dnode_t *dn, int64_t level, uint64_t offset,
     uint64_t len, enum zio_priority pri);
 int dmu_prefetch_wait(objset_t *os, uint64_t object, uint64_t offset,
     uint64_t size);
+int dmu_object_cached_size(objset_t *os, uint64_t object,
+    uint64_t *l1sz, uint64_t *l2sz);
 
 typedef struct dmu_object_info {
 	/* All sizes are in bytes unless otherwise indicated. */

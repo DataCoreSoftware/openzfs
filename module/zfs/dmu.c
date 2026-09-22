@@ -877,6 +877,114 @@ dmu_prefetch_wait(objset_t *os, uint64_t object, uint64_t offset, uint64_t size)
 	return (err);
 }
 
+static void
+dmu_cached_bps(spa_t *spa, blkptr_t *bps, uint_t nbps,
+    uint64_t *l1sz, uint64_t *l2sz)
+{
+	int cached_flags;
+
+	if (bps == NULL)
+		return;
+
+	for (size_t blk_off = 0; blk_off < nbps; blk_off++) {
+		blkptr_t *bp = &bps[blk_off];
+
+		if (BP_IS_HOLE(bp))
+			continue;
+
+		cached_flags = arc_cached(spa, bp);
+		if (cached_flags == 0)
+			continue;
+
+		if ((cached_flags & (ARC_CACHED_IN_L1 | ARC_CACHED_IN_L2)) ==
+		    ARC_CACHED_IN_L2)
+			*l2sz += BP_GET_LSIZE(bp);
+		else
+			*l1sz += BP_GET_LSIZE(bp);
+	}
+}
+
+/*
+ * Estimate DMU object cached size.
+ */
+int
+dmu_object_cached_size(objset_t *os, uint64_t object,
+    uint64_t *l1sz, uint64_t *l2sz)
+{
+	dnode_t *dn;
+	dmu_object_info_t doi;
+	int err = 0;
+
+	*l1sz = *l2sz = 0;
+
+	if (dnode_hold(os, object, FTAG, &dn) != 0)
+		return (0);
+
+	if (dn->dn_nlevels < 2) {
+		dnode_rele(dn, FTAG);
+		return (0);
+	}
+
+	dmu_object_info_from_dnode(dn, &doi);
+
+	for (uint64_t off = 0; off < doi.doi_max_offset;
+	    off += dmu_prefetch_max) {
+		/* dbuf_read doesn't prefetch L1 blocks. */
+		dmu_prefetch_by_dnode(dn, 1, off,
+		    dmu_prefetch_max, ZIO_PRIORITY_SYNC_READ);
+	}
+
+	/*
+	 * Hold all valid L1 blocks, asking ARC the status of each BP
+	 * contained in each such L1 block.
+	 */
+	uint_t nbps = bp_span_in_blocks(dn->dn_indblkshift, 1);
+	uint64_t l1blks = 1 + (dn->dn_maxblkid / nbps);
+
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	for (uint64_t blk = 0; blk < l1blks; blk++) {
+		dmu_buf_impl_t *db = NULL;
+
+		if (issig(JUSTLOOKING)) {
+			/*
+			 * On interrupt, get out, and bubble up EINTR
+			 */
+			err = EINTR;
+			break;
+		}
+
+		/*
+		 * If we get an i/o error here, the L1 can't be read,
+		 * and nothing under it could be cached, so we just
+		 * continue. Ignoring the error from dbuf_hold_impl
+		 * or from dbuf_read is then a reasonable choice.
+		 */
+		err = dbuf_hold_impl(dn, 1, blk, B_TRUE, B_FALSE, FTAG, &db);
+		if (err != 0) {
+			/*
+			 * ignore error and continue
+			 */
+			err = 0;
+			continue;
+		}
+
+		err = dbuf_read(db, NULL, DB_RF_CANFAIL);
+		if (err == 0) {
+			dmu_cached_bps(dmu_objset_spa(os), db->db.db_data,
+			    nbps, l1sz, l2sz);
+		}
+		/*
+		 * error may be ignored, and we continue
+		 */
+		err = 0;
+		dbuf_rele(db, FTAG);
+	}
+	rw_exit(&dn->dn_struct_rwlock);
+
+	dnode_rele(dn, FTAG);
+	return (err);
+}
+
 /*
  * Get the next "chunk" of file data to free.  We traverse the file from
  * the end so that the file gets shorter over time (if we crashes in the
