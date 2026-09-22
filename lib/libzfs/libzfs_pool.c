@@ -5028,7 +5028,7 @@ zpool_ddt_prune(zpool_handle_t *zhp, zpool_ddt_prune_unit_t unit,
 	int error = lzc_ddt_prune(zhp->zpool_name, unit, amount);
 	if (error != 0) {
 		libzfs_handle_t *hdl = zhp->zpool_hdl;
-		char errbuf[ERRBUFLEN];
+		char errbuf[1024];
 
 		(void) snprintf(errbuf, sizeof (errbuf), dgettext(TEXT_DOMAIN,
 		    "cannot prune dedup table on '%s'"), zhp->zpool_name);
