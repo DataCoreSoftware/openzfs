@@ -1369,9 +1369,14 @@ again:
 			    __func__, __LINE__, err);
 			return (err);
 		}
-	} else {
-		rw_enter(&zc->zc_leaf->l_rwlock, RW_READER);
 	}
+	/*
+	 * If zc->zc_leaf was already non-NULL on entry to this function, we
+	 * already hold its l_rwlock as reader, taken above while checking
+	 * whether it had been shrunk or split (and kept, since it hadn't).
+	 * Re-entering it here would leak a reader reference: this function
+	 * releases the lock exactly once, at the bottom.
+	 */
 	l = zc->zc_leaf;
 
 	err = zap_leaf_lookup_closest(l, zc->zc_hash, zc->zc_cd, &zeh);
