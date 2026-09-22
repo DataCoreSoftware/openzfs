@@ -354,12 +354,7 @@ spa_prop_add_user(nvlist_t *nvl, const char *propname, char *strval,
 
 	VERIFY(nvlist_alloc(&propval, NV_UNIQUE_NAME, KM_SLEEP) == 0);
 	VERIFY(nvlist_add_uint64(propval, ZPROP_SOURCE, src) == 0);
-
-	if (strval != NULL)
-		VERIFY(nvlist_add_string(propval, ZPROP_VALUE, strval) == 0);
-	else
-		VERIFY(nvlist_add_uint64(propval, ZPROP_VALUE, intval) == 0);
-
+	VERIFY(nvlist_add_string(propval, ZPROP_VALUE, strval) == 0);
 	VERIFY(nvlist_add_nvlist(nvl, propname, propval) == 0);
 	nvlist_free(propval);
 }
