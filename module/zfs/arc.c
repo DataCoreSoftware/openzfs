@@ -5887,10 +5887,6 @@ arc_cached(spa_t *spa, const blkptr_t *bp)
 		case ARC_STATE_MFU:
 			flags |= ARC_CACHED_IN_MFU | ARC_CACHED_IN_L1;
 			break;
-		case ARC_STATE_UNCACHED:
-			/* The header is still in L1, probably not for long */
-			flags |= ARC_CACHED_IN_L1;
-			break;
 		default:
 			break;
 		}

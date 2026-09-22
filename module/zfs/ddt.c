@@ -210,8 +210,7 @@
  */
 #define	DDT_CHECKSUM_VALID(c)	\
 	(c == ZIO_CHECKSUM_SHA256 || c == ZIO_CHECKSUM_SHA512 || \
-	c == ZIO_CHECKSUM_SKEIN || c == ZIO_CHECKSUM_EDONR || \
-	c == ZIO_CHECKSUM_BLAKE3)
+	c == ZIO_CHECKSUM_SKEIN || c == ZIO_CHECKSUM_EDONR)
 
 static kmem_cache_t *ddt_cache;
 
@@ -2578,7 +2577,7 @@ ddt_prune_walk(spa_t *spa, uint64_t cutoff, ddt_age_histo_t *histogram)
 		ddt_t *ddt = spa->spa_ddt[ddb.ddb_checksum];
 		VERIFY(ddt);
 
-		if (spa_shutting_down(spa) || issig())
+		if (spa_shutting_down(spa) || issig(JUSTLOOKING))
 			break;
 
 		ASSERT(ddt->ddt_flags & DDT_FLAG_FLAT);
@@ -2694,7 +2693,7 @@ ddt_prune_unique_entries(spa_t *spa, zpool_ddt_prune_unit_t unit,
 		return (EINVAL);
 	}
 
-	if (cutoff > 0 && !spa_shutting_down(spa) && !issig()) {
+	if (cutoff > 0 && !spa_shutting_down(spa) && !issig(JUSTLOOKING)) {
 		/* Traverse DDT to prune entries older that our cuttoff */
 		ddt_prune_walk(spa, cutoff, NULL);
 	}
