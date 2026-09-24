@@ -494,19 +494,64 @@ spl_start(PUNICODE_STRING RegistryPath)
 	// So until then, pull some numbers out of the aether. Next
 	// we could let users pass in a value, somehow...
 	total_memory = spl_GetPhysMem();
-	real_total_memory = spl_GetPhysMem();
+	real_total_memory = total_memory;
 
 	// Set 2GB as code above doesnt work
 	if (real_total_memory) {
 		zfs_total_memory_limit = spl_GetZfsTotalMemory(RegistryPath);
-		if (zfs_total_memory_limit >= ZFS_MIN_MEMORY_LIMIT &&
-		    zfs_total_memory_limit < real_total_memory)
-			total_memory = zfs_total_memory_limit;
-		else
+
+		if (zfs_total_memory_limit == 0) {
 			total_memory = real_total_memory * 50ULL / 100ULL;
+			TraceEvent(TRACE_INFO,
+			    "%s: no zfs_total_memory_limit set in registry; "
+			    "using half of detected physical memory: %llu "
+			    "bytes (%llu MB) out of %llu bytes (%llu MB)\n",
+			    __func__, total_memory, total_memory >> 20,
+			    real_total_memory, real_total_memory >> 20);
+		} else if (zfs_total_memory_limit < ZFS_MIN_MEMORY_LIMIT) {
+			total_memory = real_total_memory * 50ULL / 100ULL;
+			TraceEvent(TRACE_WARNING,
+			    "%s: REJECTED registry zfs_total_memory_limit "
+			    "%llu bytes (%llu MB): below the minimum of %llu "
+			    "bytes (%llu MB). Using half of detected physical "
+			    "memory instead: %llu bytes (%llu MB)\n",
+			    __func__, zfs_total_memory_limit,
+			    zfs_total_memory_limit >> 20,
+			    (uint64_t)ZFS_MIN_MEMORY_LIMIT,
+			    (uint64_t)ZFS_MIN_MEMORY_LIMIT >> 20,
+			    total_memory, total_memory >> 20);
+		} else if (zfs_total_memory_limit >= real_total_memory) {
+			total_memory = real_total_memory * 50ULL / 100ULL;
+			TraceEvent(TRACE_ERROR,
+			    "%s: REJECTED registry zfs_total_memory_limit "
+			    "%llu bytes (%llu MB): it is not less than the "
+			    "detected physical memory of %llu bytes (%llu MB). "
+			    "Using half of detected physical memory instead: "
+			    "%llu bytes (%llu MB). If this server really has "
+			    "more memory than that, physical memory detection "
+			    "is at fault - check the descriptor log above.\n",
+			    __func__, zfs_total_memory_limit,
+			    zfs_total_memory_limit >> 20, real_total_memory,
+			    real_total_memory >> 20, total_memory,
+			    total_memory >> 20);
+		} else {
+			total_memory = zfs_total_memory_limit;
+			TraceEvent(TRACE_INFO,
+			    "%s: ACCEPTED registry zfs_total_memory_limit "
+			    "%llu bytes (%llu MB) out of detected physical "
+			    "memory %llu bytes (%llu MB)\n", __func__,
+			    total_memory, total_memory >> 20,
+			    real_total_memory, real_total_memory >> 20);
+		}
 	} else {
 		real_total_memory = ZFS_MIN_MEMORY_LIMIT;
 		total_memory = real_total_memory * 50ULL / 100ULL;
+		TraceEvent(TRACE_ERROR,
+		    "%s: FAILED to detect any physical memory; falling back "
+		    "to %llu bytes (%llu MB) and using %llu bytes (%llu MB). "
+		    "ZFS will behave as if this were a very small server.\n",
+		    __func__, real_total_memory, real_total_memory >> 20,
+		    total_memory, total_memory >> 20);
 	}
 
 	dprintf("%s real_total_memory: %llu zfs_total_memory_limit: %llu "
@@ -592,6 +637,30 @@ typedef struct {
 } MEMORY, *PMEMORY;
 #pragma pack(pop)
 
+/*
+ * CM_PARTIAL_RESOURCE_DESCRIPTOR stores u.Memory.Length as a ULONG, so any
+ * range that does not fit is reported as CmResourceTypeMemoryLarge with the
+ * length pre-shifted, and the CM_RESOURCE_MEMORY_LARGE_nn flag says by how
+ * much. Handling only LARGE_40 (which tops out at 1TB) silently dropped the
+ * whole of memory on hosts with a range larger than that, leaving only the
+ * sub-4GB ranges below the PCI hole - a 2TB server came out as 1.6GB.
+ */
+#ifndef	CmResourceTypeMemory
+#define	CmResourceTypeMemory		3
+#endif
+#ifndef	CmResourceTypeMemoryLarge
+#define	CmResourceTypeMemoryLarge	7
+#endif
+#ifndef	CM_RESOURCE_MEMORY_LARGE_40
+#define	CM_RESOURCE_MEMORY_LARGE_40	0x0200
+#endif
+#ifndef	CM_RESOURCE_MEMORY_LARGE_48
+#define	CM_RESOURCE_MEMORY_LARGE_48	0x0400
+#endif
+#ifndef	CM_RESOURCE_MEMORY_LARGE_64
+#define	CM_RESOURCE_MEMORY_LARGE_64	0x0800
+#endif
+
 /* TimoVJL */
 LONGLONG
 GetMemResources(char *pData)
@@ -609,12 +678,59 @@ GetMemResources(char *pData)
 	if (*(pData + 0x14) == *(pData + 0x28)) nRLen = 20;
 	PMEMORY pMem;
 	for (DWORD nIdx = 0; nRLen && nIdx < nCnt; nIdx++) {
+		LONGLONG llRange = 0;
+		const char *pEnc = NULL;
+
 		pMem = (PMEMORY)(pPtr + nRLen * nIdx);
-		if (pMem->Type == 3) llMem += pMem->Length;
-		if (pMem->Type == 7 && pMem->Flags == 0x200)
-			llMem += ((LONGLONG)pMem->Length) << 8;
-		pMem += nRLen;
+
+		if (pMem->Type == CmResourceTypeMemory) {
+			llRange = (LONGLONG)pMem->Length;
+			pEnc = "Memory";
+		} else if (pMem->Type == CmResourceTypeMemoryLarge) {
+			/*
+			 * Mask, not equality: other memory flag bits may be
+			 * set alongside the LARGE_nn selector.
+			 */
+			if (pMem->Flags & CM_RESOURCE_MEMORY_LARGE_40) {
+				llRange = ((LONGLONG)pMem->Length) << 8;
+				pEnc = "MemoryLarge40";
+			} else if (pMem->Flags & CM_RESOURCE_MEMORY_LARGE_48) {
+				llRange = ((LONGLONG)pMem->Length) << 16;
+				pEnc = "MemoryLarge48";
+			} else if (pMem->Flags & CM_RESOURCE_MEMORY_LARGE_64) {
+				llRange = ((LONGLONG)pMem->Length) << 32;
+				pEnc = "MemoryLarge64";
+			} else {
+				/*
+				 * An encoding we do not know about. Physical
+				 * memory would be under-reported, which then
+				 * silently mis-sizes the ARC - say so loudly.
+				 */
+				TraceEvent(TRACE_ERROR,
+				    "%s: SKIPPED descriptor %lu: MemoryLarge with "
+				    "unhandled flags 0x%04x, length %lu. Physical "
+				    "memory will be UNDER-REPORTED.\n",
+				    __func__, nIdx, pMem->Flags, pMem->Length);
+				continue;
+			}
+		} else {
+			continue;	/* not a memory descriptor */
+		}
+
+		llMem += llRange;
+
+		TraceEvent(TRACE_INFO,
+		    "%s: descriptor %lu: %s flags 0x%04x start 0x%llx "
+		    "size %lld bytes (%lld MB), running total %lld bytes "
+		    "(%lld MB)\n", __func__, nIdx, pEnc, pMem->Flags,
+		    (unsigned long long)pMem->Start, llRange,
+		    llRange >> 20, llMem, llMem >> 20);
 	}
+
+	TraceEvent(TRACE_INFO,
+	    "%s: detected physical memory %lld bytes (%lld MB) from %lu "
+	    "descriptors\n", __func__, llMem, llMem >> 20, nCnt);
+
 	return (llMem);
 }
 
