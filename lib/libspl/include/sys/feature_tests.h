@@ -33,4 +33,14 @@
 #define	__NORETURN	__attribute__((__noreturn__))
 #endif
 
+#if !defined(zfs_fallthrough)
+#if defined(_MSC_VER)
+#define	zfs_fallthrough		((void)0)
+#elif defined(HAVE_IMPLICIT_FALLTHROUGH)
+#define	zfs_fallthrough		__attribute__((__fallthrough__))
+#else
+#define	zfs_fallthrough		((void)0)
+#endif
+#endif
+
 #endif

@@ -92,6 +92,14 @@
 int zfs_commit_timeout_pct = 5;
 
 /*
+ * Minimal time we care to delay commit waiting for more ZIL records.
+ * At least FreeBSD kernel can't sleep for less than 2us at its best.
+ * So requests to sleep for less then 5us is a waste of CPU time with
+ * a risk of significant log latency increase due to oversleep.
+ */
+static uint64_t zil_min_commit_timeout = 5000;
+
+/*
  * See zil.h for more information about these fields.
  */
 zil_stats_t zil_stats = {
@@ -135,8 +143,8 @@ unsigned long zil_slog_bulk = 768 * 1024;
 static kmem_cache_t *zil_lwb_cache;
 static kmem_cache_t *zil_zcw_cache;
 
-#define	LWB_EMPTY(lwb) ((BP_GET_LSIZE(&lwb->lwb_blk) - \
-    sizeof (zil_chain_t)) == (lwb->lwb_sz - lwb->lwb_nused))
+static void zil_lwb_commit(zilog_t *zilog, lwb_t *lwb, itx_t *itx);
+static itx_t *zil_itx_clone(itx_t *oitx);
 
 static int
 zil_bp_compare(const void *x1, const void *x2)
@@ -556,29 +564,25 @@ zil_alloc_lwb(zilog_t *zilog, blkptr_t *bp, boolean_t slog, uint64_t txg,
 	lwb->lwb_blk = *bp;
 	lwb->lwb_fastwrite = fastwrite;
 	lwb->lwb_slog = slog;
-	lwb->lwb_state = LWB_STATE_CLOSED;
-	lwb->lwb_buf = zio_buf_alloc(BP_GET_LSIZE(bp));
-	lwb->lwb_max_txg = txg;
-	lwb->lwb_write_zio = NULL;
-	lwb->lwb_root_zio = NULL;
-	lwb->lwb_tx = NULL;
-	lwb->lwb_issued_timestamp = 0;
+	lwb->lwb_indirect = B_FALSE;
 	if (BP_GET_CHECKSUM(bp) == ZIO_CHECKSUM_ZILOG2) {
-		lwb->lwb_nused = sizeof (zil_chain_t);
+		lwb->lwb_nused = lwb->lwb_nfilled = sizeof (zil_chain_t);
 		lwb->lwb_sz = BP_GET_LSIZE(bp);
 	} else {
-		lwb->lwb_nused = 0;
+		lwb->lwb_nused = lwb->lwb_nfilled = 0;
 		lwb->lwb_sz = BP_GET_LSIZE(bp) - sizeof (zil_chain_t);
 	}
+	lwb->lwb_state = LWB_STATE_CLOSED;
+	lwb->lwb_buf = zio_buf_alloc(BP_GET_LSIZE(bp));
+	lwb->lwb_write_zio = NULL;
+	lwb->lwb_root_zio = NULL;
+	lwb->lwb_issued_timestamp = 0;
+	lwb->lwb_issued_txg = 0;
+	lwb->lwb_max_txg = txg;
 
 	mutex_enter(&zilog->zl_lock);
 	list_insert_tail(&zilog->zl_lwb_list, lwb);
 	mutex_exit(&zilog->zl_lock);
-
-	ASSERT(!MUTEX_HELD(&lwb->lwb_vdev_lock));
-	ASSERT(avl_is_empty(&lwb->lwb_vdev_tree));
-	VERIFY(list_is_empty(&lwb->lwb_waiters));
-	VERIFY(list_is_empty(&lwb->lwb_itxs));
 
 	return (lwb);
 }
@@ -775,12 +779,10 @@ zil_destroy(zilog_t *zilog, boolean_t keep_first)
 	if (!list_is_empty(&zilog->zl_lwb_list)) {
 		ASSERT(zh->zh_claim_txg == 0);
 		VERIFY(!keep_first);
-		while ((lwb = list_head(&zilog->zl_lwb_list)) != NULL) {
+		while ((lwb = list_remove_head(&zilog->zl_lwb_list)) != NULL) {
 			if (lwb->lwb_fastwrite)
 				metaslab_fastwrite_unmark(zilog->zl_spa,
 				    &lwb->lwb_blk);
-
-			list_remove(&zilog->zl_lwb_list, lwb);
 			if (lwb->lwb_buf != NULL)
 				zio_buf_free(lwb->lwb_buf, lwb->lwb_sz);
 			zio_free(zilog->zl_spa, txg, &lwb->lwb_blk);
@@ -1127,34 +1129,35 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
 {
 	lwb_t *lwb = zio->io_private;
 	zilog_t *zilog = lwb->lwb_zilog;
-	dmu_tx_t *tx = lwb->lwb_tx;
 	zil_commit_waiter_t *zcw;
 	itx_t *itx;
+	uint64_t txg;
+	list_t itxs, waiters;
 
 	spa_config_exit(zilog->zl_spa, SCL_STATE, lwb);
 
 	zio_buf_free(lwb->lwb_buf, lwb->lwb_sz);
 
+	list_create(&itxs, sizeof (itx_t), offsetof(itx_t, itx_node));
+	list_create(&waiters, sizeof (zil_commit_waiter_t),
+	    offsetof(zil_commit_waiter_t, zcw_node));
+
+	hrtime_t t = gethrtime() - lwb->lwb_issued_timestamp;
+
 	mutex_enter(&zilog->zl_lock);
 
 	/*
-	 * Ensure the lwb buffer pointer is cleared before releasing the
-	 * txg. If we have had an allocation failure and the txg is
+	 * If we have had an allocation failure and the txg is
 	 * waiting to sync then we want zil_sync() to remove the lwb so
 	 * that it's not picked up as the next new one in
 	 * zil_process_commit_list(). zil_sync() will only remove the
 	 * lwb if lwb_buf is null.
 	 */
 	lwb->lwb_buf = NULL;
-	lwb->lwb_tx = NULL;
 
-	ASSERT3U(lwb->lwb_issued_timestamp, >, 0);
-	zilog->zl_last_lwb_latency = gethrtime() - lwb->lwb_issued_timestamp;
+	zilog->zl_last_lwb_latency = (zilog->zl_last_lwb_latency * 7 + t) / 8;
 
 	lwb->lwb_root_zio = NULL;
-
-	ASSERT3S(lwb->lwb_state, ==, LWB_STATE_WRITE_DONE);
-	lwb->lwb_state = LWB_STATE_FLUSH_DONE;
 
 	if (zilog->zl_last_lwb_opened == lwb) {
 		/*
@@ -1166,19 +1169,37 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
 		zilog->zl_commit_lr_seq = zilog->zl_lr_seq;
 	}
 
-	while ((itx = list_head(&lwb->lwb_itxs)) != NULL) {
-		list_remove(&lwb->lwb_itxs, itx);
-		zil_itx_destroy(itx);
-	}
+	list_move_tail(&itxs, &lwb->lwb_itxs);
+	list_move_tail(&waiters, &lwb->lwb_waiters);
+	txg = lwb->lwb_issued_txg;
 
-	while ((zcw = list_head(&lwb->lwb_waiters)) != NULL) {
+	ASSERT3S(lwb->lwb_state, ==, LWB_STATE_WRITE_DONE);
+	lwb->lwb_state = LWB_STATE_FLUSH_DONE;
+
+	mutex_exit(&zilog->zl_lock);
+
+	while ((itx = list_remove_head(&itxs)) != NULL)
+		zil_itx_destroy(itx);
+	list_destroy(&itxs);
+
+	while ((zcw = list_remove_head(&waiters)) != NULL) {
 		mutex_enter(&zcw->zcw_lock);
 
-		ASSERT(list_link_active(&zcw->zcw_node));
-		list_remove(&lwb->lwb_waiters, zcw);
-
-		ASSERT3P(zcw->zcw_lwb, ==, lwb);
 		zcw->zcw_lwb = NULL;
+		/*
+		 * We expect any ZIO errors from child ZIOs to have been
+		 * propagated "up" to this specific LWB's root ZIO, in
+		 * order for this error handling to work correctly. This
+		 * includes ZIO errors from either this LWB's write or
+		 * flush, as well as any errors from other dependent LWBs
+		 * (e.g. a root LWB ZIO that might be a child of this LWB).
+		 *
+		 * With that said, it's important to note that LWB flush
+		 * errors are not propagated up to the LWB root ZIO.
+		 * This is incorrect behavior, and results in VDEV flush
+		 * errors not being handled correctly here. See the
+		 * comment above the call to "zio_flush" for details.
+		 */
 
 		zcw->zcw_zio_error = zio->io_error;
 
@@ -1188,15 +1209,48 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
 
 		mutex_exit(&zcw->zcw_lock);
 	}
+	list_destroy(&waiters);
 
+	mutex_enter(&zilog->zl_lwb_io_lock);
+	ASSERT3U(zilog->zl_lwb_inflight[txg & TXG_MASK], >, 0);
+	zilog->zl_lwb_inflight[txg & TXG_MASK]--;
+	if (zilog->zl_lwb_inflight[txg & TXG_MASK] == 0)
+		cv_broadcast(&zilog->zl_lwb_io_cv);
+	mutex_exit(&zilog->zl_lwb_io_lock);
+}
+
+/*
+ * Wait for the completion of all issued write/flush of that txg provided.
+ * It guarantees zil_lwb_flush_vdevs_done() is called and returned.
+ */
+static void
+zil_lwb_flush_wait_all(zilog_t *zilog, uint64_t txg)
+{
+	ASSERT3U(txg, ==, spa_syncing_txg(zilog->zl_spa));
+
+	mutex_enter(&zilog->zl_lwb_io_lock);
+	while (zilog->zl_lwb_inflight[txg & TXG_MASK] > 0)
+		cv_wait(&zilog->zl_lwb_io_cv, &zilog->zl_lwb_io_lock);
+	mutex_exit(&zilog->zl_lwb_io_lock);
+
+#ifdef ZFS_DEBUG
+	mutex_enter(&zilog->zl_lock);
+	mutex_enter(&zilog->zl_lwb_io_lock);
+	lwb_t *lwb = list_head(&zilog->zl_lwb_list);
+	while (lwb != NULL && lwb->lwb_max_txg <= txg) {
+		if (lwb->lwb_issued_txg <= txg) {
+			ASSERT(lwb->lwb_state != LWB_STATE_ISSUED);
+			ASSERT(lwb->lwb_state != LWB_STATE_WRITE_DONE);
+			IMPLY(lwb->lwb_issued_txg > 0,
+			    lwb->lwb_state == LWB_STATE_FLUSH_DONE);
+		}
+		IMPLY(lwb->lwb_state == LWB_STATE_FLUSH_DONE,
+		    lwb->lwb_buf == NULL);
+		lwb = list_next(&zilog->zl_lwb_list, lwb);
+	}
+	mutex_exit(&zilog->zl_lwb_io_lock);
 	mutex_exit(&zilog->zl_lock);
-
-	/*
-	 * Now that we've written this log block, we have a stable pointer
-	 * to the next block in the chain, so it's OK to let the txg in
-	 * which we allocated the next block sync.
-	 */
-	dmu_tx_commit(tx);
+#endif
 }
 
 /*
@@ -1252,6 +1306,12 @@ zil_lwb_write_done(zio_t *zio)
 	 * nodes. We avoid calling zio_flush() since there isn't any
 	 * good reason for doing so, after the lwb block failed to be
 	 * written out.
+	 *
+	 * Additionally, we don't perform any further error handling at
+	 * this point (e.g. setting "zcw_zio_error" appropriately), as
+	 * we expect that to occur in "zil_lwb_flush_vdevs_done" (thus,
+	 * we expect any error seen here, to have been propagated to
+	 * that function).
 	 */
 	if (zio->io_error != 0) {
 		while ((zv = avl_destroy_nodes(t, &cookie)) != NULL)
@@ -1274,7 +1334,7 @@ zil_lwb_write_done(zio_t *zio)
 	 * write and/or fsync activity, as it has the potential to
 	 * coalesce multiple flush commands to a vdev into one.
 	 */
-	if (list_head(&lwb->lwb_waiters) == NULL && nlwb != NULL) {
+	if (list_is_empty(&lwb->lwb_waiters) && nlwb != NULL) {
 		zil_lwb_flush_defer(lwb, nlwb);
 		ASSERT(avl_is_empty(&lwb->lwb_vdev_tree));
 		return;
@@ -1282,8 +1342,17 @@ zil_lwb_write_done(zio_t *zio)
 
 	while ((zv = avl_destroy_nodes(t, &cookie)) != NULL) {
 		vdev_t *vd = vdev_lookup_top(spa, zv->zv_vdev);
-		if (vd != NULL)
+		if (vd != NULL && !vd->vdev_nowritecache) {
+			/*
+			 * The "ZIO_FLAG_DONT_PROPAGATE" is currently
+			 * always used within "zio_flush". This means,
+			 * any errors when flushing the vdev(s), will
+			 * (unfortunately) not be handled correctly,
+			 * since these "zio_flush" errors will not be
+			 * propagated up to "zil_lwb_flush_vdevs_done".
+			 */
 			zio_flush(lwb->lwb_root_zio, vd);
+		}
 		kmem_free(zv, sizeof (*zv));
 	}
 }
@@ -1373,47 +1442,42 @@ zil_lwb_write_open(zilog_t *zilog, lwb_t *lwb)
 	EQUIV(lwb->lwb_root_zio == NULL, lwb->lwb_state == LWB_STATE_CLOSED);
 	EQUIV(lwb->lwb_root_zio != NULL, lwb->lwb_state == LWB_STATE_OPENED);
 
+	if (lwb->lwb_root_zio != NULL)
+		return;
+
+	lwb->lwb_root_zio = zio_root(zilog->zl_spa,
+	    zil_lwb_flush_vdevs_done, lwb, ZIO_FLAG_CANFAIL);
+
+	abd_t *lwb_abd = abd_get_from_buf(lwb->lwb_buf,
+	    BP_GET_LSIZE(&lwb->lwb_blk));
+
+	if (!lwb->lwb_slog || zilog->zl_cur_used <= zil_slog_bulk)
+		prio = ZIO_PRIORITY_SYNC_WRITE;
+	else
+		prio = ZIO_PRIORITY_ASYNC_WRITE;
+
 	SET_BOOKMARK(&zb, lwb->lwb_blk.blk_cksum.zc_word[ZIL_ZC_OBJSET],
 	    ZB_ZIL_OBJECT, ZB_ZIL_LEVEL,
 	    lwb->lwb_blk.blk_cksum.zc_word[ZIL_ZC_SEQ]);
 
 	/* Lock so zil_sync() doesn't fastwrite_unmark after zio is created */
 	mutex_enter(&zilog->zl_lock);
-	if (lwb->lwb_root_zio == NULL) {
-		abd_t *lwb_abd = abd_get_from_buf(lwb->lwb_buf,
-		    BP_GET_LSIZE(&lwb->lwb_blk));
-
-		if (!lwb->lwb_fastwrite) {
-			metaslab_fastwrite_mark(zilog->zl_spa, &lwb->lwb_blk);
-			lwb->lwb_fastwrite = 1;
-		}
-
-		if (!lwb->lwb_slog || zilog->zl_cur_used <= zil_slog_bulk)
-			prio = ZIO_PRIORITY_SYNC_WRITE;
-		else
-			prio = ZIO_PRIORITY_ASYNC_WRITE;
-
-		lwb->lwb_root_zio = zio_root(zilog->zl_spa,
-		    zil_lwb_flush_vdevs_done, lwb, ZIO_FLAG_CANFAIL);
-		ASSERT3P(lwb->lwb_root_zio, !=, NULL);
-
-		lwb->lwb_write_zio = zio_rewrite(lwb->lwb_root_zio,
-		    zilog->zl_spa, 0, &lwb->lwb_blk, lwb_abd,
-		    BP_GET_LSIZE(&lwb->lwb_blk), zil_lwb_write_done, lwb,
-		    prio, ZIO_FLAG_CANFAIL | ZIO_FLAG_DONT_PROPAGATE |
-		    ZIO_FLAG_FASTWRITE, &zb);
-		ASSERT3P(lwb->lwb_write_zio, !=, NULL);
-
-		lwb->lwb_state = LWB_STATE_OPENED;
-
-		zil_lwb_set_zio_dependency(zilog, lwb);
-		zilog->zl_last_lwb_opened = lwb;
+	if (!lwb->lwb_fastwrite) {
+		metaslab_fastwrite_mark(zilog->zl_spa, &lwb->lwb_blk);
+		lwb->lwb_fastwrite = 1;
 	}
-	mutex_exit(&zilog->zl_lock);
 
-	ASSERT3P(lwb->lwb_root_zio, !=, NULL);
-	ASSERT3P(lwb->lwb_write_zio, !=, NULL);
-	ASSERT3S(lwb->lwb_state, ==, LWB_STATE_OPENED);
+	lwb->lwb_write_zio = zio_rewrite(lwb->lwb_root_zio, zilog->zl_spa, 0,
+	    &lwb->lwb_blk, lwb_abd, BP_GET_LSIZE(&lwb->lwb_blk),
+	    zil_lwb_write_done, lwb, prio,
+	    ZIO_FLAG_CANFAIL | ZIO_FLAG_DONT_PROPAGATE | ZIO_FLAG_FASTWRITE,
+	    &zb);
+
+	lwb->lwb_state = LWB_STATE_OPENED;
+
+	zil_lwb_set_zio_dependency(zilog, lwb);
+	zilog->zl_last_lwb_opened = lwb;
+	mutex_exit(&zilog->zl_lock);
 }
 
 /*
@@ -1444,11 +1508,11 @@ struct {
 int zil_maxblocksize = SPA_OLD_MAXBLOCKSIZE;
 
 /*
- * Start a log block write and advance to the next log block.
- * Calls are serialized.
+ * Close the log block for being issued and allocate the next one.
+ * Has to be called under zl_issuer_lock to chain more lwbs.
  */
 static lwb_t *
-zil_lwb_write_issue(zilog_t *zilog, lwb_t *lwb)
+zil_lwb_write_close(zilog_t *zilog, lwb_t *lwb)
 {
 	lwb_t *nlwb = NULL;
 	zil_chain_t *zilc;
@@ -1456,7 +1520,7 @@ zil_lwb_write_issue(zilog_t *zilog, lwb_t *lwb)
 	blkptr_t *bp;
 	dmu_tx_t *tx;
 	uint64_t txg;
-	uint64_t zil_blksz, wsz;
+	uint64_t zil_blksz;
 	int i, error;
 	boolean_t slog;
 
@@ -1465,24 +1529,20 @@ zil_lwb_write_issue(zilog_t *zilog, lwb_t *lwb)
 	ASSERT3P(lwb->lwb_write_zio, !=, NULL);
 	ASSERT3S(lwb->lwb_state, ==, LWB_STATE_OPENED);
 
-	if (BP_GET_CHECKSUM(&lwb->lwb_blk) == ZIO_CHECKSUM_ZILOG2) {
-		zilc = (zil_chain_t *)lwb->lwb_buf;
-		bp = &zilc->zc_next_blk;
-	} else {
-		zilc = (zil_chain_t *)(lwb->lwb_buf + lwb->lwb_sz);
-		bp = &zilc->zc_next_blk;
+	/*
+	 * If this lwb includes indirect writes, we have to commit before
+	 * creating the transaction, otherwise we may end up in dead lock.
+	 */
+	if (lwb->lwb_indirect) {
+		for (itx_t *itx = list_head(&lwb->lwb_itxs); itx;
+		    itx = list_next(&lwb->lwb_itxs, itx))
+			zil_lwb_commit(zilog, lwb, itx);
+		lwb->lwb_nused = lwb->lwb_nfilled;
 	}
-
-	ASSERT(lwb->lwb_nused <= lwb->lwb_sz);
 
 	/*
 	 * Allocate the next block and save its address in this block
 	 * before writing it in order to establish the log chain.
-	 * Note that if the allocation of nlwb synced before we wrote
-	 * the block that points at it (lwb), we'd leak it if we crashed.
-	 * Therefore, we don't do dmu_tx_commit() until zil_lwb_write_done().
-	 * We dirty the dataset to ensure that zil_sync() will be called
-	 * to clean up in the event of allocation failure or I/O failure.
 	 */
 
 	tx = dmu_tx_create(zilog->zl_os);
@@ -1498,7 +1558,11 @@ zil_lwb_write_issue(zilog_t *zilog, lwb_t *lwb)
 	dsl_dataset_dirty(dmu_objset_ds(zilog->zl_os), tx);
 	txg = dmu_tx_get_txg(tx);
 
-	lwb->lwb_tx = tx;
+	mutex_enter(&zilog->zl_lwb_io_lock);
+	lwb->lwb_issued_txg = txg;
+	zilog->zl_lwb_inflight[txg & TXG_MASK]++;
+	zilog->zl_lwb_max_issued_txg = MAX(txg, zilog->zl_lwb_max_issued_txg);
+	mutex_exit(&zilog->zl_lwb_io_lock);
 
 	/*
 	 * Log blocks are pre-allocated. Here we select the size of the next
@@ -1525,15 +1589,13 @@ zil_lwb_write_issue(zilog_t *zilog, lwb_t *lwb)
 		zil_blksz = MAX(zil_blksz, zilog->zl_prev_blks[i]);
 	zilog->zl_prev_rotor = (zilog->zl_prev_rotor + 1) & (ZIL_PREV_BLKS - 1);
 
+	if (BP_GET_CHECKSUM(&lwb->lwb_blk) == ZIO_CHECKSUM_ZILOG2)
+		zilc = (zil_chain_t *)lwb->lwb_buf;
+	else
+		zilc = (zil_chain_t *)(lwb->lwb_buf + lwb->lwb_sz);
+	bp = &zilc->zc_next_blk;
 	BP_ZERO(bp);
 	error = zio_alloc_zil(spa, zilog->zl_os, txg, bp, zil_blksz, &slog);
-	if (slog) {
-		ZIL_STAT_BUMP(zil_itx_metaslab_slog_count);
-		ZIL_STAT_INCR(zil_itx_metaslab_slog_bytes, lwb->lwb_nused);
-	} else {
-		ZIL_STAT_BUMP(zil_itx_metaslab_normal_count);
-		ZIL_STAT_INCR(zil_itx_metaslab_normal_bytes, lwb->lwb_nused);
-	}
 	if (error == 0) {
 		ASSERT3U(bp->blk_birth, ==, txg);
 		bp->blk_cksum = lwb->lwb_blk.blk_cksum;
@@ -1545,16 +1607,46 @@ zil_lwb_write_issue(zilog_t *zilog, lwb_t *lwb)
 		nlwb = zil_alloc_lwb(zilog, bp, slog, txg, TRUE);
 	}
 
-	if (BP_GET_CHECKSUM(&lwb->lwb_blk) == ZIO_CHECKSUM_ZILOG2) {
-		/* For Slim ZIL only write what is used. */
-		wsz = P2ROUNDUP_TYPED(lwb->lwb_nused, ZIL_MIN_BLKSZ, uint64_t);
-		ASSERT3U(wsz, <=, lwb->lwb_sz);
-		zio_shrink(lwb->lwb_write_zio, wsz);
+	lwb->lwb_state = LWB_STATE_ISSUED;
 
-	} else {
-		wsz = lwb->lwb_sz;
+	dmu_tx_commit(tx);
+
+	/*
+	 * If there was an allocation failure then nlwb will be null which
+	 * forces a txg_wait_synced().
+	 */
+	return (nlwb);
+}
+
+/*
+ * Finalize previously closed block and issue the write zio.
+ * Does not require locking.
+ */
+static void
+zil_lwb_write_issue(zilog_t *zilog, lwb_t *lwb)
+{
+	zil_chain_t *zilc;
+	int wsz;
+
+	/* Actually fill the lwb with the data if not yet. */
+	if (!lwb->lwb_indirect) {
+		for (itx_t *itx = list_head(&lwb->lwb_itxs); itx;
+		    itx = list_next(&lwb->lwb_itxs, itx))
+			zil_lwb_commit(zilog, lwb, itx);
+		lwb->lwb_nused = lwb->lwb_nfilled;
 	}
 
+	if (BP_GET_CHECKSUM(&lwb->lwb_blk) == ZIO_CHECKSUM_ZILOG2) {
+		/* For Slim ZIL only write what is used. */
+		wsz = P2ROUNDUP_TYPED(lwb->lwb_nused, ZIL_MIN_BLKSZ, int);
+		ASSERT3S(wsz, <=, lwb->lwb_sz);
+		zio_shrink(lwb->lwb_write_zio, wsz);
+
+		zilc = (zil_chain_t *)lwb->lwb_buf;
+	} else {
+		wsz = lwb->lwb_sz;
+		zilc = (zil_chain_t *)(lwb->lwb_buf + lwb->lwb_sz);
+	}
 	zilc->zc_pad = 0;
 	zilc->zc_nused = lwb->lwb_nused;
 	zilc->zc_eck.zec_cksum = lwb->lwb_blk.blk_cksum;
@@ -1564,20 +1656,18 @@ zil_lwb_write_issue(zilog_t *zilog, lwb_t *lwb)
 	 */
 	bzero(lwb->lwb_buf + lwb->lwb_nused, wsz - lwb->lwb_nused);
 
+	if (lwb->lwb_slog) {
+		ZIL_STAT_BUMP(zil_itx_metaslab_slog_count);
+		ZIL_STAT_INCR(zil_itx_metaslab_slog_bytes, lwb->lwb_nused);
+	} else {
+		ZIL_STAT_BUMP(zil_itx_metaslab_normal_count);
+		ZIL_STAT_INCR(zil_itx_metaslab_normal_bytes, lwb->lwb_nused);
+	}
 	spa_config_enter(zilog->zl_spa, SCL_STATE, lwb, RW_READER);
-
 	zil_lwb_add_block(lwb, &lwb->lwb_blk);
 	lwb->lwb_issued_timestamp = gethrtime();
-	lwb->lwb_state = LWB_STATE_ISSUED;
-
 	zio_nowait(lwb->lwb_root_zio);
 	zio_nowait(lwb->lwb_write_zio);
-
-	/*
-	 * If there was an allocation failure then nlwb will be null which
-	 * forces a txg_wait_synced().
-	 */
-	return (nlwb);
 }
 
 /*
@@ -1614,13 +1704,19 @@ zil_max_copied_data(zilog_t *zilog)
 	    sizeof (lr_write_t));
 }
 
+/*
+ * Estimate space needed in the lwb for the itx.  Allocate more lwbs or
+ * split the itx as needed, but don't touch the actual transaction data.
+ * Has to be called under zl_issuer_lock to call zil_lwb_write_close()
+ * to chain more lwbs.
+ */
 static lwb_t *
-zil_lwb_commit(zilog_t *zilog, itx_t *itx, lwb_t *lwb)
+zil_lwb_assign(zilog_t *zilog, lwb_t *lwb, itx_t *itx, list_t *ilwbs)
 {
-	lr_t *lrcb, *lrc;
-	lr_write_t *lrwb, *lrw;
-	char *lr_buf;
-	uint64_t dlen, dnow, lwb_sp, reclen, txg, max_log_data;
+	itx_t *citx;
+	lr_t *lr, *clr;
+	lr_write_t *lrw;
+	uint64_t dlen, dnow, lwb_sp, reclen, max_log_data;
 
 	ASSERT(MUTEX_HELD(&zilog->zl_issuer_lock));
 	ASSERT3P(lwb, !=, NULL);
@@ -1628,8 +1724,8 @@ zil_lwb_commit(zilog_t *zilog, itx_t *itx, lwb_t *lwb)
 
 	zil_lwb_write_open(zilog, lwb);
 
-	lrc = &itx->itx_lr;
-	lrw = (lr_write_t *)lrc;
+	lr = &itx->itx_lr;
+	lrw = (lr_write_t *)lr;
 
 	/*
 	 * A commit itx doesn't represent any on-disk state; instead
@@ -1643,25 +1739,23 @@ zil_lwb_commit(zilog_t *zilog, itx_t *itx, lwb_t *lwb)
 	 *
 	 * For more details, see the comment above zil_commit().
 	 */
-	if (lrc->lrc_txtype == TX_COMMIT) {
+	if (lr->lrc_txtype == TX_COMMIT) {
 		mutex_enter(&zilog->zl_lock);
 		zil_commit_waiter_link_lwb(itx->itx_private, lwb);
 		itx->itx_private = NULL;
 		mutex_exit(&zilog->zl_lock);
+		list_insert_tail(&lwb->lwb_itxs, itx);
 		return (lwb);
 	}
 
-	if (lrc->lrc_txtype == TX_WRITE && itx->itx_wr_state == WR_NEED_COPY) {
+	if (lr->lrc_txtype == TX_WRITE && itx->itx_wr_state == WR_NEED_COPY) {
 		dlen = P2ROUNDUP_TYPED(
 		    lrw->lr_length, sizeof (uint64_t), uint64_t);
 	} else {
 		dlen = 0;
 	}
-	reclen = lrc->lrc_reclen;
+	reclen = lr->lrc_reclen;
 	zilog->zl_cur_used += (reclen + dlen);
-	txg = lrc->lrc_txg;
-
-	ASSERT3U(zilog->zl_cur_used, <, UINT64_MAX - (reclen + dlen));
 
 cont:
 	/*
@@ -1674,11 +1768,11 @@ cont:
 	    lwb_sp < zil_max_waste_space(zilog) &&
 	    (dlen % max_log_data == 0 ||
 	    lwb_sp < reclen + dlen % max_log_data))) {
-		lwb = zil_lwb_write_issue(zilog, lwb);
+		list_insert_tail(ilwbs, lwb);
+		lwb = zil_lwb_write_close(zilog, lwb);
 		if (lwb == NULL)
 			return (NULL);
 		zil_lwb_write_open(zilog, lwb);
-		ASSERT(LWB_EMPTY(lwb));
 		lwb_sp = lwb->lwb_sz - lwb->lwb_nused;
 
 		/*
@@ -1694,19 +1788,99 @@ cont:
 	}
 
 	dnow = MIN(dlen, lwb_sp - reclen);
-	lr_buf = lwb->lwb_buf + lwb->lwb_nused;
-	bcopy(lrc, lr_buf, reclen);
-	lrcb = (lr_t *)lr_buf;		/* Like lrc, but inside lwb. */
-	lrwb = (lr_write_t *)lrcb;	/* Like lrw, but inside lwb. */
+	if (dlen > dnow) {
+		ASSERT3U(lr->lrc_txtype, ==, TX_WRITE);
+		ASSERT3U(itx->itx_wr_state, ==, WR_NEED_COPY);
+		citx = zil_itx_clone(itx);
+		clr = &citx->itx_lr;
+		lr_write_t *clrw = (lr_write_t *)clr;
+		clrw->lr_length = dnow;
+		lrw->lr_offset += dnow;
+		lrw->lr_length -= dnow;
+	} else {
+		citx = itx;
+		clr = lr;
+	}
+
+	/*
+	 * We're actually making an entry, so update lrc_seq to be the
+	 * log record sequence number.  Note that this is generally not
+	 * equal to the itx sequence number because not all transactions
+	 * are synchronous, and sometimes spa_sync() gets there first.
+	 */
+	clr->lrc_seq = ++zilog->zl_lr_seq;
+
+	lwb->lwb_nused += reclen + dnow;
+	ASSERT3U(lwb->lwb_nused, <=, lwb->lwb_sz);
+	ASSERT0(P2PHASE(lwb->lwb_nused, sizeof (uint64_t)));
+
+	zil_lwb_add_txg(lwb, lr->lrc_txg);
+	list_insert_tail(&lwb->lwb_itxs, citx);
+
+	dlen -= dnow;
+	if (dlen > 0) {
+		zilog->zl_cur_used += reclen;
+		goto cont;
+	}
+
+	/*
+	 * We have to really issue all queued LWBs before we may have to
+	 * wait for a txg sync.  Otherwise we may end up in a dead lock.
+	 */
+	if (lr->lrc_txtype == TX_WRITE) {
+		boolean_t frozen = lr->lrc_txg > spa_freeze_txg(zilog->zl_spa);
+		if (frozen || itx->itx_wr_state == WR_INDIRECT) {
+			lwb_t *tlwb;
+			while ((tlwb = list_remove_head(ilwbs)) != NULL)
+				zil_lwb_write_issue(zilog, tlwb);
+		}
+		if (itx->itx_wr_state == WR_INDIRECT)
+			lwb->lwb_indirect = B_TRUE;
+		if (frozen)
+			txg_wait_synced(zilog->zl_dmu_pool, lr->lrc_txg);
+	}
+
+	return (lwb);
+}
+
+/*
+ * Fill the actual transaction data into the lwb, following zil_lwb_assign().
+ * Does not require locking.
+ */
+static void
+zil_lwb_commit(zilog_t *zilog, lwb_t *lwb, itx_t *itx)
+{
+	lr_t *lr, *lrb;
+	lr_write_t *lrw, *lrwb;
+	char *lr_buf;
+	uint64_t dlen, reclen;
+
+	lr = &itx->itx_lr;
+	lrw = (lr_write_t *)lr;
+
+	if (lr->lrc_txtype == TX_COMMIT)
+		return;
+
+	if (lr->lrc_txtype == TX_WRITE && itx->itx_wr_state == WR_NEED_COPY) {
+		dlen = P2ROUNDUP_TYPED(
+		    lrw->lr_length, sizeof (uint64_t), uint64_t);
+	} else {
+		dlen = 0;
+	}
+	reclen = lr->lrc_reclen;
+	ASSERT3U(reclen + dlen, <=, lwb->lwb_nused - lwb->lwb_nfilled);
+
+	lr_buf = lwb->lwb_buf + lwb->lwb_nfilled;
+	memcpy(lr_buf, lr, reclen);
+	lrb = (lr_t *)lr_buf;		/* Like lr, but inside lwb. */
+	lrwb = (lr_write_t *)lrb;	/* Like lrw, but inside lwb. */
 
 	ZIL_STAT_BUMP(zil_itx_count);
 
 	/*
 	 * If it's a write, fetch the data or get its blkptr as appropriate.
 	 */
-	if (lrc->lrc_txtype == TX_WRITE) {
-		if (txg > spa_freeze_txg(zilog->zl_spa))
-			txg_wait_synced(zilog->zl_dmu_pool, txg);
+	if (lr->lrc_txtype == TX_WRITE) {
 		if (itx->itx_wr_state == WR_COPIED) {
 			ZIL_STAT_BUMP(zil_itx_copied_count);
 			ZIL_STAT_INCR(zil_itx_copied_bytes, lrw->lr_length);
@@ -1716,13 +1890,9 @@ cont:
 
 			if (itx->itx_wr_state == WR_NEED_COPY) {
 				dbuf = lr_buf + reclen;
-				lrcb->lrc_reclen += dnow;
-				if (lrwb->lr_length > dnow)
-					lrwb->lr_length = dnow;
-				lrw->lr_offset += dnow;
-				lrw->lr_length -= dnow;
+				lrb->lrc_reclen += dlen;
 				ZIL_STAT_BUMP(zil_itx_needcopy_count);
-				ZIL_STAT_INCR(zil_itx_needcopy_bytes, dnow);
+				ZIL_STAT_INCR(zil_itx_needcopy_bytes, dlen);
 			} else {
 				ASSERT3S(itx->itx_wr_state, ==, WR_INDIRECT);
 				dbuf = NULL;
@@ -1749,60 +1919,89 @@ cont:
 			error = zilog->zl_get_data(itx->itx_private,
 			    itx->itx_gen, lrwb, dbuf, lwb,
 			    lwb->lwb_write_zio);
-
-			if (error == EIO) {
-				txg_wait_synced(zilog->zl_dmu_pool, txg);
-				return (lwb);
+			if (dbuf != NULL && error == 0) {
+				/* Zero any padding bytes in the last block. */
+				memset((char *)dbuf + lrwb->lr_length, 0,
+				    dlen - lrwb->lr_length);
 			}
-			if (error != 0) {
-				ASSERT(error == ENOENT || error == EEXIST ||
-				    error == EALREADY);
-				return (lwb);
+
+			/*
+			 * Typically, the only return values we should see from
+			 * ->zl_get_data() are 0, EIO, ENOENT, EEXIST or
+			 *  EALREADY. However, it is also possible to see other
+			 *  error values such as ENOSPC or EINVAL from
+			 *  dmu_read() -> dnode_hold() -> dnode_hold_impl() or
+			 *  ENXIO as well as a multitude of others from the
+			 *  block layer through dmu_buf_hold() -> dbuf_read()
+			 *  -> zio_wait(), as well as through dmu_read() ->
+			 *  dnode_hold() -> dnode_hold_impl() -> dbuf_read() ->
+			 *  zio_wait(). When these errors happen, we can assume
+			 *  that neither an immediate write nor an indirect
+			 *  write occurred, so we need to fall back to
+			 *  txg_wait_synced(). This is unusual, so we print to
+			 *  dmesg whenever one of these errors occurs.
+			 */
+			switch (error) {
+			case 0:
+				break;
+			default:
+				cmn_err(CE_WARN, "zil_lwb_commit() received "
+				    "unexpected error %d from ->zl_get_data()"
+				    ". Falling back to txg_wait_synced().",
+				    error);
+				zfs_fallthrough;
+			case EIO:
+				if (lwb->lwb_indirect) {
+					txg_wait_synced(zilog->zl_dmu_pool,
+					    lr->lrc_txg);
+				} else {
+					lwb->lwb_write_zio->io_error = error;
+				}
+				zfs_fallthrough;
+			case ENOENT:
+				zfs_fallthrough;
+			case EEXIST:
+				zfs_fallthrough;
+			case EALREADY:
+				return;
 			}
 		}
 	}
 
-	/*
-	 * We're actually making an entry, so update lrc_seq to be the
-	 * log record sequence number.  Note that this is generally not
-	 * equal to the itx sequence number because not all transactions
-	 * are synchronous, and sometimes spa_sync() gets there first.
-	 */
-	lrcb->lrc_seq = ++zilog->zl_lr_seq;
-	lwb->lwb_nused += reclen + dnow;
-
-	zil_lwb_add_txg(lwb, txg);
-
-	ASSERT3U(lwb->lwb_nused, <=, lwb->lwb_sz);
-	ASSERT0(P2PHASE(lwb->lwb_nused, sizeof (uint64_t)));
-
-	dlen -= dnow;
-	if (dlen > 0) {
-		zilog->zl_cur_used += reclen;
-		goto cont;
-	}
-
-	return (lwb);
+	lwb->lwb_nfilled += reclen + dlen;
+	ASSERT3S(lwb->lwb_nfilled, <=, lwb->lwb_nused);
+	ASSERT0(P2PHASE(lwb->lwb_nfilled, sizeof (uint64_t)));
 }
 
 itx_t *
-zil_itx_create(uint64_t txtype, size_t lrsize)
+zil_itx_create(uint64_t txtype, size_t olrsize)
 {
-	size_t itxsize;
+	size_t itxsize, lrsize;
 	itx_t *itx;
 
-	lrsize = P2ROUNDUP_TYPED(lrsize, sizeof (uint64_t), size_t);
+	lrsize = P2ROUNDUP_TYPED(olrsize, sizeof (uint64_t), size_t);
 	itxsize = offsetof(itx_t, itx_lr) + lrsize;
 
 	itx = zio_data_buf_alloc(itxsize);
 	itx->itx_lr.lrc_txtype = txtype;
 	itx->itx_lr.lrc_reclen = lrsize;
 	itx->itx_lr.lrc_seq = 0;	/* defensive */
+	bzero((char *)&itx->itx_lr + olrsize, lrsize - olrsize);
 	itx->itx_sync = B_TRUE;		/* default is synchronous */
 	itx->itx_callback = NULL;
 	itx->itx_callback_data = NULL;
 	itx->itx_size = itxsize;
 
+	return (itx);
+}
+
+static itx_t *
+zil_itx_clone(itx_t *oitx)
+{
+	itx_t *itx = zio_data_buf_alloc(oitx->itx_size);
+	memcpy(itx, oitx, oitx->itx_size);
+	itx->itx_callback = NULL;
+	itx->itx_callback_data = NULL;
 	return (itx);
 }
 
@@ -1833,11 +2032,11 @@ zil_itxg_clean(void *arg)
 	itx_async_node_t *ian;
 
 	list = &itxs->i_sync_list;
-	while ((itx = list_head(list)) != NULL) {
+	while ((itx = list_remove_head(list)) != NULL) {
 		/*
 		 * In the general case, commit itxs will not be found
 		 * here, as they'll be committed to an lwb via
-		 * zil_lwb_commit(), and free'd in that function. Having
+		 * zil_lwb_assign(), and free'd in that function. Having
 		 * said that, it is still possible for commit itxs to be
 		 * found here, due to the following race:
 		 *
@@ -1856,7 +2055,6 @@ zil_itxg_clean(void *arg)
 		if (itx->itx_lr.lrc_txtype == TX_COMMIT)
 			zil_commit_waiter_skip(itx->itx_private);
 
-		list_remove(list, itx);
 		zil_itx_destroy(itx);
 	}
 
@@ -1864,8 +2062,7 @@ zil_itxg_clean(void *arg)
 	t = &itxs->i_async_tree;
 	while ((ian = avl_destroy_nodes(t, &cookie)) != NULL) {
 		list = &ian->ia_list;
-		while ((itx = list_head(list)) != NULL) {
-			list_remove(list, itx);
+		while ((itx = list_remove_head(list)) != NULL) {
 			/* commit itxs should never be on the async lists. */
 			ASSERT3U(itx->itx_lr.lrc_txtype, !=, TX_COMMIT);
 			zil_itx_destroy(itx);
@@ -1926,8 +2123,7 @@ zil_remove_async(zilog_t *zilog, uint64_t oid)
 			list_move_tail(&clean_list, &ian->ia_list);
 		mutex_exit(&itxg->itxg_lock);
 	}
-	while ((itx = list_head(&clean_list)) != NULL) {
-		list_remove(&clean_list, itx);
+	while ((itx = list_remove_head(&clean_list)) != NULL) {
 		/* commit itxs should never be on the async lists. */
 		ASSERT3U(itx->itx_lr.lrc_txtype, !=, TX_COMMIT);
 		zil_itx_destroy(itx);
@@ -2058,10 +2254,10 @@ zil_clean(zilog_t *zilog, uint64_t synced_txg)
  * This function will traverse the queue of itxs that need to be
  * committed, and move them onto the ZIL's zl_itx_commit_list.
  */
-static void
+static uint64_t
 zil_get_commit_list(zilog_t *zilog)
 {
-	uint64_t otxg, txg;
+	uint64_t otxg, txg, wtxg = 0;
 	list_t *commit_list = &zilog->zl_itx_commit_list;
 
 	ASSERT(MUTEX_HELD(&zilog->zl_issuer_lock));
@@ -2095,10 +2291,22 @@ zil_get_commit_list(zilog_t *zilog)
 		 */
 		ASSERT(zilog_is_dirty_in_txg(zilog, txg) ||
 		    spa_freeze_txg(zilog->zl_spa) != UINT64_MAX);
-		list_move_tail(commit_list, &itxg->itxg_itxs->i_sync_list);
+		list_t *sync_list = &itxg->itxg_itxs->i_sync_list;
+		if (unlikely(zilog->zl_suspend > 0)) {
+			/*
+			 * ZIL was just suspended, but we lost the race.
+			 * Allow all earlier itxs to be committed, but ask
+			 * caller to do txg_wait_synced(txg) for any new.
+			 */
+			if (!list_is_empty(sync_list))
+				wtxg = MAX(wtxg, txg);
+		} else {
+			list_move_tail(commit_list, sync_list);
+		}
 
 		mutex_exit(&itxg->itxg_lock);
 	}
+	return (wtxg);
 }
 
 /*
@@ -2229,7 +2437,7 @@ zil_commit_writer_stall(zilog_t *zilog)
 	 */
 	ASSERT(MUTEX_HELD(&zilog->zl_issuer_lock));
 	txg_wait_synced(zilog->zl_dmu_pool, 0);
-	ASSERT3P(list_tail(&zilog->zl_lwb_list), ==, NULL);
+	ASSERT(list_is_empty(&zilog->zl_lwb_list));
 }
 
 /*
@@ -2239,13 +2447,14 @@ zil_commit_writer_stall(zilog_t *zilog)
  * lwb will be issued to the zio layer to be written to disk.
  */
 static void
-zil_process_commit_list(zilog_t *zilog)
+zil_process_commit_list(zilog_t *zilog, zil_commit_waiter_t *zcw, list_t *ilwbs)
 {
 	spa_t *spa = zilog->zl_spa;
 	list_t nolwb_itxs;
 	list_t nolwb_waiters;
-	lwb_t *lwb;
+	lwb_t *lwb, *plwb;
 	itx_t *itx;
+	boolean_t first = B_TRUE;
 
 	ASSERT(MUTEX_HELD(&zilog->zl_issuer_lock));
 
@@ -2253,7 +2462,7 @@ zil_process_commit_list(zilog_t *zilog)
 	 * Return if there's nothing to commit before we dirty the fs by
 	 * calling zil_create().
 	 */
-	if (list_head(&zilog->zl_itx_commit_list) == NULL)
+	if (list_is_empty(&zilog->zl_itx_commit_list))
 		return;
 
 	list_create(&nolwb_itxs, sizeof (itx_t), offsetof(itx_t, itx_node));
@@ -2267,9 +2476,12 @@ zil_process_commit_list(zilog_t *zilog)
 		ASSERT3S(lwb->lwb_state, !=, LWB_STATE_ISSUED);
 		ASSERT3S(lwb->lwb_state, !=, LWB_STATE_WRITE_DONE);
 		ASSERT3S(lwb->lwb_state, !=, LWB_STATE_FLUSH_DONE);
+		first = (lwb->lwb_state != LWB_STATE_OPENED) &&
+		    ((plwb = list_prev(&zilog->zl_lwb_list, lwb)) == NULL ||
+		    plwb->lwb_state == LWB_STATE_FLUSH_DONE);
 	}
 
-	while ((itx = list_head(&zilog->zl_itx_commit_list)) != NULL) {
+	while ((itx = list_remove_head(&zilog->zl_itx_commit_list)) != NULL) {
 		lr_t *lrc = &itx->itx_lr;
 		uint64_t txg = lrc->lrc_txg;
 
@@ -2282,8 +2494,6 @@ zil_process_commit_list(zilog_t *zilog)
 			DTRACE_PROBE2(zil__process__normal__itx,
 			    zilog_t *, zilog, itx_t *, itx);
 		}
-
-		list_remove(&zilog->zl_itx_commit_list, itx);
 
 		boolean_t synced = txg <= spa_last_synced_txg(spa);
 		boolean_t frozen = txg > spa_freeze_txg(spa);
@@ -2334,18 +2544,23 @@ zil_process_commit_list(zilog_t *zilog)
 		 */
 		if (frozen || !synced || lrc->lrc_txtype == TX_COMMIT) {
 			if (lwb != NULL) {
-				lwb = zil_lwb_commit(zilog, itx, lwb);
-
-				if (lwb == NULL)
+				lwb = zil_lwb_assign(zilog, lwb, itx, ilwbs);
+				if (lwb == NULL) {
 					list_insert_tail(&nolwb_itxs, itx);
-				else
-					list_insert_tail(&lwb->lwb_itxs, itx);
+				} else if ((zcw->zcw_lwb != NULL &&
+				    zcw->zcw_lwb != lwb) || zcw->zcw_done) {
+					/*
+					 * Our lwb is done, leave the rest of
+					 * itx list to somebody else who care.
+					 */
+					first = B_FALSE;
+					break;
+				}
 			} else {
 				if (lrc->lrc_txtype == TX_COMMIT) {
 					zil_commit_waiter_link_nolwb(
 					    itx->itx_private, &nolwb_waiters);
 				}
-
 				list_insert_tail(&nolwb_itxs, itx);
 			}
 		} else {
@@ -2361,6 +2576,8 @@ zil_process_commit_list(zilog_t *zilog)
 		 * the ZIL write pipeline; see the comment within
 		 * zil_commit_writer_stall() for more details.
 		 */
+		while ((lwb = list_remove_head(ilwbs)) != NULL)
+			zil_lwb_write_issue(zilog, lwb);
 		zil_commit_writer_stall(zilog);
 
 		/*
@@ -2370,20 +2587,16 @@ zil_process_commit_list(zilog_t *zilog)
 		 * normal.
 		 */
 		zil_commit_waiter_t *zcw;
-		while ((zcw = list_head(&nolwb_waiters)) != NULL) {
+		while ((zcw = list_remove_head(&nolwb_waiters)) != NULL)
 			zil_commit_waiter_skip(zcw);
-			list_remove(&nolwb_waiters, zcw);
-		}
 
 		/*
 		 * And finally, we have to destroy the itx's that
 		 * couldn't be committed to an lwb; this will also call
 		 * the itx's callback if one exists for the itx.
 		 */
-		while ((itx = list_head(&nolwb_itxs)) != NULL) {
-			list_remove(&nolwb_itxs, itx);
+		while ((itx = list_remove_head(&nolwb_itxs)) != NULL)
 			zil_itx_destroy(itx);
-		}
 	} else {
 		ASSERT(list_is_empty(&nolwb_waiters));
 		ASSERT3P(lwb, !=, NULL);
@@ -2410,13 +2623,13 @@ zil_process_commit_list(zilog_t *zilog)
 		 * on the system, such that this function will be
 		 * immediately called again (not necessarily by the same
 		 * thread) and this lwb's zio will be issued via
-		 * zil_lwb_commit(). This way, the lwb is guaranteed to
+		 * zil_lwb_assign(). This way, the lwb is guaranteed to
 		 * be "full" when it is issued to disk, and we'll make
 		 * use of the lwb's size the best we can.
 		 *
 		 * 2. If there isn't sufficient ZIL activity occurring on
 		 * the system, such that this lwb's zio isn't issued via
-		 * zil_lwb_commit(), zil_commit_waiter() will issue the
+		 * zil_lwb_assign(), zil_commit_waiter() will issue the
 		 * lwb's zio. If this occurs, the lwb is not guaranteed
 		 * to be "full" by the time its zio is issued, and means
 		 * the size of the lwb was "too large" given the amount
@@ -2437,7 +2650,28 @@ zil_process_commit_list(zilog_t *zilog)
 		 * try and pack as many itxs into as few lwbs as
 		 * possible, without significantly impacting the latency
 		 * of each individual itx.
+		 *
+		 * If we had no already running or open LWBs, it can be
+		 * the workload is single-threaded.  And if the ZIL write
+		 * latency is very small or if the LWB is almost full, it
+		 * may be cheaper to bypass the delay.
 		 */
+		if (lwb->lwb_state == LWB_STATE_OPENED && first) {
+			hrtime_t sleep = zilog->zl_last_lwb_latency *
+			    zfs_commit_timeout_pct / 100;
+			if (sleep < zil_min_commit_timeout ||
+			    lwb->lwb_sz - lwb->lwb_nused < lwb->lwb_sz / 8) {
+				list_insert_tail(ilwbs, lwb);
+				lwb = zil_lwb_write_close(zilog, lwb);
+				zilog->zl_cur_used = 0;
+				if (lwb == NULL) {
+					while ((lwb = list_remove_head(ilwbs))
+					    != NULL)
+						zil_lwb_write_issue(zilog, lwb);
+					zil_commit_writer_stall(zilog);
+				}
+			}
+		}
 	}
 }
 
@@ -2455,12 +2689,17 @@ zil_process_commit_list(zilog_t *zilog)
  * not issued, we rely on future calls to zil_commit_writer() to issue
  * the lwb, or the timeout mechanism found in zil_commit_waiter().
  */
-static void
+static uint64_t
 zil_commit_writer(zilog_t *zilog, zil_commit_waiter_t *zcw)
 {
+	list_t ilwbs;
+	lwb_t *lwb;
+	uint64_t wtxg = 0;
+
 	ASSERT(!MUTEX_HELD(&zilog->zl_lock));
 	ASSERT(spa_writeable(zilog->zl_spa));
 
+	list_create(&ilwbs, sizeof (lwb_t), offsetof(lwb_t, lwb_issue_node));
 	mutex_enter(&zilog->zl_issuer_lock);
 
 	if (zcw->zcw_lwb != NULL || zcw->zcw_done) {
@@ -2485,12 +2724,16 @@ zil_commit_writer(zilog_t *zilog, zil_commit_waiter_t *zcw)
 
 	ZIL_STAT_BUMP(zil_commit_writer_count);
 
-	zil_get_commit_list(zilog);
+	wtxg = zil_get_commit_list(zilog);
 	zil_prune_commit_list(zilog);
-	zil_process_commit_list(zilog);
+	zil_process_commit_list(zilog, zcw, &ilwbs);
 
 out:
 	mutex_exit(&zilog->zl_issuer_lock);
+	while ((lwb = list_remove_head(&ilwbs)) != NULL)
+		zil_lwb_write_issue(zilog, lwb);
+	list_destroy(&ilwbs);
+	return (wtxg);
 }
 
 static void
@@ -2517,7 +2760,7 @@ zil_commit_waiter_timeout(zilog_t *zilog, zil_commit_waiter_t *zcw)
 		return;
 
 	/*
-	 * In order to call zil_lwb_write_issue() we must hold the
+	 * In order to call zil_lwb_write_close() we must hold the
 	 * zilog's "zl_issuer_lock". We can't simply acquire that lock,
 	 * since we're already holding the commit waiter's "zcw_lock",
 	 * and those two locks are acquired in the opposite order
@@ -2535,8 +2778,10 @@ zil_commit_waiter_timeout(zilog_t *zilog, zil_commit_waiter_t *zcw)
 	 * the waiter is marked "done"), so without this check we could
 	 * wind up with a use-after-free error below.
 	 */
-	if (zcw->zcw_done)
+	if (zcw->zcw_done) {
+		lwb = NULL;
 		goto out;
+	}
 
 	ASSERT3P(lwb, ==, zcw->zcw_lwb);
 
@@ -2555,15 +2800,17 @@ zil_commit_waiter_timeout(zilog_t *zilog, zil_commit_waiter_t *zcw)
 	 * if it's ISSUED or OPENED, and block any other threads that might
 	 * attempt to issue this lwb. For that reason we hold the
 	 * zl_issuer_lock when checking the lwb_state; we must not call
-	 * zil_lwb_write_issue() if the lwb had already been issued.
+	 * zil_lwb_write_close() if the lwb had already been issued.
 	 *
 	 * See the comment above the lwb_state_t structure definition for
 	 * more details on the lwb states, and locking requirements.
 	 */
 	if (lwb->lwb_state == LWB_STATE_ISSUED ||
 	    lwb->lwb_state == LWB_STATE_WRITE_DONE ||
-	    lwb->lwb_state == LWB_STATE_FLUSH_DONE)
+	    lwb->lwb_state == LWB_STATE_FLUSH_DONE) {
+		lwb = NULL;
 		goto out;
+	}
 
 	ASSERT3S(lwb->lwb_state, ==, LWB_STATE_OPENED);
 
@@ -2573,9 +2820,9 @@ zil_commit_waiter_timeout(zilog_t *zilog, zil_commit_waiter_t *zcw)
 	 * since we've reached the commit waiter's timeout and it still
 	 * hasn't been issued.
 	 */
-	lwb_t *nlwb = zil_lwb_write_issue(zilog, lwb);
+	lwb_t *nlwb = zil_lwb_write_close(zilog, lwb);
 
-	IMPLY(nlwb != NULL, lwb->lwb_state != LWB_STATE_OPENED);
+	ASSERT3S(lwb->lwb_state, !=, LWB_STATE_OPENED);
 
 	/*
 	 * Since the lwb's zio hadn't been issued by the time this thread
@@ -2593,7 +2840,7 @@ zil_commit_waiter_timeout(zilog_t *zilog, zil_commit_waiter_t *zcw)
 
 	if (nlwb == NULL) {
 		/*
-		 * When zil_lwb_write_issue() returns NULL, this
+		 * When zil_lwb_write_close() returns NULL, this
 		 * indicates zio_alloc_zil() failed to allocate the
 		 * "next" lwb on-disk. When this occurs, the ZIL write
 		 * pipeline must be stalled; see the comment within the
@@ -2615,12 +2862,16 @@ zil_commit_waiter_timeout(zilog_t *zilog, zil_commit_waiter_t *zcw)
 		 *   lock, which occurs prior to calling dmu_tx_commit()
 		 */
 		mutex_exit(&zcw->zcw_lock);
+		zil_lwb_write_issue(zilog, lwb);
+		lwb = NULL;
 		zil_commit_writer_stall(zilog);
 		mutex_enter(&zcw->zcw_lock);
 	}
 
 out:
 	mutex_exit(&zilog->zl_issuer_lock);
+	if (lwb)
+		zil_lwb_write_issue(zilog, lwb);
 	ASSERT(MUTEX_HELD(&zcw->zcw_lock));
 }
 
@@ -2635,7 +2886,7 @@ out:
  *    waited "long enough" and the lwb is still in the "open" state.
  *
  * Given a sufficient amount of itxs being generated and written using
- * the ZIL, the lwb's zio will be issued via the zil_lwb_commit()
+ * the ZIL, the lwb's zio will be issued via the zil_lwb_assign()
  * function. If this does not occur, this secondary responsibility will
  * ensure the lwb is issued even if there is not other synchronous
  * activity on the system.
@@ -2943,21 +3194,6 @@ zil_commit(zilog_t *zilog, uint64_t foid)
 	}
 
 	/*
-	 * The ->zl_suspend_lock rwlock ensures that all in-flight
-	 * zil_commit() operations finish before suspension begins and that
-	 * no more begin. Without it, it is possible for the scheduler to
-	 * preempt us right after the zilog->zl_suspend suspend check, run
-	 * another thread that runs zil_suspend() and after the other thread
-	 * has finished its call to zil_commit_impl(), resume this thread while
-	 * zil is suspended. This can trigger an assertion failure in
-	 * VERIFY(list_is_empty(&lwb->lwb_itxs)). If it is held, it means that
-	 * `zil_suspend()` is executing in another thread, so we go to
-	 * txg_wait_synced().
-	 */
-	if (!rw_tryenter(&zilog->zl_suspend_lock, RW_READER))
-		goto wait;
-
-	/*
 	 * If the ZIL is suspended, we don't want to dirty it by calling
 	 * zil_commit_itx_assign() below, nor can we write out
 	 * lwbs like would be done in zil_commit_write(). Thus, we
@@ -2965,14 +3201,11 @@ zil_commit(zilog_t *zilog, uint64_t foid)
 	 * semantics, and avoid calling those functions altogether.
 	 */
 	if (zilog->zl_suspend > 0) {
-		rw_exit(&zilog->zl_suspend_lock);
-wait:
 		txg_wait_synced(zilog->zl_dmu_pool, 0);
 		return;
 	}
 
 	zil_commit_impl(zilog, foid);
-	rw_exit(&zilog->zl_suspend_lock);
 }
 
 void
@@ -3009,7 +3242,7 @@ zil_commit_impl(zilog_t *zilog, uint64_t foid)
 	zil_commit_waiter_t *zcw = zil_alloc_commit_waiter();
 	zil_commit_itx_assign(zilog, zcw);
 
-	zil_commit_writer(zilog, zcw);
+	uint64_t wtxg = zil_commit_writer(zilog, zcw);
 	zil_commit_waiter(zilog, zcw);
 
 	if (zcw->zcw_zio_error != 0) {
@@ -3024,6 +3257,8 @@ zil_commit_impl(zilog_t *zilog, uint64_t foid)
 		DTRACE_PROBE2(zil__commit__io__error,
 		    zilog_t *, zilog, zil_commit_waiter_t *, zcw);
 		txg_wait_synced(zilog->zl_dmu_pool, 0);
+	} else if (wtxg != 0) {
+		txg_wait_synced(zilog->zl_dmu_pool, wtxg);
 	}
 
 	zil_free_commit_waiter(zcw);
@@ -3048,6 +3283,8 @@ zil_sync(zilog_t *zilog, dmu_tx_t *tx)
 	if (spa_sync_pass(spa) != 1)
 		return;
 
+	zil_lwb_flush_wait_all(zilog, txg);
+
 	mutex_enter(&zilog->zl_lock);
 
 	ASSERT(zilog->zl_stop_sync == 0);
@@ -3061,7 +3298,7 @@ zil_sync(zilog_t *zilog, dmu_tx_t *tx)
 	if (zilog->zl_destroy_txg == txg) {
 		blkptr_t blk = zh->zh_log;
 
-		ASSERT(list_head(&zilog->zl_lwb_list) == NULL);
+		ASSERT(list_is_empty(&zilog->zl_lwb_list));
 
 		bzero(zh, sizeof (zil_header_t));
 		bzero(zilog->zl_replayed_seq, sizeof (zilog->zl_replayed_seq));
@@ -3094,7 +3331,7 @@ zil_sync(zilog_t *zilog, dmu_tx_t *tx)
 		 * out the zil_header blkptr so that we don't end
 		 * up freeing the same block twice.
 		 */
-		if (list_head(&zilog->zl_lwb_list) == NULL)
+		if (list_is_empty(&zilog->zl_lwb_list))
 			BP_ZERO(&zh->zh_log);
 	}
 
@@ -3202,6 +3439,7 @@ zil_alloc(objset_t *os, zil_header_t *zh_phys)
 
 	mutex_init(&zilog->zl_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&zilog->zl_issuer_lock, NULL, MUTEX_DEFAULT, NULL);
+	mutex_init(&zilog->zl_lwb_io_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	for (int i = 0; i < TXG_SIZE; i++) {
 		mutex_init(&zilog->zl_itxg[i].itxg_lock, NULL,
@@ -3215,8 +3453,7 @@ zil_alloc(objset_t *os, zil_header_t *zh_phys)
 	    offsetof(itx_t, itx_node));
 
 	cv_init(&zilog->zl_cv_suspend, NULL, CV_DEFAULT, NULL);
-
-	rw_init(&zilog->zl_suspend_lock, NULL, RW_DEFAULT, NULL);
+	cv_init(&zilog->zl_lwb_io_cv, NULL, CV_DEFAULT, NULL);
 
 	return (zilog);
 }
@@ -3252,10 +3489,10 @@ zil_free(zilog_t *zilog)
 
 	mutex_destroy(&zilog->zl_issuer_lock);
 	mutex_destroy(&zilog->zl_lock);
+	mutex_destroy(&zilog->zl_lwb_io_lock);
 
 	cv_destroy(&zilog->zl_cv_suspend);
-
-	rw_destroy(&zilog->zl_suspend_lock);
+	cv_destroy(&zilog->zl_lwb_io_cv);
 
 	kmem_free(zilog, sizeof (zilog_t));
 }
@@ -3289,7 +3526,7 @@ zil_close(zilog_t *zilog)
 	if (!dmu_objset_is_snapshot(zilog->zl_os)) {
 		zil_commit(zilog, 0);
 	} else {
-		ASSERT3P(list_tail(&zilog->zl_lwb_list), ==, NULL);
+		ASSERT(list_is_empty(&zilog->zl_lwb_list));
 		ASSERT0(zilog->zl_dirty_max_txg);
 		ASSERT3B(zilog_is_dirty(zilog), ==, B_FALSE);
 	}
@@ -3303,9 +3540,18 @@ zil_close(zilog_t *zilog)
 	mutex_exit(&zilog->zl_lock);
 
 	/*
-	 * We need to use txg_wait_synced() to wait long enough for the
-	 * ZIL to be clean, and to wait for all pending lwbs to be
-	 * written out.
+	 * zl_lwb_max_issued_txg may be larger than lwb_max_txg. It depends
+	 * on the time when the dmu_tx transaction is assigned in
+	 * zil_lwb_write_close().
+	 */
+	mutex_enter(&zilog->zl_lwb_io_lock);
+	txg = MAX(zilog->zl_lwb_max_issued_txg, txg);
+	mutex_exit(&zilog->zl_lwb_io_lock);
+
+	/*
+	 * We need to use txg_wait_synced() to wait until that txg is synced.
+	 * zil_sync() will guarantee all lwbs up to that txg have been
+	 * written out, flushed, and cleaned.
 	 */
 	if (txg != 0)
 		txg_wait_synced(zilog->zl_dmu_pool, txg);
@@ -3322,15 +3568,14 @@ zil_close(zilog_t *zilog)
 	 * We should have only one lwb left on the list; remove it now.
 	 */
 	mutex_enter(&zilog->zl_lock);
-	lwb = list_head(&zilog->zl_lwb_list);
+	lwb = list_remove_head(&zilog->zl_lwb_list);
 	if (lwb != NULL) {
-		ASSERT3P(lwb, ==, list_tail(&zilog->zl_lwb_list));
+		ASSERT(list_is_empty(&zilog->zl_lwb_list));
 		ASSERT3S(lwb->lwb_state, !=, LWB_STATE_ISSUED);
 
 		if (lwb->lwb_fastwrite)
 			metaslab_fastwrite_unmark(zilog->zl_spa, &lwb->lwb_blk);
 
-		list_remove(&zilog->zl_lwb_list, lwb);
 		zio_buf_free(lwb->lwb_buf, lwb->lwb_sz);
 		zil_free_lwb(zilog, lwb);
 	}
@@ -3377,14 +3622,13 @@ zil_suspend(const char *osname, void **cookiep)
 	}
 	zilog = dmu_objset_zil(os);
 
-	rw_enter(&zilog->zl_suspend_lock, RW_WRITER);
-
+	mutex_enter(&zilog->zl_issuer_lock);
 	mutex_enter(&zilog->zl_lock);
 	zh = zilog->zl_header;
 
 	if (zh->zh_flags & ZIL_REPLAY_NEEDED) {		/* unplayed log */
 		mutex_exit(&zilog->zl_lock);
-		rw_exit(&zilog->zl_suspend_lock);
+		mutex_exit(&zilog->zl_issuer_lock);
 		dmu_objset_rele(os, suspend_tag);
 		return (SET_ERROR(EBUSY));
 	}
@@ -3398,7 +3642,7 @@ zil_suspend(const char *osname, void **cookiep)
 	if (cookiep == NULL && !zilog->zl_suspending &&
 	    (zilog->zl_suspend > 0 || BP_IS_HOLE(&zh->zh_log))) {
 		mutex_exit(&zilog->zl_lock);
-		rw_exit(&zilog->zl_suspend_lock);
+		mutex_exit(&zilog->zl_issuer_lock);
 		dmu_objset_rele(os, suspend_tag);
 		TraceEvent(8, "%s:%d: Returning 0\n", __func__, __LINE__);
 		return (0);
@@ -3408,7 +3652,7 @@ zil_suspend(const char *osname, void **cookiep)
 	dsl_pool_rele(dmu_objset_pool(os), suspend_tag);
 
 	zilog->zl_suspend++;
-	rw_exit(&zilog->zl_suspend_lock);
+	mutex_exit(&zilog->zl_issuer_lock);
 
 	if (zilog->zl_suspend > 1) {
 		/*
@@ -3722,6 +3966,9 @@ EXPORT_SYMBOL(zil_set_logbias);
 /* BEGIN CSTYLED */
 ZFS_MODULE_PARAM(zfs, zfs_, commit_timeout_pct, INT, ZMOD_RW,
 	"ZIL block open timeout percentage");
+
+ZFS_MODULE_PARAM(zfs_zil, zil_, min_commit_timeout, U64, ZMOD_RW,
+	"Minimum delay we care for ZIL block commit");
 
 ZFS_MODULE_PARAM(zfs_zil, zil_, replay_disable, INT, ZMOD_RW,
 	"Disable intent logging replay");
