@@ -27,6 +27,10 @@
 #ifndef _SPL_TYPES_H
 #define	_SPL_TYPES_H
 
+#if !defined(zfs_fallthrough)
+#define	zfs_fallthrough		((void)0)
+#endif
+
 // use ntintsafe.h ?
 typedef enum { B_FALSE = 0, B_TRUE = 1 }	boolean_t;
 typedef short				pri_t;
